@@ -83,10 +83,10 @@
     },
     ".env.example": {
       "status": "intended",
-      "reason": "26.2 adds APEX_WORKSPACE_USERNAME; 26.1 keeps INSTALL_UC_APX / UC_APX_SKILLS_AGENT. Follow-up 2026-11-20: both examples describe the DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER shorthand. Follow-up 2026-11-21 (table triggers and sequences): both examples describe what the tables and code mirror profiles take and the DEV read fallback.",
+      "reason": "26.2 adds APEX_WORKSPACE_USERNAME; 26.1 keeps INSTALL_UC_APX / UC_APX_SKILLS_AGENT. Follow-up 2026-11-20: both examples describe the DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER shorthand. Follow-up 2026-11-21 (table triggers and sequences): both examples describe what the tables and code mirror profiles take and the DEV read fallback. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "ff63e2bf47bed65bb1b7f2e10375937005eab508",
-        "022de7beb394de7d4cdaaf51fef8ef6d7c105816"
+        "5df237551ec7934cf8dc965e555cb7d212b00f33",
+        "ba23a6f611974a1dedbd61fba72160c883bc435a"
       ]
     },
     ".github/workflows/template-checks.yml": {
@@ -107,10 +107,10 @@
     },
     "AGENTS.md": {
       "status": "intended",
-      "reason": "26.2 documents its SQLcl floor, native locks, partial publish, runtime verification, Oracle skills refresh, pinned Graphify and feature-first database workflow. Follow-up 2026-11-20 (Windows E2E): both lines let an agent pass --confirm-target for a DEV, staging or disposable target with the db_unique_name it read itself in that run; production still needs the developer-typed name.",
+      "reason": "26.2 documents its SQLcl floor, native locks, partial publish, runtime verification, Oracle skills refresh, pinned Graphify and feature-first database workflow. Follow-up 2026-11-20 (Windows E2E): both lines let an agent pass --confirm-target for a DEV, staging or disposable target with the db_unique_name it read itself in that run; production still needs the developer-typed name. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "ed86d1093ba68904281b1fe99077ce7e65dace27",
-        "953946296f9850c2f7157c3c8bfab0a76a7964cc"
+        "c308b9a1f7ed5f3aa8ac86a9e2de5ba0f76b488f",
+        "6a50223cb20e80aba9e81117475fd193a7a33da1"
       ]
     },
     "AGENTS.project.md": {
@@ -123,10 +123,10 @@
     },
     "README.md": {
       "status": "intended",
-      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor. Follow-up 2026-11-20 (live and Windows checks): both READMEs list the live-verification and Windows-verification pages. Follow-up 2026-11-20 (Windows fixes): both READMEs add the Windows PowerShell 5.1 arguments note. Follow-up 2026-11-20 (Windows E2E): both have the Windows PowerShell 5.1 argument bullet; 26.1 states that publish accepts APEX 26.1 and 26.2 only. Follow-up 2026-11-20 (outside review): both describe the PowerShell 7.3+ refusal for .cmd/.bat programs (Windows or Legacy argument-passing mode). Follow-up 2026-11-21 (table triggers and sequences): both READMEs list the mirror contents and carry the table-triggers-and-sequences upgrade note.",
+      "reason": "Each template documents its own APEX release commands and publication checks. Both guides describe guarded DEV feature apply. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20: both READMEs state the 23ai-and-newer support floor. Follow-up 2026-11-20 (live and Windows checks): both READMEs list the live-verification and Windows-verification pages. Follow-up 2026-11-20 (Windows fixes): both READMEs add the Windows PowerShell 5.1 arguments note. Follow-up 2026-11-20 (Windows E2E): both have the Windows PowerShell 5.1 argument bullet; 26.1 states that publish accepts APEX 26.1 and 26.2 only. Follow-up 2026-11-20 (outside review): both describe the PowerShell 7.3+ refusal for .cmd/.bat programs (Windows or Legacy argument-passing mode). Follow-up 2026-11-21 (table triggers and sequences): both READMEs list the mirror contents and carry the table-triggers-and-sequences upgrade note. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "8cc535e87a929cb2d56bf6c5a3216ae459fc4acd",
-        "8829f0915c0dd86cd1cc814440d7ff5f5bcc1e3b"
+        "d33f912fe853e2da77ccd4a258d9d4b618a11c37",
+        "e0f90e50508b8aeb6816ce81ba53d5d985053898"
       ]
     },
     "TODO.md": {
@@ -235,10 +235,10 @@
     },
     "docs/feature-releases.md": {
       "status": "intended",
-      "reason": "The 26.2 guide describes feature-first selection and how to order dependent migrations. Its dry run resolves target profiles before opening any session, while the 26.1 dry run stays local to capsule and manifest validation. Both guides document reviewed target-bound DEV baseline adoption.",
+      "reason": "The 26.2 guide describes feature-first selection and how to order dependent migrations. Its dry run resolves target profiles before opening any session, while the 26.1 dry run stays local to capsule and manifest validation. Both guides document reviewed target-bound DEV baseline adoption. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "c5efc8bd6d5097de081121d73c22d7940b08a0d2",
-        "e533d6318ac2674255cd7d778fc4ad8e4cef5cb2"
+        "d000c04273e71a958c4697c92641a72836981243",
+        "a80c0e08f798f944de56679b25884aa0945b4eca"
       ]
     },
     "docs/known-limitations.md": {
@@ -555,18 +555,18 @@
     },
     "scripts/rollout.py": {
       "status": "intended",
-      "reason": "Not ported (was missed): 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA. Both lines pass an existing capsule writer lease to migrate. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard. Follow-up 2026-11-20 (Windows E2E): both print ASCII separators.",
+      "reason": "Not ported (was missed): 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA. Both lines pass an existing capsule writer lease to migrate. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard. Follow-up 2026-11-20 (Windows E2E): both print ASCII separators. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "4da56046f86a6522ad5e4019a6cb3a46ad05b570",
-        "cd2f4f78eb332d5e7d210d9a10aa1aaae5ffae65"
+        "8e937e67f1e51a49ab6051000fb81d3973412bac",
+        "870d1b8554210022bbe74d236bf65a24f9a0b03b"
       ]
     },
     "scripts/rollout_capsule.py": {
       "status": "intended",
-      "reason": "Schema-2 capsule only: 26.2 passes capsule=True to rollout._target_binding, and the function and import order differ; the logic is otherwise the same. Both lines supply the acquired writer lease to the migration step.",
+      "reason": "Schema-2 capsule only: 26.2 passes capsule=True to rollout._target_binding, and the function and import order differ; the logic is otherwise the same. Both lines supply the acquired writer lease to the migration step. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "8af288369094569003aaf5bdf62c58d6c48f100d",
-        "3a36f2f4b68cf623fe8ddb0e17feba375fabcdf5"
+        "96458eded42b35edcad43d627e2213b4e852195f",
+        "6051a3718ec0d7b8974e96df939bf7b9a00ce9e0"
       ]
     },
     "scripts/setup_graphify_apx.py": {
@@ -579,18 +579,18 @@
     },
     "scripts/team.ps1": {
       "status": "feature",
-      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Rechecked 2026-11-19 (follow-up): targets passes its own program name, scripts/team.ps1 targets, on both lines. Follow-up 2026-11-19 (pass 2): both lines restore the caller PROJECT_SCHEMA after every command. Follow-up 2026-11-20 (Windows fixes): both refuse arguments that legacy native argument passing would garble; 26.2 also checks its automations command. Follow-up 2026-11-20 (Windows fixes 2): both print warnings as plain WARNING lines and use the same refusal wording. Follow-up 2026-11-20 (outside review): both pass the program that is actually started (the resolved Bash or Python path) to the legacy check, which treats .bat/.cmd/.js/.vbs/.wsf and cmd/cscript/wscript/find/sqlcmd as legacy in Windows mode.",
+      "reason": "26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile with workspace-user verification. Both lines normalize feature checks, plan and evidence paths. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Rechecked 2026-11-19 (follow-up): targets passes its own program name, scripts/team.ps1 targets, on both lines. Follow-up 2026-11-19 (pass 2): both lines restore the caller PROJECT_SCHEMA after every command. Follow-up 2026-11-20 (Windows fixes): both refuse arguments that legacy native argument passing would garble; 26.2 also checks its automations command. Follow-up 2026-11-20 (Windows fixes 2): both print warnings as plain WARNING lines and use the same refusal wording. Follow-up 2026-11-20 (outside review): both pass the program that is actually started (the resolved Bash or Python path) to the legacy check, which treats .bat/.cmd/.js/.vbs/.wsf and cmd/cscript/wscript/find/sqlcmd as legacy in Windows mode. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "74656e29e6d12acea82fc63f5d82ff2f550cb884",
-        "15843e351bec186785f42fcb6e5776c6fcf033fb"
+        "3c5a91227012770241413570776ca7aa548a487a",
+        "550df7ccbacf614819633ffc2607d03ee290c90b"
       ]
     },
     "scripts/team.sh": {
       "status": "feature",
-      "reason": "Ported to 26.2 (fix/parity-ports-2-262): migration-plan passes the repo root through cygpath -m -- with its comment. Feature: 26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile. The guarded DEV feature workflow and long-view transport changes are on both lines. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines.",
+      "reason": "Ported to 26.2 (fix/parity-ports-2-262): migration-plan passes the repo root through cygpath -m -- with its comment. Feature: 26.2 adds the automations, app-lock, app-unlock and upgrade-apexlang commands and the APEX doctor profile. The guarded DEV feature workflow and long-view transport changes are on both lines. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "eb050e28bd950ffdbd5320899159aaee1b316b0c",
-        "4118545a1ff61548a78791a581be9052bccc78a2"
+        "0ecd42555705b3c61455e330baa825b897826d27",
+        "363dc7875ae7d4019a72d0e1a3d1b2edaee04020"
       ]
     },
     "scripts/template_drift.py": {
@@ -619,10 +619,10 @@
     },
     "scripts/verify_local.py": {
       "status": "feature",
-      "reason": "26.2 adds the Oracle skills registry check, the unresolved lock-recovery record check, apexRelease validation of the template lock and the isolated Graphify check; 26.1 has its own Graphify extractor message and none of the others. The missing locked file attention result is on both lines now. Follow-up 2026-11-19: the malformed-manifest guard, the removed-by-cleanup count and the linked-worktree config lookup are on both lines; 26.2 keeps is_original_template and _git_config_path here, 26.1 keeps them in scripts/template_drift.py. Follow-up 2026-11-19 (pass 2): _normalized_remote and the strict=False parser are the same on both lines; 26.2 keeps them here, 26.1 in scripts/template_drift.py. Follow-up 2026-11-20 (Windows fixes): both decode child output as UTF-8 and catch ValueError in is_original_template. Follow-up 2026-11-20 (Windows E2E): both report a doctor refusal (ORA-20073) in verify-local --live as a refusal, not a connection failure.",
+      "reason": "26.2 adds the Oracle skills registry check, the unresolved lock-recovery record check, apexRelease validation of the template lock and the isolated Graphify check; 26.1 has its own Graphify extractor message and none of the others. The missing locked file attention result is on both lines now. Follow-up 2026-11-19: the malformed-manifest guard, the removed-by-cleanup count and the linked-worktree config lookup are on both lines; 26.2 keeps is_original_template and _git_config_path here, 26.1 keeps them in scripts/template_drift.py. Follow-up 2026-11-19 (pass 2): _normalized_remote and the strict=False parser are the same on both lines; 26.2 keeps them here, 26.1 in scripts/template_drift.py. Follow-up 2026-11-20 (Windows fixes): both decode child output as UTF-8 and catch ValueError in is_original_template. Follow-up 2026-11-20 (Windows E2E): both report a doctor refusal (ORA-20073) in verify-local --live as a refusal, not a connection failure. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "8105566012493790c628cb878a0165e180c74a72",
-        "1dd0d29e4e670d8419f15c1ed32f07fbfb87a753"
+        "0274da7b3cd1ebe87abb49cdb11f0f94053c6591",
+        "e553372a0b3fe426039381d59c4d281871668fb3"
       ]
     },
     "scripts/verify_publish_state.py": {
@@ -747,10 +747,10 @@
     },
     "tests/test_feature_rollout.py": {
       "status": "feature",
-      "reason": "26.2 adds three binding tests for its schema-2 and capsule behaviour (test_a_version_one_migrate_binding_keeps_its_shape_and_only_a_capsule_adds_the_logical_schema, test_schema_two_auxiliary_target_uses_migration_profile_binding, test_schema_two_feature_steps_do_not_require_legacy_target_binding); 26.1 has no test that 26.2 lacks, and the occupied-receipt test is on both lines now. Both lines assert that a migration receives the active capsule writer lease.",
+      "reason": "26.2 adds three binding tests for its schema-2 and capsule behaviour (test_a_version_one_migrate_binding_keeps_its_shape_and_only_a_capsule_adds_the_logical_schema, test_schema_two_auxiliary_target_uses_migration_profile_binding, test_schema_two_feature_steps_do_not_require_legacy_target_binding); 26.1 has no test that 26.2 lacks, and the occupied-receipt test is on both lines now. Both lines assert that a migration receives the active capsule writer lease. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "08e6d644b5ec95d47ed2d4fa581c4b6dce310ff8",
-        "0879a6b51536f22ac84508d260a922eda460d0f4"
+        "ae36b935af506b15708c88d6792b4ea4c59fd6dc",
+        "cc7eb960f1acfdcc7df803a95d5736c0a963714c"
       ]
     },
     "tests/test_graphify_corpus.py": {
@@ -859,10 +859,10 @@
     },
     "tests/test_team_cli.py": {
       "status": "feature",
-      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): TeamPs1EnvironmentTests are on both lines. Follow-up 2026-11-20 (Windows fixes): NativeArgumentPassingTests are on both lines. Follow-up 2026-11-20 (Windows fixes 2): both drop ConvertFrom-Json -AsHashtable from the migration-plan test. Follow-up 2026-11-20 (outside review): both record the arguments a .cmd target receives and test the normal .exe path and a .cmd Python shim. Follow-up 2026-11-21 (table triggers and sequences): 26.1 updates its targets note assertion; 26.2 has no test of that note text (test_show_targets.py covers it).",
+      "reason": "26.2 has wrapper tests for its extra commands and 26.1 has its own feature-init and template-status wiring tests. Both lines cover Bash path forwarding for guarded feature apply and reconciliation through PowerShell. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-19 (pass 2): TeamPs1EnvironmentTests are on both lines. Follow-up 2026-11-20 (Windows fixes): NativeArgumentPassingTests are on both lines. Follow-up 2026-11-20 (Windows fixes 2): both drop ConvertFrom-Json -AsHashtable from the migration-plan test. Follow-up 2026-11-20 (outside review): both record the arguments a .cmd target receives and test the normal .exe path and a .cmd Python shim. Follow-up 2026-11-21 (table triggers and sequences): 26.1 updates its targets note assertion; 26.2 has no test of that note text (test_show_targets.py covers it). Follow-up 2026-11-21 (fast releases): 26.1 updates its feature usage assertion to the bracketed form with release-plan; both lines test staging-neutralize dispatch in the shared tests/test_staging_neutralize.py.",
       "blobs": [
         "0e7df4217fed84055f6b3a032e690b9da188a4ab",
-        "f49e46a44994a4762c0a29c674acb393ef061807"
+        "d50c96472a106e4d5c3f739e2008cac8fbb2a56c"
       ]
     },
     "tests/test_template_drift.py": {
@@ -891,10 +891,10 @@
     },
     "tests/test_verify_local.py": {
       "status": "feature",
-      "reason": "26.2 adds tests for its Oracle skills registry check, unresolved lock-recovery evidence, wrong release or ref lock rejection and the Graphify setup message; 26.1 has its own test that a lock without apexRelease passes on 26.1 and fails on 26.2 Follow-up 2026-11-19: the removed-by-cleanup, malformed-manifest and linked-worktree tests exist on both lines. Follow-up 2026-11-19 (pass 2): the remote-normalization and strict-parser tests are on both lines. Follow-up 2026-11-20 (Windows fixes): the UTF-8 decoding and NUL gitdir tests are on both lines, adapted to each build_report signature. Follow-up 2026-11-20 (Windows fixes 2): both skip the Bash doctor tests on Windows when no Git Bash is found. Follow-up 2026-11-20 (Windows E2E): both test the doctor-refusal classification.",
+      "reason": "26.2 adds tests for its Oracle skills registry check, unresolved lock-recovery evidence, wrong release or ref lock rejection and the Graphify setup message; 26.1 has its own test that a lock without apexRelease passes on 26.1 and fails on 26.2 Follow-up 2026-11-19: the removed-by-cleanup, malformed-manifest and linked-worktree tests exist on both lines. Follow-up 2026-11-19 (pass 2): the remote-normalization and strict-parser tests are on both lines. Follow-up 2026-11-20 (Windows fixes): the UTF-8 decoding and NUL gitdir tests are on both lines, adapted to each build_report signature. Follow-up 2026-11-20 (Windows fixes 2): both skip the Bash doctor tests on Windows when no Git Bash is found. Follow-up 2026-11-20 (Windows E2E): both test the doctor-refusal classification. Follow-up 2026-11-21 (fast releases): both lines test the descriptor warnings; the 26.1 fixture omits app.name, which its descriptor reader rejects.",
       "blobs": [
-        "a149d072456ef66c83e06f9ccbe09db884255948",
-        "9e7d5b2327bcc7440cbc59ca7ab76ef36f8a7954"
+        "3e75ca4ec5f3d71ad2c84e98b3e682b71868f889",
+        "f81083665e070daad7e26485a7d8261fbd082317"
       ]
     },
     "tests/test_verify_publish_state.py": {
