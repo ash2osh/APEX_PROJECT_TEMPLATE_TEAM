@@ -173,8 +173,8 @@ def create(
     if schema not in migration_schemas:
         raise NewMigrationError(
             f"schema {schema} is not a migration schema for dev: migrations for this project run as "
-            f"MIGRATION_SCHEMA {', '.join(migration_schemas)}; use a --schema listed in both CODE_SCHEMA and "
-            "MIGRATION_SCHEMA, or review the profile with scripts/team.sh targets"
+            f"MIGRATION_SCHEMA {', '.join(migration_schemas)}; use a --schema listed in MIGRATION_SCHEMA, "
+            "or review the profile with scripts/team.sh targets"
         )
     started = now()
     read_at = started.strftime("%Y-%m-%d %H:%M:%S UTC")

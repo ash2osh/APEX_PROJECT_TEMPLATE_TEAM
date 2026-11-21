@@ -219,5 +219,88 @@ class SqlDriverContractTests(unittest.TestCase):
         self.assertLess(contents.index("SET SQLBLANKLINES ON"), contents.index("@@payload.sql"))
 
 
+BACKUP_DB_SQL = ROOT / "scripts" / "backup_db.sql"
+
+
+def generated_driver_selects(source: str) -> list[str]:
+    """The SELECT statements that build the spool driver: each starts with a SPOOL path string."""
+    return re.findall(r"(?s)SELECT 'SPOOL database/&&spool_schema/.*?ORDER BY [^;]*;", source)
+
+
+def string_literals(text: str) -> list[str]:
+    return re.findall(r"'((?:[^']|'')*)'", text)
+
+
+class BackupDbTriggerSequenceSqlTests(unittest.TestCase):
+    """backup_db.sql: the tables scope owns table triggers and sequences; the code scope keeps the rest."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = BACKUP_DB_SQL.read_text(encoding="utf-8")
+
+    def test_seventh_argument_is_the_tables_prefixes_after_the_spool_directory(self) -> None:
+        self.assertIn("DEFINE spool_schema = '&6'\nDEFINE tables_prefixes = '&7'", self.source)
+
+    def test_table_owned_trigger_predicate_is_used_by_tables_export_code_exclusion_and_both_manifest_counts(self) -> None:
+        # The predicate is written out in each place; each copy must test the same five conditions.
+        predicate = "AND t.table_owner = t.owner\n"
+        self.assertGreaterEqual(self.source.count(predicate), 5, "every trigger query needs the table-owned predicate")
+        self.assertIn("'&&tables_prefixes' <> '-'", self.source)
+        triggers = [s for s in generated_driver_selects(self.source) if "triggers/" in s]
+        self.assertEqual(len(triggers), 2, "the tables scope and the code scope both spool triggers/")
+        table_trigger_export = next(s for s in triggers if "FROM all_triggers t\nWHERE LOWER('&&object_scope') = 'tables'" in s)
+        self.assertIn("WHERE LOWER('&&object_scope') = 'tables'", table_trigger_export)
+        self.assertIn("t.base_object_type = 'TABLE'", table_trigger_export)
+        self.assertIn("INSTR(t.trigger_name, configured_prefixes.object_prefix) = 1", table_trigger_export)
+        # The code scope's trigger export excludes exactly the table-owned triggers.
+        code_trigger_export = next(s for s in triggers if "FROM all_objects objects_to_export" in s)
+        self.assertIn("AND NOT EXISTS (\n    SELECT 1\n    FROM all_triggers t\n    WHERE t.owner = objects_to_export.owner", code_trigger_export)
+        self.assertIn("AND t.trigger_name = objects_to_export.object_name", code_trigger_export)
+        self.assertIn("'&&tables_prefixes' <> '-'", code_trigger_export)
+
+    def test_manifest_counts_use_the_same_predicates_per_type(self) -> None:
+        manifest = self.source[self.source.index("SPOOL database/&&spool_schema/&&manifest_file"):]
+        for object_type, scope in (
+            ("SEQUENCE", "tables"), ("TABLE", "tables"), ("TRIGGER", "tables"),
+            ("FUNCTION", "code"), ("PACKAGE", "code"), ("PACKAGE BODY", "code"), ("PROCEDURE", "code"),
+            ("SYNONYM", "code"), ("TRIGGER", "code"), ("VIEW", "code"),
+        ):
+            with self.subTest(type=object_type, scope=scope):
+                self.assertRegex(manifest, rf"SELECT '{re.escape(object_type)}'[^,\n]*,\s*'{scope}'[^,\n]*,\s*COUNT\(\*\)")
+        self.assertIn("WHERE object_scope = LOWER('&&object_scope')\nORDER BY object_type;", manifest)
+        self.assertIn("SELECT object_type || '=' || object_count", manifest)
+        self.assertIn("AND NOT EXISTS (\n      SELECT 1\n      FROM all_triggers t\n      WHERE t.owner = o.owner", manifest)
+
+    def test_identity_and_system_sequences_are_excluded_everywhere_sequences_are_counted_or_exported(self) -> None:
+        self.assertGreaterEqual(self.source.count("s.sequence_name NOT LIKE 'ISEQ$$%'"), 3)
+        self.assertGreaterEqual(self.source.count("FROM all_tab_identity_cols i"), 3)
+        sequences = [s for s in generated_driver_selects(self.source) if "sequences/" in s]
+        self.assertEqual(len(sequences), 1)
+        self.assertIn("WHERE LOWER('&&object_scope') = 'tables'", sequences[0])
+
+    def test_sequence_ddl_drops_the_live_start_with_position(self) -> None:
+        sequences = next(s for s in generated_driver_selects(self.source) if "sequences/" in s)
+        self.assertIn("REGEXP_REPLACE(DBMS_METADATA.GET_DDL(''SEQUENCE''", sequences)
+        self.assertIn("''[[:space:]]+START WITH -?[0-9]+''", sequences)
+        self.assertIn("''[[:space:]]+START WITH -?[0-9]+'', '''') FROM DUAL'", sequences)
+        self.assertIn("|| CHR(59)", sequences)
+
+    def test_generated_driver_strings_hold_no_literal_semicolon(self) -> None:
+        selects = generated_driver_selects(self.source)
+        self.assertGreaterEqual(len(selects), 8, "the generated-driver SELECTs were not all found")
+        for select in selects:
+            with self.subTest(select=select[:60]):
+                for literal in string_literals(select):
+                    self.assertNotIn(";", literal)
+                self.assertIn("|| CHR(59)", select)
+
+    def test_unsafe_name_check_covers_table_owned_triggers_and_sequences_for_the_tables_scope(self) -> None:
+        check = self.source[self.source.index("v_unsafe VARCHAR2(4000);"):self.source.index("IF v_unsafe IS NOT NULL")]
+        self.assertIn("FROM all_triggers t", check)
+        self.assertIn("SELECT s.sequence_name", check)
+        self.assertIn("LOWER('&&object_scope') = 'tables'", check)
+        self.assertIn("NOT REGEXP_LIKE(object_name, '^[A-Za-z0-9_$#]+$')", check)
+
+
 if __name__ == "__main__":
     unittest.main()

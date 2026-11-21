@@ -49,13 +49,17 @@ class ShowTargetsTests(unittest.TestCase):
         self.assertEqual(["REFUSED"], [row["status"] for row in refused])
         self.assertIn("schema APPCODE is not listed in MIGRATION_SCHEMA for dev", refused[0]["message"])
         self.assertEqual(["resolved"], [row["status"] for row in _rows(report, environment="dev", purpose="migration", schema="APPDATA")])
-        self.assertEqual(["REFUSED"], [row["status"] for row in _rows(report, environment="dev", purpose="read", schema="APPDATA")])
+        # A DEV read falls back to the migration profile, so the migration-only schema resolves for read too.
+        self.assertEqual(["resolved"], [row["status"] for row in _rows(report, environment="dev", purpose="read", schema="APPDATA")])
 
-        self.assertEqual(2, len(report["notes"]))
+        self.assertEqual(1, len(report["notes"]))
         self.assertIn("APPCODE is in CODE_SCHEMA but not in the dev migration profile", report["notes"][0])
-        self.assertIn("APPDATA is in the dev migration profile", report["notes"][1])
-        for note in report["notes"]:
-            self.assertIn("`new-migration --source` reads the code profile while `migrate` uses the migration profile.", note)
+        self.assertIn(
+            "DEV reads work, but `migrate` applies as the migration owner, so `new-migration` and "
+            "`migrate` refuse a migration folder for APPCODE.",
+            report["notes"][0],
+        )
+        self.assertNotIn("new-migration cannot start a folder", str(report["notes"]))
 
         text = show_targets.render_text(report)
         self.assertIn("REFUSED: schema APPCODE is not listed in MIGRATION_SCHEMA for dev", text)

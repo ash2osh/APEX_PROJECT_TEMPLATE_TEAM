@@ -146,7 +146,7 @@ def database_session(config: dict, arguments: list[str]) -> int:
     (target / f"{name}.sql").write_text(f"CREATE FAKE {name} FOR {schema};\n".replace("\n", eol), encoding="utf-8", newline="")
     manifest = Path.cwd() / "database" / spool_schema / f"manifest-{scope}.txt"
     manifest.write_text(
-        ("TABLE=1\n" if scope == "tables" else "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=0\nVIEW=1\n").replace("\n", eol),
+        ("SEQUENCE=0\nTABLE=1\nTRIGGER=0\n" if scope == "tables" else "FUNCTION=0\nPACKAGE=0\nPACKAGE BODY=0\nPROCEDURE=0\nSYNONYM=0\nTRIGGER=0\nVIEW=1\n").replace("\n", eol),
         encoding="utf-8",
         newline="",
     )

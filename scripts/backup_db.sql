@@ -1,6 +1,8 @@
 -- Export schema metadata only (never table data). Arguments are supplied by
 -- the validated shell/PowerShell wrappers: schema, scope, environment,
--- expected session user, object-name prefixes, and a SQLcl-safe spool schema.
+-- expected session user, object-name prefixes, a SQLcl-safe spool directory,
+-- and the tables-scope prefixes. The seventh argument is '-' when the schema
+-- has no tables scope in this run, so the code scope keeps every trigger.
 SET DEFINE ON
 DEFINE target_schema = '&1'
 DEFINE object_scope = '&2'
@@ -8,6 +10,7 @@ DEFINE db_environment = '&3'
 DEFINE expected_user = '&4'
 DEFINE object_prefixes = '&5'
 DEFINE spool_schema = '&6'
+DEFINE tables_prefixes = '&7'
 SET ENCODING UTF-8
 SET PAGESIZE 0
 -- PAGESIZE 0 alone does not suppress column headings in every SQLcl release,
@@ -56,31 +59,82 @@ BEGIN
   INTO v_unsafe
   FROM (
     SELECT object_name
-    FROM all_objects
-    WHERE owner = UPPER('&&target_schema')
-      AND (
-        (LOWER('&&object_scope') = 'tables' AND object_type = 'TABLE')
-        OR
-        (LOWER('&&object_scope') = 'code' AND object_type IN (
-          'VIEW', 'PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SYNONYM'
-        ))
-      )
-      -- A table dropped without PURGE, and any trigger it dragged with it,
-      -- stays here as BIN$<base64>==$0. Those are not project objects.
-      AND object_name NOT LIKE 'BIN$%'
-      AND (
-        '&&object_prefixes' IN ('*', '%')
-        OR EXISTS (
-          SELECT 1
-          FROM (
-            SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
-            FROM dual
-            CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
-          ) configured_prefixes
-          WHERE INSTR(all_objects.object_name, configured_prefixes.object_prefix) = 1
+    FROM (
+      SELECT all_objects.object_name
+      FROM all_objects
+      WHERE owner = UPPER('&&target_schema')
+        AND (
+          (LOWER('&&object_scope') = 'tables' AND object_type = 'TABLE')
+          OR
+          (LOWER('&&object_scope') = 'code' AND object_type IN (
+            'VIEW', 'PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SYNONYM'
+          ))
         )
-      )
-      AND NOT REGEXP_LIKE(object_name, '^[A-Za-z0-9_$#]+$')
+        -- A table dropped without PURGE, and any trigger it dragged with it,
+        -- stays here as BIN$<base64>==$0. Those are not project objects.
+        AND object_name NOT LIKE 'BIN$%'
+        AND (
+          '&&object_prefixes' IN ('*', '%')
+          OR EXISTS (
+            SELECT 1
+            FROM (
+              SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+              FROM dual
+              CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+            ) configured_prefixes
+            WHERE INSTR(all_objects.object_name, configured_prefixes.object_prefix) = 1
+          )
+        )
+      -- Table-owned triggers and sequences are exported by the tables scope, so
+      -- their names are checked here by the same predicates as their exports.
+      UNION ALL
+      SELECT t.trigger_name
+      FROM all_triggers t
+      WHERE LOWER('&&object_scope') = 'tables'
+        AND t.owner = UPPER('&&target_schema')
+        AND t.table_owner = t.owner
+        AND t.base_object_type = 'TABLE'
+        AND t.trigger_name NOT LIKE 'BIN$%'
+        AND '&&tables_prefixes' <> '-'
+        AND (
+          '&&tables_prefixes' IN ('*', '%')
+          OR EXISTS (
+            SELECT 1
+            FROM (
+              SELECT REGEXP_SUBSTR('&&tables_prefixes', '[^,]+', 1, LEVEL) object_prefix
+              FROM dual
+              CONNECT BY LEVEL <= REGEXP_COUNT('&&tables_prefixes', ',') + 1
+            ) configured_prefixes
+            WHERE INSTR(t.table_name, configured_prefixes.object_prefix) = 1
+               OR INSTR(t.trigger_name, configured_prefixes.object_prefix) = 1
+          )
+        )
+      UNION ALL
+      SELECT s.sequence_name
+      FROM all_sequences s
+      WHERE LOWER('&&object_scope') = 'tables'
+        AND s.sequence_owner = UPPER('&&target_schema')
+        AND s.sequence_name NOT LIKE 'ISEQ$$%'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM all_tab_identity_cols i
+          WHERE i.owner = s.sequence_owner
+            AND i.sequence_name = s.sequence_name
+        )
+        AND (
+          '&&object_prefixes' IN ('*', '%')
+          OR EXISTS (
+            SELECT 1
+            FROM (
+              SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+              FROM dual
+              CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+            ) configured_prefixes
+            WHERE INSTR(s.sequence_name, configured_prefixes.object_prefix) = 1
+          )
+        )
+    )
+    WHERE NOT REGEXP_LIKE(object_name, '^[A-Za-z0-9_$#]+$')
       AND ROWNUM <= 10
   );
 
@@ -128,6 +182,70 @@ WHERE LOWER('&&object_scope') = 'tables'
     )
   )
 ORDER BY table_name;
+
+-- Table-owned triggers: a trigger on a table of this schema, whose table or
+-- trigger name matches the tables prefixes. Triggers on views, schema or
+-- database triggers and triggers on another schema's tables are not taken.
+-- The code scope excludes the same triggers (NOT EXISTS below), so each is
+-- exported exactly once.
+SELECT 'SPOOL database/&&spool_schema/triggers/' || REPLACE(t.trigger_name, '$', '-S-') || '.sql'
+       || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''TRIGGER'', ''' || t.trigger_name
+       || ''', ''&&target_schema'') FROM DUAL' || CHR(59)
+       || CHR(10) || 'SPOOL OFF'
+FROM all_triggers t
+WHERE LOWER('&&object_scope') = 'tables'
+  AND t.owner = UPPER('&&target_schema')
+  AND t.table_owner = t.owner
+  AND t.base_object_type = 'TABLE'
+  AND t.trigger_name NOT LIKE 'BIN$%'
+  AND '&&tables_prefixes' <> '-'
+  AND (
+    '&&tables_prefixes' IN ('*', '%')
+    OR EXISTS (
+      SELECT 1
+      FROM (
+        SELECT REGEXP_SUBSTR('&&tables_prefixes', '[^,]+', 1, LEVEL) object_prefix
+        FROM dual
+        CONNECT BY LEVEL <= REGEXP_COUNT('&&tables_prefixes', ',') + 1
+      ) configured_prefixes
+      WHERE INSTR(t.table_name, configured_prefixes.object_prefix) = 1
+         OR INSTR(t.trigger_name, configured_prefixes.object_prefix) = 1
+    )
+  )
+ORDER BY t.trigger_name;
+
+-- Sequences of this schema. Identity sequences (ISEQ$$ names, or sequences
+-- listed in all_tab_identity_cols) belong to their table's identity column and
+-- are left out. START WITH is removed from the DDL: it is the live position,
+-- which changes on every backup, and compare-schema ignores it too. The
+-- semicolon is CHR(59) and the quotes are doubled, as in the other drivers.
+SELECT 'SPOOL database/&&spool_schema/sequences/' || REPLACE(s.sequence_name, '$', '-S-') || '.sql'
+       || CHR(10) || 'SELECT REGEXP_REPLACE(DBMS_METADATA.GET_DDL(''SEQUENCE'', ''' || s.sequence_name
+       || ''', ''&&target_schema''), ''[[:space:]]+START WITH -?[0-9]+'', '''') FROM DUAL' || CHR(59)
+       || CHR(10) || 'SPOOL OFF'
+FROM all_sequences s
+WHERE LOWER('&&object_scope') = 'tables'
+  AND s.sequence_owner = UPPER('&&target_schema')
+  AND s.sequence_name NOT LIKE 'ISEQ$$%'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM all_tab_identity_cols i
+    WHERE i.owner = s.sequence_owner
+      AND i.sequence_name = s.sequence_name
+  )
+  AND (
+    '&&object_prefixes' IN ('*', '%')
+    OR EXISTS (
+      SELECT 1
+      FROM (
+        SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+        FROM dual
+        CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+      ) configured_prefixes
+      WHERE INSTR(s.sequence_name, configured_prefixes.object_prefix) = 1
+    )
+  )
+ORDER BY s.sequence_name;
 
 SELECT 'SPOOL database/&&spool_schema/views/' || REPLACE(view_name, '$', '-S-') || '.sql'
        || CHR(10) || 'SELECT DBMS_METADATA.GET_DDL(''VIEW'', ''' || view_name
@@ -252,6 +370,31 @@ WHERE LOWER('&&object_scope') = 'code'
   AND objects_to_export.owner = UPPER('&&target_schema')
   AND objects_to_export.object_type = 'TRIGGER'
   AND objects_to_export.object_name NOT LIKE 'BIN$%'
+  -- Table-owned triggers go to the tables scope's triggers/ folder (same predicate).
+  -- With '-' as the tables prefixes nothing matches, so every trigger stays here.
+  AND NOT EXISTS (
+    SELECT 1
+    FROM all_triggers t
+    WHERE t.owner = objects_to_export.owner
+      AND t.trigger_name = objects_to_export.object_name
+      AND t.table_owner = t.owner
+      AND t.base_object_type = 'TABLE'
+      AND t.trigger_name NOT LIKE 'BIN$%'
+      AND '&&tables_prefixes' <> '-'
+      AND (
+        '&&tables_prefixes' IN ('*', '%')
+        OR EXISTS (
+          SELECT 1
+          FROM (
+            SELECT REGEXP_SUBSTR('&&tables_prefixes', '[^,]+', 1, LEVEL) object_prefix
+            FROM dual
+            CONNECT BY LEVEL <= REGEXP_COUNT('&&tables_prefixes', ',') + 1
+          ) configured_prefixes
+          WHERE INSTR(t.table_name, configured_prefixes.object_prefix) = 1
+             OR INSTR(t.trigger_name, configured_prefixes.object_prefix) = 1
+        )
+      )
+  )
   AND (
     '&&object_prefixes' IN ('*', '%')
     OR EXISTS (
@@ -302,38 +445,225 @@ SELECT CASE LOWER('&&object_scope')
        END AS manifest_file
 FROM dual;
 
+-- One row per type of the scope, zero when none match, with the same
+-- predicates as the exports above. Each branch is a single aggregate, so a
+-- type with no objects still yields its row; the outer filter keeps the scope.
 SPOOL database/&&spool_schema/&&manifest_file
-WITH expected_types (object_type, object_scope) AS (
-  SELECT 'TABLE', 'tables' FROM dual UNION ALL
-  SELECT 'VIEW', 'code' FROM dual UNION ALL
-  SELECT 'PACKAGE', 'code' FROM dual UNION ALL
-  SELECT 'PACKAGE BODY', 'code' FROM dual UNION ALL
-  SELECT 'PROCEDURE', 'code' FROM dual UNION ALL
-  SELECT 'FUNCTION', 'code' FROM dual UNION ALL
-  SELECT 'SYNONYM', 'code' FROM dual UNION ALL
-  SELECT 'TRIGGER', 'code' FROM dual
+SELECT object_type || '=' || object_count
+FROM (
+  SELECT 'SEQUENCE' AS object_type, 'tables' AS object_scope, COUNT(*) AS object_count
+  FROM all_sequences s
+  WHERE s.sequence_owner = UPPER('&&target_schema')
+    AND s.sequence_name NOT LIKE 'ISEQ$$%'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM all_tab_identity_cols i
+      WHERE i.owner = s.sequence_owner
+        AND i.sequence_name = s.sequence_name
+    )
+    AND (
+      '&&object_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(s.sequence_name, configured_prefixes.object_prefix) = 1
+      )
+    )
+  UNION ALL
+  SELECT 'TABLE', 'tables', COUNT(*)
+  FROM all_tables t
+  WHERE t.owner = UPPER('&&target_schema')
+    AND t.dropped = 'NO'
+    AND t.table_name NOT LIKE 'BIN$%'
+    AND (
+      '&&object_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(t.table_name, configured_prefixes.object_prefix) = 1
+      )
+    )
+  UNION ALL
+  SELECT 'TRIGGER', 'tables', COUNT(*)
+  FROM all_triggers t
+  WHERE t.owner = UPPER('&&target_schema')
+    AND t.table_owner = t.owner
+    AND t.base_object_type = 'TABLE'
+    AND t.trigger_name NOT LIKE 'BIN$%'
+    AND '&&tables_prefixes' <> '-'
+    AND (
+      '&&tables_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&tables_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&tables_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(t.table_name, configured_prefixes.object_prefix) = 1
+           OR INSTR(t.trigger_name, configured_prefixes.object_prefix) = 1
+      )
+    )
+  UNION ALL
+  SELECT 'FUNCTION', 'code', COUNT(*)
+  FROM all_objects o
+  WHERE o.owner = UPPER('&&target_schema')
+    AND o.object_type = 'FUNCTION'
+    AND o.object_name NOT LIKE 'BIN$%'
+    AND (
+      '&&object_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(o.object_name, configured_prefixes.object_prefix) = 1
+      )
+    )
+  UNION ALL
+  SELECT 'PACKAGE', 'code', COUNT(*)
+  FROM all_objects o
+  WHERE o.owner = UPPER('&&target_schema')
+    AND o.object_type = 'PACKAGE'
+    AND o.object_name NOT LIKE 'BIN$%'
+    AND (
+      '&&object_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(o.object_name, configured_prefixes.object_prefix) = 1
+      )
+    )
+  UNION ALL
+  SELECT 'PACKAGE BODY', 'code', COUNT(*)
+  FROM all_objects o
+  WHERE o.owner = UPPER('&&target_schema')
+    AND o.object_type = 'PACKAGE BODY'
+    AND o.object_name NOT LIKE 'BIN$%'
+    AND (
+      '&&object_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(o.object_name, configured_prefixes.object_prefix) = 1
+      )
+    )
+  UNION ALL
+  SELECT 'PROCEDURE', 'code', COUNT(*)
+  FROM all_objects o
+  WHERE o.owner = UPPER('&&target_schema')
+    AND o.object_type = 'PROCEDURE'
+    AND o.object_name NOT LIKE 'BIN$%'
+    AND (
+      '&&object_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(o.object_name, configured_prefixes.object_prefix) = 1
+      )
+    )
+  UNION ALL
+  SELECT 'SYNONYM', 'code', COUNT(*)
+  FROM all_objects o
+  WHERE o.owner = UPPER('&&target_schema')
+    AND o.object_type = 'SYNONYM'
+    AND o.object_name NOT LIKE 'BIN$%'
+    AND (
+      '&&object_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(o.object_name, configured_prefixes.object_prefix) = 1
+      )
+    )
+  UNION ALL
+  SELECT 'TRIGGER', 'code', COUNT(*)
+  FROM all_objects o
+  WHERE o.owner = UPPER('&&target_schema')
+    AND o.object_type = 'TRIGGER'
+    AND o.object_name NOT LIKE 'BIN$%'
+    AND (
+      '&&object_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(o.object_name, configured_prefixes.object_prefix) = 1
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM all_triggers t
+      WHERE t.owner = o.owner
+        AND t.trigger_name = o.object_name
+        AND t.table_owner = t.owner
+        AND t.base_object_type = 'TABLE'
+        AND t.trigger_name NOT LIKE 'BIN$%'
+        AND '&&tables_prefixes' <> '-'
+        AND (
+          '&&tables_prefixes' IN ('*', '%')
+          OR EXISTS (
+            SELECT 1
+            FROM (
+              SELECT REGEXP_SUBSTR('&&tables_prefixes', '[^,]+', 1, LEVEL) object_prefix
+              FROM dual
+              CONNECT BY LEVEL <= REGEXP_COUNT('&&tables_prefixes', ',') + 1
+            ) configured_prefixes
+            WHERE INSTR(t.table_name, configured_prefixes.object_prefix) = 1
+               OR INSTR(t.trigger_name, configured_prefixes.object_prefix) = 1
+          )
+        )
+    )
+  UNION ALL
+  SELECT 'VIEW', 'code', COUNT(*)
+  FROM all_objects o
+  WHERE o.owner = UPPER('&&target_schema')
+    AND o.object_type = 'VIEW'
+    AND o.object_name NOT LIKE 'BIN$%'
+    AND (
+      '&&object_prefixes' IN ('*', '%')
+      OR EXISTS (
+        SELECT 1
+        FROM (
+          SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
+          FROM dual
+          CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
+        ) configured_prefixes
+        WHERE INSTR(o.object_name, configured_prefixes.object_prefix) = 1
+      )
+    )
 )
-SELECT expected_types.object_type || '=' || COUNT(all_objects.object_name)
-FROM expected_types
-LEFT JOIN all_objects
- ON all_objects.owner = UPPER('&&target_schema')
- AND all_objects.object_type = expected_types.object_type
- AND all_objects.object_name NOT LIKE 'BIN$%'
- AND (
-   '&&object_prefixes' IN ('*', '%')
-   OR EXISTS (
-     SELECT 1
-     FROM (
-       SELECT REGEXP_SUBSTR('&&object_prefixes', '[^,]+', 1, LEVEL) object_prefix
-       FROM dual
-       CONNECT BY LEVEL <= REGEXP_COUNT('&&object_prefixes', ',') + 1
-     ) configured_prefixes
-     WHERE INSTR(all_objects.object_name, configured_prefixes.object_prefix) = 1
-   )
- )
-WHERE expected_types.object_scope = LOWER('&&object_scope')
-GROUP BY expected_types.object_type
-ORDER BY expected_types.object_type;
+WHERE object_scope = LOWER('&&object_scope')
+ORDER BY object_type;
 SPOOL OFF
 
 SET DEFINE OFF

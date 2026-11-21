@@ -16,7 +16,7 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 # to install a mirror that does not have exactly that many files.
 function Get-ScopeDirectory {
   param([Parameter(Mandatory = $true)][ValidateSet("tables", "code")][string] $Scope)
-  if ($Scope -eq "tables") { return @("tables") }
+  if ($Scope -eq "tables") { return @("tables", "triggers", "sequences") }
   return @("views", "packages", "procedures", "functions", "triggers", "synonyms")
 }
 
@@ -29,21 +29,69 @@ function Get-SqlclSpoolSchemaName {
   return ".sqlcl-schema-$($encoded.Replace('+', '-').Replace('/', '_'))"
 }
 
+# The staging directory of one scope's export. Each scope spools into its own
+# directory, because both scopes can write triggers/ for the same schema.
+function Get-ScopeStageName {
+  param(
+    [Parameter(Mandatory = $true)][string] $Schema,
+    [Parameter(Mandatory = $true)][ValidateSet("tables", "code")][string] $Scope
+  )
+  return "$(Get-SqlclSpoolSchemaName -Schema $Schema)-$Scope"
+}
+
 function Test-ScopeComplete {
   param(
     [string] $Scope,
     [string] $Schema,
     [string] $StagingPath
   )
-  $spoolSchema = Get-SqlclSpoolSchemaName -Schema $Schema
-  $manifestPath = Join-Path $StagingPath "database/$spoolSchema/manifest-$Scope.txt"
-  $mirrorPath = Join-Path $StagingPath "database/$spoolSchema"
+  $stageName = Get-ScopeStageName -Schema $Schema -Scope $Scope
+  $manifestPath = Join-Path $StagingPath "database/$stageName/manifest-$Scope.txt"
+  $mirrorPath = Join-Path $StagingPath "database/$stageName"
   $validator = Join-Path $PSScriptRoot "backup_manifest.py"
   $python = Resolve-TeamPython
   if ($null -eq $python) { throw "Python 3.10 or newer is required to validate backup manifests (python3, python or py -3)" }
   & $python.Path @($python.Prefix) $validator --scope $Scope --manifest $manifestPath --mirror $mirrorPath --schema $Schema
   if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
+  }
+}
+
+# Moves the files of each scope staging directory of one schema into its whole-schema staging directory, which is then
+# installed as the mirror. A relative path that both scopes wrote is refused with exit 2 before any mirror is replaced.
+function Merge-ScopeStage {
+  param(
+    [Parameter(Mandatory = $true)][string] $StagingPath,
+    [Parameter(Mandatory = $true)][string] $Schema,
+    [string[]] $ScopesRun
+  )
+  $mergedPath = Join-Path $StagingPath "database/$(Get-SqlclSpoolSchemaName -Schema $Schema)"
+  [System.IO.Directory]::CreateDirectory($mergedPath) | Out-Null
+  foreach ($scopeName in @("tables", "code")) {
+    if ($ScopesRun -cnotcontains $scopeName) { continue }
+    $stagePath = Join-Path $StagingPath "database/$(Get-ScopeStageName -Schema $Schema -Scope $scopeName)"
+    # A link is moved as a link (never entered), so replace_mirror still sees and refuses it. The walk does not
+    # enter a directory link, as Convert-MirrorToLf does.
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($stagePath)
+    while ($pending.Count -gt 0) {
+      $current = $pending.Pop()
+      foreach ($entry in @(Get-ChildItem -LiteralPath $current -Force)) {
+        $isLink = [bool]($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        if ($entry.PSIsContainer -and -not $isLink) {
+          $pending.Push($entry.FullName)
+          continue
+        }
+        $relative = $entry.FullName.Substring($stagePath.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
+        $target = Join-Path $mergedPath $relative
+        if (Test-Path -LiteralPath $target) {
+          [Console]::Error.WriteLine("backup error: both the tables and code exports wrote $relative for $Schema; the mirror was not replaced")
+          exit 2
+        }
+        [System.IO.Directory]::CreateDirectory((Split-Path -Parent $target)) | Out-Null
+        Move-Item -LiteralPath $entry.FullName -Destination $target
+      }
+    }
   }
 }
 
@@ -137,6 +185,8 @@ $backupSchemas = @((@($backupTargets) + @($ordsTargets)) | ForEach-Object { $_.S
 # survive untouched.
 $databaseSchemas = @($backupTargets | ForEach-Object { $_.Schema } | Select-Object -Unique)
 $ordsSchemas = @($ordsTargets | ForEach-Object { $_.Schema })
+# The schemas whose tables scope runs. The code scope passes TABLES_PREFIXES for these schemas only.
+$tablesScopeSchemas = @($backupTargets | Where-Object { $_.Scope -eq "tables" } | ForEach-Object { $_.Schema })
 
 # Refuse local mirror edits before making either database connection.
 foreach ($schema in $backupSchemas) {
@@ -175,18 +225,26 @@ try {
 
   # Every export and manifest must complete before any generated mirror changes.
   foreach ($target in $backupTargets) {
-    $spoolSchema = Get-SqlclSpoolSchemaName -Schema $target.Schema
+    $stageName = Get-ScopeStageName -Schema $target.Schema -Scope $target.Scope
     foreach ($scopeDir in (Get-ScopeDirectory -Scope $target.Scope)) {
       New-Item -ItemType Directory -Force `
-        -Path (Join-Path $stagingPath "database/$spoolSchema/$scopeDir") | Out-Null
+        -Path (Join-Path $stagingPath "database/$stageName/$scopeDir") | Out-Null
     }
     $transcriptPath = Join-Path $stagingPath ".sqlcl-transcript.txt"
     # The SQLcl launcher on Windows expands an unquoted * against the working
     # directory, which shifts every later argument. backup_db.sql treats % as the
     # same "every object" value, and % cannot occur in an identifier prefix.
+    $isWindowsHost = (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows))
     $prefixArgument = $target.Prefixes
-    if ($prefixArgument -ceq "*" -and (($PSVersionTable.PSEdition -eq "Desktop") -or ($null -ne $IsWindows -and $IsWindows))) {
+    if ($prefixArgument -ceq "*" -and $isWindowsHost) {
       $prefixArgument = "%"
+    }
+    # The seventh driver argument: TABLES_PREFIXES when this run also exports the tables scope for the schema, otherwise
+    # '-' (no tables scope, so the code scope keeps every trigger).
+    $tablesPrefixArgument = "-"
+    if ($tablesScopeSchemas -ccontains $target.Schema) { $tablesPrefixArgument = $env:TABLES_PREFIXES }
+    if ($tablesPrefixArgument -ceq "*" -and $isWindowsHost) {
+      $tablesPrefixArgument = "%"
     }
     $sqlclExit = Invoke-Sqlcl -WorkingDirectory $stagingPath `
       -StdInFile (Join-Path $stagingPath ".sqlcl-stdin") `
@@ -195,7 +253,7 @@ try {
         "-S", "-noupdates", "-name", $target.Connection,
         "@$(Join-Path $repoRoot 'scripts/backup_db.sql')",
         $target.Schema, $target.Scope, $env:DB_ENVIRONMENT,
-        $target.ExpectedUser, $prefixArgument, $spoolSchema
+        $target.ExpectedUser, $prefixArgument, $stageName, $tablesPrefixArgument
       )
     # backup_db.sql sets LONG far above SQLcl's ~2 MB warning threshold so the
     # largest package body is never truncated; drop that advisory, keep the rest.
@@ -212,7 +270,7 @@ try {
     if ($sqlclExit -ne 0) {
       throw "SQLcl $($target.Scope) metadata backup failed with exit code $sqlclExit"
     }
-    $manifestPath = Join-Path $stagingPath "database/$spoolSchema/manifest-$($target.Scope).txt"
+    $manifestPath = Join-Path $stagingPath "database/$stageName/manifest-$($target.Scope).txt"
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
       throw "database backup did not create manifest-$($target.Scope).txt for $($target.Schema)"
     }
@@ -260,6 +318,12 @@ try {
 
   Pop-Location
   $locationPushed = $false
+  # Join the scope staging directories of each schema into its whole-schema staging directory. A relative path that both
+  # scopes wrote is refused (exit 2) before anything is installed.
+  foreach ($schema in $databaseSchemas) {
+    $scopesRunForSchema = @($backupTargets | Where-Object { $_.Schema -ceq $schema } | ForEach-Object { $_.Scope })
+    Merge-ScopeStage -StagingPath $stagingPath -Schema $schema -ScopesRun $scopesRunForSchema
+  }
   $replaceArgs = @()
   foreach ($schema in $backupSchemas) {
     $spoolSchema = Get-SqlclSpoolSchemaName -Schema $schema
@@ -275,14 +339,17 @@ try {
         Copy-Item -LiteralPath $liveOrds -Destination (Join-Path $stagingPath "database/$schema/ords") -Recurse
       }
       # The whole schema mirror is replaced, so a scope this run did not export must be carried over from the committed
-      # mirror, or it is deleted. Only the outputs of the scope that did not run are copied: tables/ and
-      # manifest-tables.txt, or the code directories and manifest-code.txt (scope_directories in backup_db.sh). Only
-      # what the committed mirror holds is copied. A scope that ran is replaced whole, so its stale files still go.
+      # mirror, or it is deleted. Only the outputs of the scope that did not run are copied: tables/, triggers/,
+      # sequences/ and manifest-tables.txt, or the code directories and manifest-code.txt (scope_directories in
+      # backup_db.sh). Only what the committed mirror holds is copied. A scope that ran is replaced whole, so its stale
+      # files still go. A folder a running scope also writes (triggers/) is not copied: that scope's export is authoritative.
       $liveMirror = Join-Path $repoRoot "database/$schema"
       $scopesRun = @($backupTargets | Where-Object { $_.Schema -ceq $schema } | ForEach-Object { $_.Scope })
+      $runningDirectories = @($scopesRun | ForEach-Object { Get-ScopeDirectory -Scope $_ })
       foreach ($scopeName in @("tables", "code")) {
         if ($scopesRun -ccontains $scopeName) { continue }
         foreach ($entry in @(@(Get-ScopeDirectory -Scope $scopeName) + "manifest-$scopeName.txt")) {
+          if ($runningDirectories -ccontains $entry) { continue }
           $liveEntry = Join-Path $liveMirror $entry
           $stagedEntry = Join-Path $stagingPath "database/$schema/$entry"
           if (Test-Path -LiteralPath $liveEntry -PathType Container) {
