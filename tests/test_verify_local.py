@@ -261,6 +261,89 @@ APEX_EXPECTED_USER=DEMO
         report = build_report(self.repo, values, self.current_skills)
         self.assertEqual(report["exitCode"], 0)
 
+    def write_profiles(self, staging: bool, prod: bool) -> None:
+        extra = ""
+        if staging:
+            extra += "STAGING_SQLCL_CONNECTION=STG\nSTAGING_EXPECTED_USER=DEMO\nSTAGING_SCHEMA=DEMO\n"
+        if prod:
+            extra += "PROD_SQLCL_CONNECTION=PRD\nPROD_EXPECTED_USER=DEMO\nPROD_SCHEMA=DEMO\n"
+        env_path = self.write_valid_env()
+        env_path.write_text(env_path.read_text(encoding="utf-8") + extra, encoding="utf-8")
+
+    def test_configured_staging_and_prod_without_descriptors_warn_and_exit_zero(self) -> None:
+        self.write_profiles(staging=True, prod=True)
+        self.write_valid_lock()
+        self.create_valid_app()
+        from scripts.local_config import read_project_env
+        report = build_report(self.repo, read_project_env(self.repo / ".env"), self.current_skills)
+        self.assertEqual(report["exitCode"], 0)
+        by_name = {c["check"]: c for c in report["checks"]}
+        self.assertEqual(by_name["app_100_descriptor_staging"]["status"], "warn")
+        self.assertEqual(
+            by_name["app_100_descriptor_staging"]["message"],
+            "no STAGING deployment descriptor for app 100: add deployments/staging.json before a release deploys it",
+        )
+        self.assertEqual(by_name["app_100_descriptor_prod"]["status"], "warn")
+        self.assertIn("no PROD deployment descriptor for app 100", by_name["app_100_descriptor_prod"]["message"])
+        self.assertIn("deployments/prod.json", by_name["app_100_descriptor_prod"]["message"])
+
+    def test_unconfigured_profiles_and_no_production_alias_add_no_warnings(self) -> None:
+        self.write_valid_env()
+        self.write_valid_lock()
+        self.create_valid_app()
+        from scripts.local_config import read_project_env
+        report = build_report(self.repo, read_project_env(self.repo / ".env"), self.current_skills)
+        self.assertEqual(report["exitCode"], 0)
+        self.assertEqual([c for c in report["checks"] if c["status"] == "warn"], [])
+
+    def test_present_descriptors_are_not_warned(self) -> None:
+        self.write_profiles(staging=True, prod=True)
+        self.write_valid_lock()
+        app_dir = self.create_valid_app()
+        for name in ("staging", "prod"):
+            (app_dir / "deployments" / f"{name}.json").write_text(
+                json.dumps({"workspace": {"name": "STG_WS"}, "app": {"id": 100, "name": "Demo App",
+                                                                     "databaseSession": {"parsingSchema": "DEMO"}}}),
+                encoding="utf-8")
+        from scripts.local_config import read_project_env
+        report = build_report(self.repo, read_project_env(self.repo / ".env"), self.current_skills)
+        self.assertEqual(report["exitCode"], 0)
+        self.assertEqual([c for c in report["checks"] if c["status"] == "warn"], [])
+
+    def test_production_json_is_warned_as_ignored_and_does_not_fail(self) -> None:
+        self.write_valid_env()
+        self.write_valid_lock()
+        app_dir = self.create_valid_app()
+        (app_dir / "deployments" / "production.json").write_text("{}", encoding="utf-8")
+        from scripts.local_config import read_project_env
+        report = build_report(self.repo, read_project_env(self.repo / ".env"), self.current_skills)
+        self.assertEqual(report["exitCode"], 0)
+        warn = next(c for c in report["checks"] if c["check"] == "app_100_descriptor_production")
+        self.assertEqual(warn["status"], "warn")
+        self.assertIn("deploy reads deployments/prod.json", warn["message"])
+        self.assertIn("production.json is ignored", warn["message"])
+
+    def test_warnings_render_in_text_and_json_with_exit_zero(self) -> None:
+        self.write_profiles(staging=True, prod=False)
+        self.write_valid_lock()
+        app_dir = self.create_valid_app()
+        (app_dir / "deployments" / "production.json").write_text("{}", encoding="utf-8")
+        from io import StringIO
+        text = StringIO()
+        with patch("sys.stdout", text), \
+             patch("scripts.verify_local.inspect_oracle_skills", return_value=self.current_skills):
+            self.assertEqual(main(["--project-root", str(self.repo), "--format", "text"]), 0)
+        self.assertIn("[WARN] app_100_descriptor_staging:", text.getvalue())
+        self.assertIn("[WARN] app_100_descriptor_production:", text.getvalue())
+        self.assertIn("Readiness exit code: 0", text.getvalue())
+        as_json = StringIO()
+        with patch("sys.stdout", as_json), \
+             patch("scripts.verify_local.inspect_oracle_skills", return_value=self.current_skills):
+            self.assertEqual(main(["--project-root", str(self.repo), "--format", "json"]), 0)
+        statuses = {c["check"]: c["status"] for c in json.loads(as_json.getvalue())["checks"]}
+        self.assertEqual(statuses["app_100_descriptor_staging"], "warn")
+        self.assertEqual(statuses["app_100_descriptor_production"], "warn")
+
     def test_staging_descriptor_required_when_selected(self) -> None:
         self.write_valid_env(db_env="staging")
         self.write_valid_lock()

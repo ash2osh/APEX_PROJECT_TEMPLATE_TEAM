@@ -58,7 +58,7 @@ Commands:
          [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Confirm and execute a frozen deployment manifest
-  feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> ...
+  feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan|release-plan> ...
                                               Create mutable feature sources and freeze version-2 release capsules;
                                               reconcile-run closes an unfinished run; convert-plan plans offline
   compare-schema [--from <env>] (--to <env>|--env <env>)
@@ -97,6 +97,9 @@ Commands:
   automations list|check|enable|disable|run-once <app_id> --env <env> --schema <schema>
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Observe, check or explicitly operate on one scoped automation
+  staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]
+                                              Report, check, disable or undo a restored staging copy's jobs,
+                                              APEX automations and network grants (DBA alias)
 Options:
   --schema <NAME>                             Run one configured schema (except offline/tooling commands)
   --help                                      Show this help
@@ -141,7 +144,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != targets ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != feature ] && [ "$command_name" != reconcile-migration ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != targets ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != feature ] && [ "$command_name" != reconcile-migration ] && [ "$command_name" != staging-neutralize ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -444,14 +447,14 @@ case "$command_name" in
       exec "$REPO_ROOT/scripts/rollout.sh" "$@"
     ;;
   feature)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan> [arguments]"
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan|release-plan> [arguments]"
     if [ "$1" = --help ] || [ "$1" = -h ]; then
       cd "$REPO_ROOT"
       exec python3 -m scripts.feature_cli --help
     fi
     feature_command="$1"
     case "$feature_command" in
-      init|diff|clean-capsule|convert-plan) ;;
+      init|diff|clean-capsule|convert-plan|release-plan) ;;
       freeze|doctor)
         # The comparison with DEV is optional: load the project file only when it exists
         # (and, for doctor, only for --live), so an offline freeze or doctor needs no .env.
@@ -523,7 +526,7 @@ case "$command_name" in
           fi
         fi
         ;;
-      *) fail "unknown feature command '$feature_command'; use init, capture, apply, diff, doctor, freeze, clean-capsule, reconcile-run, or convert-plan" ;;
+      *) fail "unknown feature command '$feature_command'; use init, capture, apply, diff, doctor, freeze, clean-capsule, reconcile-run, convert-plan, or release-plan" ;;
     esac
     feature_root="$REPO_ROOT"
     case "$(uname -s 2>/dev/null)" in
@@ -580,6 +583,19 @@ case "$command_name" in
     source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
     cd "$REPO_ROOT"
     exec python3 -m scripts.baseline "$@"
+    ;;
+  staging-neutralize)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]"
+    staging_neutralize_env="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          staging_neutralize_env="$(cygpath -m -- "$staging_neutralize_env")"
+        fi
+        ;;
+    esac
+    cd "$REPO_ROOT"
+    PROJECT_ENV_FILE="$staging_neutralize_env" exec python3 -m scripts.staging_neutralize "$@"
     ;;
   backup-db)
     [ "$#" -eq 0 ] || fail "backup-db does not accept arguments"

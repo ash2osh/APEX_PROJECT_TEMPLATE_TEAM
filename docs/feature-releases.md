@@ -267,9 +267,46 @@ missing or unreadable baseline, or an accepted difference recorded for the file,
 `feature freeze` refuses a unit held by two selected features and compares the selected stored-unit files with DEV
 when a DEV profile is configured (`--no-live "<reason>"` skips it; the reason is kept in `scratch/freeze-checks/`).
 
+## Plan the next release
+
+`feature release-plan` writes `releases/current.json` from what changed since the
+last production release, so a release is not assembled by hand:
+
+```bash
+scripts/team.sh feature release-plan                 # changes since the newest release/* tag
+scripts/team.sh feature release-plan --since v1.4    # or since any Git ref
+scripts/team.sh feature release-plan --all           # the first release: every feature and active migration
+```
+
+It reads committed changes only (`git diff` from the baseline to `HEAD` under
+`features/`, `migrations/` and `apps/`) and warns about uncommitted ones. The steps
+come in a fixed order: each changed `ddl.sql`, then each changed `views/` folder,
+then the changed stored units per feature and schema (a package or type spec or
+body brings both files of the pair; triggers after the other units), then changed
+`data/*.sql` scripts, then changed migration folders by name, then `app-deploy`
+for each app whose source changed (`deployments/` alone does not count). A
+migration folder whose only changes are local evidence is skipped; a folder with
+a `resolution.<env>.json` is left out and listed for review. The manifest is
+checked with the same loader `feature freeze` uses before it is written;
+`--output` names another file and `--force` replaces an existing one. Nothing
+changed means nothing is written. Review the manifest, commit it, then freeze.
+
+A successful production capsule rollout tags the capsule's source commit
+`release/<UTC date>-rNNN` (annotated, local, never pushed; push it with
+`git push origin <tag>`), and the next `release-plan` starts from that tag.
+`--no-release-tag` skips it. A tagging failure is reported as a warning and does
+not change the rollout's result.
+
+New work that a feature can hold goes into feature files, so it is picked up here
+without a conversion: in a project with features, `new-migration --source` for a
+stored unit names the owning feature or the `feature capture` command instead of
+creating a dated folder (`--feature SLUG` captures it now; `--dated-folder` keeps
+the old behaviour).
+
 ## Freeze and prepare
 
-Copy [the example release manifest](feature-release.example.json) to
+`feature release-plan` writes `releases/current.json`; to write one by hand, copy
+[the example release manifest](feature-release.example.json) to
 `releases/current.json`, then select the real source paths, step order, app IDs,
 and reviewed database-object budget. Version 2 defaults to 120 seconds and
 accepts a budget from 1 through 300 seconds. Commit the selected source and
@@ -324,6 +361,36 @@ The capsule payload digest is
 shared by staging and production; the target-plan digest is specific to each
 environment. Re-run `feature freeze` and prepare again if selected source or
 the manifest changes.
+
+### Staging from a production copy
+
+When staging is restored from production, make it inert before anything is
+prepared or applied there; it still runs production's jobs and automations and
+can reach production's outside services:
+
+```bash
+scripts/team.sh staging-neutralize --capture                                   # read-only list
+scripts/team.sh staging-neutralize --apply --confirm-target <db_unique_name>   # writes; keeps the undo file
+scripts/team.sh staging-neutralize --check                                     # exit 0 only when inert
+```
+
+It connects with `STAGING_DBA_SQLCL_CONNECTION` and acts on the principals in
+`STAGING_SCHEMA`, `STAGING_MIGRATION_SCHEMA` and the optional
+`STAGING_NEUTRALIZE_PRINCIPALS`: their enabled scheduler jobs, the APEX engine jobs
+that send mail, push or notifications, sync REST sources or run automations, every
+active APEX automation, and outbound network grants (the APEX engine keeps its
+`*` grant and loses only named-host HTTP grants). `--apply` refuses unless
+`--confirm-target` equals the session's `DB_UNIQUE_NAME`, asks `[y/N]` unless
+`--yes`, and writes the exact undo to `scratch/staging-neutralize/`;
+`--restore <file>` runs it when the rehearsal is over. Close inbound access to the
+copy's public endpoint outside the database (the cloud access-control list), and
+run `--check` again after every app import, because an import can switch
+automations back on.
+
+Because the copy matches production, the read-only steps give the same answers on
+production: `rollout --env prod --prepare` on the frozen capsule finds the
+refusals before the copy exists, so the staging day holds only the writes and
+their checks.
 
 ## Execute staging and promote
 

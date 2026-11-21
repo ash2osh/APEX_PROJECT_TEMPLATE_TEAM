@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import feature_claims, feature_convert, feature_doctor, feature_sources, release_capsule, release_state, rollout, terminal_confirm
+from scripts import feature_claims, feature_convert, feature_doctor, feature_sources, release_capsule, release_plan, release_state, rollout, terminal_confirm
 from scripts.feature_manifest import FEATURE_RE, SCHEMA_RE, FeatureManifestError, load_feature_checkpoint
 from scripts.path_utils import relative_to_root
 
@@ -264,6 +264,16 @@ def _parser() -> argparse.ArgumentParser:
     convert_parser.add_argument("folders", nargs="+", metavar="migration-folder", help="migrations/<dated-folder> or migrations/<SCHEMA>/<dated-folder>")
     convert_parser.add_argument("--feature", metavar="SLUG", help="feature slug to print in the capture commands (default: <slug>)")
     convert_parser.add_argument("--format", choices=("text", "json"), default="text", help="output format")
+    plan_parser = subparsers.add_parser(
+        "release-plan",
+        help="offline plan of the next schema-version 2 release manifest from committed changes",
+    )
+    plan_source = plan_parser.add_mutually_exclusive_group()
+    plan_source.add_argument("--since", metavar="REF", help="git ref of the last shipped release (default: newest release/* tag)")
+    plan_source.add_argument("--all", action="store_true", help="first release: every tracked feature, migration and app file")
+    plan_parser.add_argument("--output", type=Path, default=release_plan.DEFAULT_OUTPUT, help="manifest path inside the repository")
+    plan_parser.add_argument("--force", action="store_true", help="replace an existing output file")
+    plan_parser.add_argument("--format", choices=("text", "json"), default="text", help="summary format")
     return parser
 
 
@@ -467,6 +477,12 @@ def main(
                 root, args.run_id, args.env, read_acknowledgment or _reconcile_ack_from_terminal,
                 yes=args.yes,
             )
+        if args.command == "release-plan":
+            plan = release_plan.create_release_plan(
+                root, since=args.since, include_all=args.all, output=args.output, force=args.force,
+            )
+            print(release_plan.render(plan, args.format))
+            return 0
         if args.command == "convert-plan":
             if args.feature is not None and FEATURE_RE.fullmatch(args.feature) is None:
                 raise FeatureCliError("feature must be a lowercase hyphenated slug")
@@ -477,6 +493,7 @@ def main(
     except (
         FeatureCliError, feature_sources.FeatureSourcesError, FeatureManifestError, feature_doctor.FeatureDoctorError,
         release_state.ReleaseStateError, release_capsule.ReleaseCapsuleError, rollout.RolloutError,
+        release_plan.ReleasePlanError,
     ) as error:
         print(f"feature error: {error}", file=sys.stderr)
         if isinstance(error, release_state.ReleaseStateError) and str(error).startswith("capsule cleanup refused:"):

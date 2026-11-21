@@ -9,8 +9,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Callable, Mapping, Sequence
 
@@ -18,6 +21,54 @@ from scripts import migration_attempts, terminal_confirm
 from scripts.db_targets import Target, TargetResolutionError, resolve_target
 from scripts.deployment_descriptor import read_descriptor
 from scripts.path_utils import relative_to_root
+
+
+RELEASE_TAG_RE_TEMPLATE = r"release/{day}-r([0-9]{{3}})\Z"
+
+
+def _next_release_tag_name(root: Path, now: datetime) -> str:
+    """release/<UTC date>-rNNN with NNN one above the highest local tag for that date."""
+    day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    listing = subprocess.run(
+        ["git", "-C", str(root), "tag", "--list", f"release/{day}-r*"],
+        capture_output=True, check=True,
+    ).stdout.decode("utf-8")
+    pattern = re.compile(RELEASE_TAG_RE_TEMPLATE.format(day=re.escape(day)))
+    numbers = [int(match.group(1)) for line in listing.splitlines() if (match := pattern.fullmatch(line.strip()))]
+    following = max(numbers, default=0) + 1
+    if following > 999:
+        raise ValueError(f"no free release tag number left for {day}")
+    return f"release/{day}-r{following:03d}"
+
+
+def _create_release_tag(root: Path, *, environment: str, capsule, report_path: str, now: datetime | None = None) -> tuple[str | None, str | None]:
+    """Tag the shipped commit after a verified production rollout. Returns (tag name, warning); never pushes.
+
+    The tag names the capsule's source commit, not HEAD: commits made after the freeze did not ship.
+    """
+    if environment != "prod":
+        return None, None
+    try:
+        shipped = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", f"{capsule.source_commit}^{{commit}}"],
+            capture_output=True, check=True,
+        ).stdout.decode("utf-8").strip()
+        name = _next_release_tag_name(root, now or datetime.now(timezone.utc))
+        message = (
+            "Production release\n"
+            f"Capsule payload SHA-256: {capsule.payload_digest}\n"
+            f"Source commit: {capsule.source_commit}\n"
+            f"Rollout report: {report_path}\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(root), "-c", "tag.gpgSign=false", "tag", "-a", name, "-m", message, shipped],
+            capture_output=True, check=True,
+        )
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        detail = getattr(error, "stderr", b"") or b""
+        detail_text = detail.decode("utf-8", "replace").strip() if isinstance(detail, bytes) else ""
+        return None, f"release tag was not created; the production rollout itself succeeded ({detail_text or error})"
+    return name, None
 
 
 def migration_folder_rows(folders: Sequence[str], migrations: Sequence) -> list[dict]:
@@ -295,6 +346,7 @@ def _run_capsule_rollout(
     recovery_confirm: Callable[[str], str] | None,
     yes: bool = False,
     confirm_target: str | None = None,
+    release_tag: bool = True,
 ) -> int:
     from scripts import feature_release, release_capsule, release_ownership, release_state
 
@@ -365,6 +417,17 @@ def _run_capsule_rollout(
                 raise rollout.RolloutError("whole-rollout completion requires complete in-budget object coverage")
             if report_paths is None:
                 raise rollout.RolloutError("whole-rollout completion has no final report destination")
+            if release_tag and environment == "prod":
+                tag_name, tag_warning = _create_release_tag(
+                    root, environment=environment, capsule=capsule,
+                    report_path=relative_to_root(report_paths[0], root).as_posix(),
+                )
+                report["releaseTag"] = tag_name
+                if tag_warning is not None:
+                    report["releaseTagWarning"] = tag_warning
+                    print(f"warning: {tag_warning}", file=sys.stderr)
+                else:
+                    print(f"Release tag {tag_name} created; push it with: git push origin {tag_name}")
             report["reportFiles"] = {
                 "json": relative_to_root(report_paths[0], root).as_posix(),
                 "markdown": relative_to_root(report_paths[1], root).as_posix(),

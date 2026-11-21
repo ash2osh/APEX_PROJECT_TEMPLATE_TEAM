@@ -16,6 +16,12 @@ migrations/<SCHEMA>/<today>_<name>-r001/ with:
 The local mirror is not used: it is refreshed irregularly and teammates change live code.
 Nothing is written to the database. A family that already exists is refused (edit it,
 or use `scripts/team.sh revise`).
+
+In a feature project (at least one features/<slug>/<SCHEMA>/ directory) whose --source values are
+all stored units, nothing is created: the command exits 2 and prints, per unit, the feature that
+already owns it or the `feature capture` command that captures it. `--feature SLUG` captures the
+unowned units into that feature instead (the same capture as `feature capture`); `--dated-folder`
+keeps the dated migration folder described above. The two options are mutually exclusive.
 """
 from __future__ import annotations
 
@@ -65,6 +71,10 @@ FEATURE_NOTE = (
 
 class NewMigrationError(ValueError):
     """The migration cannot be started; nothing was written."""
+
+
+class FeatureRoutingError(NewMigrationError):
+    """Stored units in a feature project belong in feature files; nothing was written."""
 
 
 def parse_source(value: str) -> tuple[str, str]:
@@ -146,6 +156,122 @@ def readme(name: str, schema: str, objects: Sequence[tuple[str, str]], read_at: 
     )
 
 
+def _dev_read_schema(environ: Mapping[str, str], schema: str | None) -> str:
+    """The DEV code schema to read, refused before DEV is read when it is not a migration schema."""
+    try:
+        resolved = resolve_target(environ, "dev", "read", schema=schema).schema
+        migration_schemas = configured_migration_schemas(environ, "dev")
+    except TargetResolutionError as error:
+        raise NewMigrationError(str(error)) from error
+    # migrate applies a folder only as a MIGRATION_SCHEMA owner, so refuse a code owner it would reject, before DEV is read.
+    if resolved not in migration_schemas:
+        raise NewMigrationError(
+            f"schema {resolved} is not a migration schema for dev: migrations for this project run as "
+            f"MIGRATION_SCHEMA {', '.join(migration_schemas)}; use a --schema listed in MIGRATION_SCHEMA, "
+            "or review the profile with scripts/team.sh targets"
+        )
+    return resolved
+
+
+def _feature_project(root: Path) -> bool:
+    from . import feature_claims
+
+    return bool(feature_claims.feature_schema_dirs(root))
+
+
+def uses_feature_files(repo_root: Path, sources: Sequence[str]) -> bool:
+    """True in a feature project when every --source is a stored unit that feature capture supports."""
+    from . import feature_sources
+
+    try:
+        objects = [parse_source(value) for value in sources]
+    except NewMigrationError:
+        return False  # create() reports the bad --source as it always has
+    return (
+        bool(objects)
+        and all(kind in feature_sources.UNIT_GROUP_BY_KIND for kind, _name in objects)
+        and _feature_project(Path(repo_root).resolve())
+    )
+
+
+def start_in_features(
+    repo_root: Path,
+    sources: Sequence[str],
+    *,
+    environ: Mapping[str, str],
+    schema: str | None = None,
+    feature: str | None = None,
+) -> list[str]:
+    """Route stored units to feature files, the way `feature capture` does.
+
+    Without a feature this refuses (FeatureRoutingError) and writes nothing; it reads no DEV source.
+    With a feature it captures each unit no feature holds, skips units already in that feature, and
+    refuses the whole run before any capture when another feature holds a unit. Returns output lines.
+    """
+    from . import feature_claims, feature_sources
+
+    root = Path(repo_root).resolve()
+    objects = [parse_source(value) for value in sources]
+    if not objects:
+        raise NewMigrationError("name at least one object with --source TYPE:NAME")
+    if any(kind not in feature_sources.UNIT_GROUP_BY_KIND for kind, _name in objects):
+        raise NewMigrationError("feature files hold stored units only (package, type, trigger, procedure, function); use --dated-folder")
+    if feature is not None and feature_sources.FEATURE_RE.fullmatch(feature) is None:
+        raise NewMigrationError("feature must be a lowercase hyphenated slug")
+    schema = _dev_read_schema(environ, schema)
+
+    # A package spec and body are one unit: one capture, one line.
+    units = [
+        (feature_sources.UNIT_GROUP_BY_NAME[group_name], name)
+        for group_name, name in dict.fromkeys((feature_sources.UNIT_GROUP_BY_KIND[kind].name, name) for kind, name in objects)
+    ]
+    claims, _unanalysed = feature_claims.collect_claims(root)
+    rows = []
+    for group, name in units:
+        keys = {(schema, kind, name) for kind in group.kinds}
+        holders = sorted((claim for claim in claims if claim.key in keys), key=lambda claim: (claim.feature, claim.path))
+        rows.append((group, name, holders))
+
+    if feature is None:
+        lines = [
+            f"  {group.name} {name}: owned by feature {holders[0].feature}: edit {holders[0].path}" if holders else
+            f"  {group.name} {name}: scripts/team.sh feature capture --{group.name} {name} --schema {schema} --env dev <feature>"
+            for group, name, holders in rows
+        ]
+        raise FeatureRoutingError("\n".join([
+            "new-migration: stored units in this feature project are changed in feature files:",
+            *lines,
+            "pass --feature <slug> to capture into a feature now, or --dated-folder to create a dated migration folder as before",
+        ]))
+
+    foreign = [(group, name, holders) for group, name, holders in rows if any(h.feature != feature for h in holders)]
+    if foreign:
+        lines = [
+            f"  {group.name} {name}: owned by feature {holders[0].feature}: edit {holders[0].path}"
+            for group, name, holders in foreign
+        ]
+        raise NewMigrationError("\n".join([
+            "new-migration refused, nothing was captured: these units belong to another feature:",
+            *lines,
+            "capture them into their owner's feature, or take them over with scripts/team.sh feature capture --move-from",
+        ]))
+
+    output: list[str] = []
+    for group, name, holders in rows:
+        if holders:
+            output.append(f"already in {feature}: edit {holders[0].path}")
+            continue
+        messages: list[str] = []
+        try:
+            paths = feature_sources.capture_unit(root, feature, schema, group.name, name, environ=environ, report=messages)
+        except feature_sources.FeatureSourcesError as error:
+            done = f" (captured before this: {'; '.join(output)})" if output else ""
+            raise NewMigrationError(f"feature capture failed for {group.name} {name}{done}: {error}") from error
+        output.extend(f"Captured {relative_to_root(path, root).as_posix()}" for path in paths)
+        output.extend(messages)
+    return output
+
+
 def create(
     repo_root: Path,
     name: str,
@@ -164,18 +290,7 @@ def create(
         raise NewMigrationError("name at least one object with --source TYPE:NAME")
     if any(family == name for _path, _schema, family, _revision in _migration_directories(root)):
         raise NewMigrationError(f"a migration named {name} already exists; edit it or use scripts/team.sh revise")
-    try:
-        schema = resolve_target(environ, "dev", "read", schema=schema).schema
-        migration_schemas = configured_migration_schemas(environ, "dev")
-    except TargetResolutionError as error:
-        raise NewMigrationError(str(error)) from error
-    # migrate applies a folder only as a MIGRATION_SCHEMA owner, so refuse a code owner it would reject, before DEV is read.
-    if schema not in migration_schemas:
-        raise NewMigrationError(
-            f"schema {schema} is not a migration schema for dev: migrations for this project run as "
-            f"MIGRATION_SCHEMA {', '.join(migration_schemas)}; use a --schema listed in MIGRATION_SCHEMA, "
-            "or review the profile with scripts/team.sh targets"
-        )
+    schema = _dev_read_schema(environ, schema)
     started = now()
     read_at = started.strftime("%Y-%m-%d %H:%M:%S UTC")
     scratch = root / "scratch" / "new-migration" / started.strftime("%Y%m%dT%H%M%S%fZ")
@@ -237,11 +352,24 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
                         help='object to start from, e.g. "PACKAGE BODY:MY_PKG"; repeat for several')
     parser.add_argument("--env", required=True, choices=("dev",), help="the source is always read from DEV")
     parser.add_argument("--schema", help="code schema, when several are configured")
+    routing = parser.add_mutually_exclusive_group()
+    routing.add_argument("--feature", metavar="SLUG",
+                         help="capture the named stored units into features/SLUG/<SCHEMA>/ (feature projects)")
+    routing.add_argument("--dated-folder", action="store_true",
+                         help="create a dated migration folder even in a feature project")
     args = parser.parse_args(argv)
     values = os.environ if environ is None else environ
+    schema = args.schema or values.get("PROJECT_SCHEMA") or None
+    root = Path(repo_root).resolve()
     try:
-        folder = create(repo_root, args.name, args.source, environ=values,
-                        schema=args.schema or values.get("PROJECT_SCHEMA") or None)
+        if args.feature is not None or (not args.dated_folder and uses_feature_files(root, args.source)):
+            for line in start_in_features(root, args.source, environ=values, schema=schema, feature=args.feature):
+                print(line)
+            return 0
+        folder = create(repo_root, args.name, args.source, environ=values, schema=schema)
+    except FeatureRoutingError as error:
+        print(error, file=sys.stderr)
+        return 2
     except NewMigrationError as error:
         print(f"new-migration error: {error}", file=sys.stderr)
         return 2

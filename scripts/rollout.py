@@ -2448,6 +2448,7 @@ def run_rollout(
     recovery_confirm: Callable[[str], str] | None = None,
     yes: bool = False,
     confirm_target: str | None = None,
+    release_tag: bool = True,
 ) -> int:
     """Keep schema-1 rollout behavior intact and route capsule runs through v2."""
     problem = _confirmation_flag_problem(
@@ -2472,6 +2473,7 @@ def run_rollout(
             prepare_only=prepare_only, capsule_path=capsule_path,
             stage_report_path=stage_report_path, recovery_attempt=recovery_attempt,
             recovery_confirm=recovery_confirm, yes=yes, confirm_target=confirm_target,
+            release_tag=release_tag,
         )
     if stage_report_path is not None or recovery_attempt is not None:
         raise RolloutError("stage report and recovery attempt require a feature capsule")
@@ -2513,7 +2515,14 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
         metavar="DB_UNIQUE_NAME",
         help="staging/prod: accept the confirmation when DB_UNIQUE_NAME equals every target's observed db_unique_name exactly",
     )
+    parser.add_argument(
+        "--no-release-tag",
+        action="store_true",
+        help="production capsule run: do not create the release/<date>-rNNN tag after a successful rollout",
+    )
     args = parser.parse_args(argv)
+    if args.no_release_tag and (args.env != "prod" or args.capsule is None or args.prepare or args.dry_run):
+        parser.error("--no-release-tag applies only to a production capsule rollout")
     if args.prepare and args.dry_run:
         parser.error("--prepare and --dry-run cannot be combined")
     if args.prepare and args.capsule is None:
@@ -2540,6 +2549,7 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
         recovery_confirm=_recovery_ack_from_terminal if args.recover is not None else None,
         yes=args.yes,
         confirm_target=args.confirm_target,
+        release_tag=not args.no_release_tag,
     )
 
 
