@@ -448,7 +448,9 @@ class BackupDbCliTests(unittest.TestCase):
         for wrapper, powershell in self.wrappers():
             with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as temporary:
                 script = self.make_checkout(Path(temporary), powershell=powershell)
-                mirror, original = self.seed_existing_mirror(script)
+                mirror, _ = self.seed_existing_mirror(script)
+                # snapshot() keys with '/', so the comparison holds on Windows too.
+                original = self.snapshot(mirror)
 
                 result = self.run_backup(
                     script,
