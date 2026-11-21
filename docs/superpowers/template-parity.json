@@ -749,8 +749,8 @@
       "status": "feature",
       "reason": "26.2 adds three binding tests for its schema-2 and capsule behaviour (test_a_version_one_migrate_binding_keeps_its_shape_and_only_a_capsule_adds_the_logical_schema, test_schema_two_auxiliary_target_uses_migration_profile_binding, test_schema_two_feature_steps_do_not_require_legacy_target_binding); 26.1 has no test that 26.2 lacks, and the occupied-receipt test is on both lines now. Both lines assert that a migration receives the active capsule writer lease. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings.",
       "blobs": [
-        "ae36b935af506b15708c88d6792b4ea4c59fd6dc",
-        "cc7eb960f1acfdcc7df803a95d5736c0a963714c"
+        "caaf8971ea404c3df92ce843089de73cd6ad7913",
+        "bf8a9b38f7ad3603d0584dcb3adc2ad059ea9701"
       ]
     },
     "tests/test_graphify_corpus.py": {
