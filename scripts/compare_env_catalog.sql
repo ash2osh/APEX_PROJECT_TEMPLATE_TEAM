@@ -379,7 +379,26 @@ DECLARE
               WHERE p.table_name = UPPER(x.object_name)))
          ORDER BY p.table_name, p.grantee, p.privilege OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
     ELSE
-      add_unavailable('object-grants', 'complete object-grant visibility requires owner session or DBA capture');
+      -- ASHARIF 2026-11-21: a login acting as the schema (no DBA capture) reads DBA_TAB_PRIVS when it can, for example
+      -- through SELECT_CATALOG_ROLE; the section stays unavailable only when that view cannot be read (ORA-00942).
+      BEGIN
+        add_query_section('object-grants', q'~
+          SCOPE_WITH
+          SELECT JSON_OBJECT('owner' VALUE p.owner, 'object_name' VALUE p.table_name,
+            'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
+            FROM dba_tab_privs p WHERE p.owner = :scope AND (SCOPE_ALL OR SCOPE_MATCH(p.table_name))
+             AND (DBMS_LOB.GETLENGTH(:baseline_prefixes) <= 2 OR EXISTS (
+               SELECT 1 FROM JSON_TABLE(:baseline_prefixes, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x
+                WHERE SUBSTR(p.table_name, 1, LENGTH(x.prefix)) = UPPER(x.prefix)))
+             AND (DBMS_LOB.GETLENGTH(:baseline_excluded) <= 2 OR NOT EXISTS (
+               SELECT 1 FROM JSON_TABLE(:baseline_excluded, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) x
+                WHERE p.table_name = UPPER(x.object_name)))
+           ORDER BY p.table_name, p.grantee, p.privilege OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+      EXCEPTION
+        WHEN OTHERS THEN
+          IF SQLCODE != -942 THEN RAISE; END IF;
+          add_unavailable('object-grants', 'complete object-grant visibility requires owner session, DBA capture or SELECT on DBA_TAB_PRIVS');
+      END;
     END IF;
   END;
 
@@ -764,31 +783,41 @@ DECLARE
   END;
 
   PROCEDURE add_views IS
+    l_scope_all PLS_INTEGER;
   BEGIN
     IF NOT selected('views') THEN RETURN; END IF;
     l_rows := JSON_ARRAY_T();
     l_pages := JSON_ARRAY_T();
     l_offset := 0;
     l_total := 0;
+    l_scope_all := CASE WHEN DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 AND DBMS_LOB.GETLENGTH(c_scope_names_json) <= 2 THEN 1 ELSE 0 END;
     LOOP
       l_page_count := 0;
       FOR view_row IN (
+        -- ASHARIF 2026-11-21: the wanted names are found first, then joined; a per-row scope test over every view took 11 s per capture.
+        WITH sp AS (SELECT /*+ MATERIALIZE */ UPPER(x.prefix) prefix
+                      FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x),
+             sn AS (SELECT /*+ MATERIALIZE */ x.object_name
+                      FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) x),
+             wanted AS (
+               SELECT /*+ MATERIALIZE */ v.view_name name
+                 FROM all_views v
+                WHERE v.owner = c_schema
+                  AND (l_scope_all = 1
+                    OR v.view_name IN (SELECT sn.object_name FROM sn)
+                    OR EXISTS (SELECT 1 FROM sp WHERE SUBSTR(v.view_name, 1, LENGTH(sp.prefix)) = sp.prefix))
+               UNION
+               SELECT d.name
+                 FROM all_dependencies d
+                WHERE d.owner = c_schema
+                  AND d.referenced_owner = c_schema
+                  AND (d.referenced_name IN (SELECT sn.object_name FROM sn)
+                    OR EXISTS (SELECT 1 FROM sp WHERE SUBSTR(d.referenced_name, 1, LENGTH(sp.prefix)) = sp.prefix)))
         SELECT v.view_name, o.status
           FROM all_views v
           JOIN all_objects o ON o.owner = v.owner AND o.object_name = v.view_name AND o.object_type = 'VIEW'
          WHERE v.owner = c_schema
-           AND ((DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 AND DBMS_LOB.GETLENGTH(c_scope_names_json) <= 2)
-             OR EXISTS (
-             SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
-              WHERE SUBSTR(v.view_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
-             OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
-              WHERE sn.object_name = v.view_name)
-             OR EXISTS (SELECT 1 FROM all_dependencies d WHERE d.owner = v.owner AND d.name = v.view_name
-              AND d.referenced_owner = d.owner AND (
-                EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
-                 WHERE SUBSTR(d.referenced_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
-                OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
-                 WHERE sn.object_name = d.referenced_name))))
+           AND v.view_name IN (SELECT wanted.name FROM wanted)
          ORDER BY v.view_name
          OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
       ) LOOP
@@ -1049,52 +1078,69 @@ DECLARE
   PROCEDURE add_stored_code IS
     line_count_value PLS_INTEGER;
     hash_sum_value NUMBER;
+    l_scope_all PLS_INTEGER;
+    l_fetched PLS_INTEGER;
   BEGIN
     IF NOT selected('stored-code') THEN RETURN; END IF;
     l_rows := JSON_ARRAY_T();
     l_pages := JSON_ARRAY_T();
     l_offset := 0;
     l_total := 0;
+    l_scope_all := CASE WHEN DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 AND DBMS_LOB.GETLENGTH(c_scope_names_json) <= 2 THEN 1 ELSE 0 END;
     LOOP
       l_page_count := 0;
+      l_fetched := 0;
       FOR code_row IN (
-        SELECT s.name, s.type, MAX(o.status) status
-          FROM all_source s
-          JOIN all_objects o ON o.owner = s.owner AND o.object_name = s.name AND o.object_type = s.type
-         WHERE s.owner = c_schema
-           AND s.type IN ('FUNCTION','PROCEDURE','PACKAGE','PACKAGE BODY','TYPE','TYPE BODY')
-           AND ((DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 AND DBMS_LOB.GETLENGTH(c_scope_names_json) <= 2)
-             OR EXISTS (
-             SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
-              WHERE SUBSTR(s.name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
-             OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
-              WHERE sn.object_name = s.name)
-             OR EXISTS (SELECT 1 FROM all_dependencies d WHERE d.owner = s.owner AND d.name = s.name
-              AND d.referenced_owner = d.owner AND (
-                EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) sp
-                 WHERE SUBSTR(d.referenced_name, 1, LENGTH(sp.prefix)) = UPPER(sp.prefix))
-                OR EXISTS (SELECT 1 FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) sn
-                 WHERE sn.object_name = d.referenced_name))))
-         GROUP BY s.name, s.type
-         ORDER BY s.type, s.name
+        -- ASHARIF 2026-11-21: the wanted names are found first, then joined; a per-row scope test over every source line took 40 s per capture.
+        WITH sp AS (SELECT /*+ MATERIALIZE */ UPPER(x.prefix) prefix
+                      FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x),
+             sn AS (SELECT /*+ MATERIALIZE */ x.object_name
+                      FROM JSON_TABLE(c_scope_names_json, '$[*]' COLUMNS (object_name VARCHAR2(128) PATH '$')) x),
+             wanted AS (
+               SELECT /*+ MATERIALIZE */ o.object_name name
+                 FROM all_objects o
+                WHERE o.owner = c_schema
+                  AND o.object_type IN ('FUNCTION','PROCEDURE','PACKAGE','PACKAGE BODY','TYPE','TYPE BODY')
+                  AND (l_scope_all = 1
+                    OR o.object_name IN (SELECT sn.object_name FROM sn)
+                    OR EXISTS (SELECT 1 FROM sp WHERE SUBSTR(o.object_name, 1, LENGTH(sp.prefix)) = sp.prefix))
+               UNION
+               SELECT d.name
+                 FROM all_dependencies d
+                WHERE d.owner = c_schema
+                  AND d.referenced_owner = c_schema
+                  AND (d.referenced_name IN (SELECT sn.object_name FROM sn)
+                    OR EXISTS (SELECT 1 FROM sp WHERE SUBSTR(d.referenced_name, 1, LENGTH(sp.prefix)) = sp.prefix)))
+        -- ALL_SOURCE is not joined here: for a login acting as the schema that view is slow (minutes) unless it is
+        -- read by exact owner, name and type, which fingerprint_source does; a unit without visible source is skipped below.
+        SELECT o.object_name name, o.object_type type, o.status status
+          FROM all_objects o
+         WHERE o.owner = c_schema
+           AND o.object_type IN ('FUNCTION','PROCEDURE','PACKAGE','PACKAGE BODY','TYPE','TYPE BODY')
+           AND o.object_name IN (SELECT wanted.name FROM wanted)
+         ORDER BY o.object_type, o.object_name
          OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
       ) LOOP
-        IF l_total >= c_max_rows THEN
-          RAISE_APPLICATION_ERROR(-20995, 'compare-env stored-code exceeded its 100000-row cap');
-        END IF;
+        l_fetched := l_fetched + 1;
         fingerprint_source(code_row.name, code_row.type, line_count_value, hash_sum_value);
-        l_page := JSON_OBJECT_T();
-        l_page.put('name', code_row.name);
-        l_page.put('type', code_row.type);
-        l_page.put('status', code_row.status);
-        l_page.put('line_count', line_count_value);
-        l_page.put('source_hash', hash_sum_value);
-        l_rows.append(l_page);
-        l_page_count := l_page_count + 1;
-        l_total := l_total + 1;
+        -- Only units whose source the session can read are listed, as when this list was read from ALL_SOURCE.
+        IF line_count_value > 0 THEN
+          IF l_total >= c_max_rows THEN
+            RAISE_APPLICATION_ERROR(-20995, 'compare-env stored-code exceeded its 100000-row cap');
+          END IF;
+          l_page := JSON_OBJECT_T();
+          l_page.put('name', code_row.name);
+          l_page.put('type', code_row.type);
+          l_page.put('status', code_row.status);
+          l_page.put('line_count', line_count_value);
+          l_page.put('source_hash', hash_sum_value);
+          l_rows.append(l_page);
+          l_page_count := l_page_count + 1;
+          l_total := l_total + 1;
+        END IF;
       END LOOP;
       l_pages.append(l_page_count);
-      EXIT WHEN l_page_count < c_page_size;
+      EXIT WHEN l_fetched < c_page_size;
       l_offset := l_offset + c_page_size;
     END LOOP;
     l_sections.put('stored-code', l_rows);
