@@ -669,8 +669,8 @@
       "status": "intended",
       "reason": "Same manifest validation (scripts/backup_manifest.py is identical) under each line own test names: 26.2 checks bash and PowerShell parity for valid manifests and that an invalid manifest keeps the mirror; 26.1 checks CRLF and whitespace manifests and malformed-manifest refusal per wrapper Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-21 (table triggers and sequences): both test the seventh driver argument, '-' for a code-only schema, the merge collision refusal and that a tables-only run does not carry over triggers/.",
       "blobs": [
-        "7a83dc4c888a0de02f84b789cf4f42dad6d5d824",
-        "a1834d6d2739a11e3b0bf8ffa5c25c52a343469b"
+        "412c6cd0f4c54de158f26c5b33b6dbc42336fc12",
+        "cd5d1bf0bb260346719bd2b7b006cdd5876eb32f"
       ]
     },
     "tests/test_baseline.py": {
