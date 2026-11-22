@@ -54,7 +54,11 @@ _PROFILE_KEYS = {
     "apex": ("APEX_PARSING_SCHEMA", "APEX_SQLCL_CONNECTION", "APEX_EXPECTED_USER"),
     "ords": _ORDS_KEYS,
 }
-_IDENTITY_ATTRIBUTES = {"session_user", "current_user", "current_schema", "sessionid", "db_name", "service_name"}
+_IDENTITY_ATTRIBUTES = {
+    "session_user", "current_user", "current_schema", "sessionid", "db_name", "service_name",
+    # AGENTS.md tells agents to read the target name this way before --confirm-target (E5).
+    "db_unique_name", "con_name",
+}
 _MARKER_RE = re.compile(r"ROQ_[a-f0-9]{32}\Z")
 _SQL_PRODUCTION_MARKER = (
     r"(^|[^[:alnum:]])(production|live)[[:digit:]]*([^[:alnum:]]|$)"

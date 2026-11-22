@@ -226,7 +226,9 @@ def _live_catalog(structural: Mapping) -> tuple[dict[str, set[str]], dict[str, s
                 common.setdefault(name, set()).add(actual_type)
     for row in structural["synonyms"]:
         owner, name = row.get("owner"), row.get("name")
-        if owner in {"PUBLIC", "public"} or owner:
+        # A PUBLIC synonym lives in the PUBLIC namespace, not the schema's: it never occupies a schema name.
+        # View dependencies still see it through _public_synonyms.
+        if owner and str(owner).upper() != "PUBLIC":
             if isinstance(name, str):
                 common.setdefault(name, set()).add("SYNONYM")
     for row in structural["indexes"]:
@@ -302,11 +304,24 @@ def _simulated_catalog(state_structural: Mapping, operations: Sequence[Mapping])
                 indexes[operation["constraint"]] = {str(operation.get("table", ""))}
                 common.setdefault(operation["constraint"], set()).add("INDEX")
         elif kind == "CREATE_SYNONYM":
-            if operation.get("owner") in {"PUBLIC", "public"}:
-                common.setdefault(name, set()).add("SYNONYM")
-            else:
+            if str(operation.get("owner") or "").upper() != "PUBLIC":
                 common.setdefault(name, set()).add("SYNONYM")
     return common, indexes, columns
+
+
+def _public_synonyms(state_structural: Mapping, operations: Sequence[Mapping]) -> set[str]:
+    """PUBLIC synonym names in the selected scope plus those earlier operations create."""
+    names = {
+        str(row["name"]) for row in state_structural["synonyms"]
+        if str(row.get("owner", "")).upper() == "PUBLIC" and isinstance(row.get("name"), str)
+    }
+    names.update(
+        str(operation["name"]) for operation in operations
+        if operation.get("kind") == "CREATE_SYNONYM"
+        and str(operation.get("owner") or "").upper() == "PUBLIC"
+        and isinstance(operation.get("name"), str)
+    )
+    return names
 
 
 def _object_present(common: Mapping[str, set[str]], name: str, types: Sequence[str] | None = None) -> bool:
@@ -324,26 +339,50 @@ def _common_ddl_check(check_id: str, name: str, *, expected_present: bool = Fals
     return _query(check_id, f"SELECT CASE WHEN {condition} THEN 1 ELSE 0 END FROM DUAL")
 
 
-def _index_before_check(check_id: str, name: str, table: str, columns: Sequence[str], *, table_present: bool) -> QueryCheck:
-    column_predicate = " AND ".join(
-        f"EXISTS (SELECT 1 FROM ALL_TAB_COLUMNS C{i} WHERE C{i}.OWNER = :target_schema "
-        f"AND C{i}.TABLE_NAME = {_literal(table)} AND C{i}.COLUMN_NAME = {_literal(column)})"
-        for i, column in enumerate(columns, 1)
-    ) or "1 = 1"
-    table_predicate = (
-        f"EXISTS (SELECT 1 FROM ALL_TABLES T WHERE T.OWNER = :target_schema AND T.TABLE_NAME = {_literal(table)})"
-        if table_present else "1 = 1"
+def _index_before_check(
+    check_id: str,
+    name: str,
+    table: str,
+    columns: Sequence[str],
+    *,
+    table_present: bool,
+    staged_columns: frozenset[tuple[str, str]] = frozenset(),
+) -> QueryCheck:
+    """Index name free; table and columns present unless an earlier payload of this checkpoint adds them.
+
+    Preconditions run inside the write session before every payload, so a table created or a column added by an
+    earlier statement of the same checkpoint cannot be required yet.
+    """
+    terms: list[str] = []
+    if table_present:
+        terms.append(
+            f"EXISTS (SELECT 1 FROM ALL_TABLES T WHERE T.OWNER = :target_schema AND T.TABLE_NAME = {_literal(table)})"
+        )
+        terms.extend(
+            f"EXISTS (SELECT 1 FROM ALL_TAB_COLUMNS C{i} WHERE C{i}.OWNER = :target_schema "
+            f"AND C{i}.TABLE_NAME = {_literal(table)} AND C{i}.COLUMN_NAME = {_literal(column)})"
+            for i, column in enumerate(columns, 1)
+            if (table, column) not in staged_columns
+        )
+    terms.append(
+        "NOT EXISTS (SELECT 1 FROM ALL_INDEXES I WHERE I.OWNER = :target_schema "
+        f"AND I.INDEX_NAME = {_literal(name)})"
     )
-    sql = (
-        "SELECT CASE WHEN "
-        f"{table_predicate} AND ({column_predicate}) AND NOT EXISTS "
-        "(SELECT 1 FROM ALL_INDEXES I WHERE I.OWNER = :target_schema "
-        f"AND I.INDEX_NAME = {_literal(name)}) THEN 1 ELSE 0 END FROM DUAL"
-    )
-    return _query(check_id, sql)
+    return _query(check_id, f"SELECT CASE WHEN {' AND '.join(terms)} THEN 1 ELSE 0 END FROM DUAL")
 
 
-def _dependency_check(check_id: str, name: str) -> QueryCheck:
+def _tab_privs_source(acting_as: bool) -> tuple[str, str]:
+    """Privilege view and its owner column for generated grant checks.
+
+    ALL_TAB_PRIVS shows a grant only when the session user is its grantor, grantee or owner, so a login acting
+    as the target schema (ALTER SESSION SET CURRENT_SCHEMA) cannot see grants between other schemas there. That
+    login reads DBA_TAB_PRIVS; prepare has already proved it can (the object-grants capture is complete).
+    """
+    return ("DBA_TAB_PRIVS", "OWNER") if acting_as else ("ALL_TAB_PRIVS", "TABLE_SCHEMA")
+
+
+def _dependency_check(check_id: str, name: str, *, acting_as: bool = False) -> QueryCheck:
+    privs, privs_owner = _tab_privs_source(acting_as)
     direct = (
         "EXISTS (SELECT 1 FROM ALL_OBJECTS O WHERE O.OWNER = :target_schema "
         f"AND O.OBJECT_NAME = {_literal(name)} AND O.OBJECT_TYPE IN ('TABLE','VIEW','MATERIALIZED VIEW'))"
@@ -354,7 +393,7 @@ def _dependency_check(check_id: str, name: str) -> QueryCheck:
         "(S.TABLE_OWNER = :target_schema AND EXISTS (SELECT 1 FROM ALL_OBJECTS O "
         "WHERE O.OWNER = S.TABLE_OWNER AND O.OBJECT_NAME = S.TABLE_NAME "
         "AND O.OBJECT_TYPE IN ('TABLE','VIEW','MATERIALIZED VIEW'))) "
-        "OR EXISTS (SELECT 1 FROM ALL_TAB_PRIVS P WHERE P.TABLE_SCHEMA = S.TABLE_OWNER "
+        f"OR EXISTS (SELECT 1 FROM {privs} P WHERE P.{privs_owner} = S.TABLE_OWNER "
         "AND P.TABLE_NAME = S.TABLE_NAME AND P.GRANTEE IN (:target_schema, 'PUBLIC') AND P.PRIVILEGE = 'SELECT')))"
     )
     public_synonym = (
@@ -364,7 +403,7 @@ def _dependency_check(check_id: str, name: str) -> QueryCheck:
         "(S.TABLE_OWNER = :target_schema AND EXISTS (SELECT 1 FROM ALL_OBJECTS O "
         "WHERE O.OWNER = S.TABLE_OWNER AND O.OBJECT_NAME = S.TABLE_NAME "
         "AND O.OBJECT_TYPE IN ('TABLE','VIEW','MATERIALIZED VIEW'))) "
-        "OR EXISTS (SELECT 1 FROM ALL_TAB_PRIVS P WHERE P.TABLE_SCHEMA = S.TABLE_OWNER "
+        f"OR EXISTS (SELECT 1 FROM {privs} P WHERE P.{privs_owner} = S.TABLE_OWNER "
         "AND P.TABLE_NAME = S.TABLE_NAME AND P.GRANTEE IN (:target_schema, 'PUBLIC') AND P.PRIVILEGE = 'SELECT')))"
     )
     return _query(
@@ -606,10 +645,12 @@ def _effect_queries(
     replace_existing_view: bool = False,
     staged_tables: frozenset[str] = frozenset(),
     staged_columns: frozenset[tuple[str, str]] = frozenset(),
+    acting_as: bool = False,
 ) -> tuple[list[QueryCheck], list[QueryCheck]]:
     kind, name = operation.get("kind"), operation.get("name")
     if not isinstance(name, str):
         return [], []
+    privs, privs_owner = _tab_privs_source(acting_as)
     if kind == "COMMENT_ON":
         return _comment_queries(operation, index, staged_tables, staged_columns)
     if kind == "ADD_CONSTRAINT":
@@ -659,7 +700,10 @@ def _effect_queries(
     elif kind == "CREATE_INDEX":
         table = str(operation.get("table", ""))
         columns = tuple(str(item) for item in operation.get("columns", ()))
-        before.append(_index_before_check(f"structural-before-{index:04d}", name, table, columns, table_present=True))
+        before.append(_index_before_check(
+            f"structural-before-{index:04d}", name, table, columns,
+            table_present=table not in staged_tables, staged_columns=staged_columns,
+        ))
         unique_condition = "UNIQUE" if operation.get("unique") is True else "NONUNIQUE"
         if operation.get("has_expressions") is True:
             total_columns = int(operation.get("total_columns", len(columns)))
@@ -716,13 +760,13 @@ def _effect_queries(
                 before.append(_query(
                     f"structural-before-{index:04d}-{ordinal:02d}-{privilege_index:02d}",
                     "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_OBJECTS O WHERE O.OWNER = :target_schema "
-                    f"AND O.OBJECT_NAME = {_literal(name)}) AND NOT EXISTS (SELECT 1 FROM ALL_TAB_PRIVS P "
-                    f"WHERE P.TABLE_SCHEMA = :target_schema AND P.TABLE_NAME = {_literal(name)} AND P.GRANTEE = {_literal(grantee)} "
+                    f"AND O.OBJECT_NAME = {_literal(name)}) AND NOT EXISTS (SELECT 1 FROM {privs} P "
+                    f"WHERE P.{privs_owner} = :target_schema AND P.TABLE_NAME = {_literal(name)} AND P.GRANTEE = {_literal(grantee)} "
                     f"AND P.PRIVILEGE = {_literal(privilege)} AND P.GRANTABLE = {_literal(grantable)}) THEN 1 ELSE 0 END FROM DUAL",
                 ))
                 after.append(_query(
                     f"structural-after-{index:04d}-{ordinal:02d}-{privilege_index:02d}",
-                    "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TAB_PRIVS P WHERE P.TABLE_SCHEMA = :target_schema "
+                    f"SELECT CASE WHEN EXISTS (SELECT 1 FROM {privs} P WHERE P.{privs_owner} = :target_schema "
                     f"AND P.TABLE_NAME = {_literal(name)} AND P.GRANTEE = {_literal(grantee)} "
                     f"AND P.PRIVILEGE = {_literal(privilege)} AND P.GRANTABLE = {_literal(grantable)}) THEN 1 ELSE 0 END FROM DUAL",
                 ))
@@ -819,11 +863,12 @@ def _dependency_is_available(
     name: str,
     owner: str,
     staged_synonyms: Mapping[str, tuple[str, str]],
+    public_synonyms: frozenset[str] | set[str] = frozenset(),
 ) -> bool:
     object_types = common.get(name, set())
     if object_types.intersection({"TABLE", "VIEW", "MATERIALIZED VIEW"}):
         return True
-    if "SYNONYM" in object_types:
+    if "SYNONYM" in object_types or name in public_synonyms:
         return _synonym_dependency_available(structural, common, name, owner, staged_synonyms)
     return False
 
@@ -844,6 +889,11 @@ def prepare_checkpoint(
     prior_ops_with_checkpoint, _seen_prior_checkpoints = _prior_operations(earlier_effects, checkpoint.schema)
     prior_ops = [{key: value for key, value in row.items() if key != "_checkpoint"} for row in prior_ops_with_checkpoint]
     common, indexes, columns = _simulated_catalog(structural, prior_ops)
+    identity = state.get("identity")
+    session_user = identity.get("session_user") if isinstance(identity, Mapping) else None
+    acting_as = isinstance(session_user, str) and session_user.upper() != checkpoint.schema.upper()
+    public_synonyms = _public_synonyms(structural, prior_ops)
+    staged_public_synonyms: set[str] = set()
     staged_names: set[str] = set()
     staged_columns: set[tuple[str, str]] = set()
     constraint_names = _constraint_names(structural, prior_ops)
@@ -941,8 +991,6 @@ def prepare_checkpoint(
             missing = sorted(targets - available)
             if missing:
                 raise StructuralPreflightError(f"missing column(s) on {table} for ALTER TABLE MODIFY: {', '.join(missing)}")
-        elif kind == "CREATE_VIEW":
-            pass
         elif kind == "COMMENT_ON":
             if not _object_present(common, name, ("TABLE", "VIEW")):
                 raise StructuralPreflightError(f"missing COMMENT ON target {name}")
@@ -981,14 +1029,21 @@ def prepare_checkpoint(
                 raise StructuralPreflightError(f"missing direct grant target {name}")
         elif kind == "CREATE_SYNONYM":
             synonym_name = name
+            synonym_owner = str(operation.get("owner") or checkpoint.schema).upper()
             target_name = str(operation.get("target_name", ""))
             target_owner = str(operation.get("target_owner", "")).upper()
             if target_owner != checkpoint.schema.upper() or not _object_present(common, target_name):
                 raise StructuralPreflightError(f"missing synonym target {target_owner}.{target_name}")
-            if synonym_name in staged_names or _object_present(common, synonym_name):
-                raise StructuralPreflightError(f"synonym namespace is occupied for {synonym_name}{OCCUPIED_HINT}")
-            staged_names.add(synonym_name)
-            common.setdefault(synonym_name, set()).add("SYNONYM")
+            if synonym_owner == "PUBLIC":
+                if synonym_name in staged_public_synonyms or synonym_name in public_synonyms:
+                    raise StructuralPreflightError(f"synonym namespace is occupied for {synonym_name}{OCCUPIED_HINT}")
+                staged_public_synonyms.add(synonym_name)
+                public_synonyms.add(synonym_name)
+            else:
+                if synonym_name in staged_names or _object_present(common, synonym_name):
+                    raise StructuralPreflightError(f"synonym namespace is occupied for {synonym_name}{OCCUPIED_HINT}")
+                staged_names.add(synonym_name)
+                common.setdefault(synonym_name, set()).add("SYNONYM")
             staged_synonyms[synonym_name] = (target_owner, target_name)
         else:
             raise StructuralPreflightError(f"unsupported structural effect {kind}")
@@ -1001,25 +1056,24 @@ def prepare_checkpoint(
                     raise StructuralPreflightError(f"unsupported external view dependency {dep_owner}.{dep_name}")
                 if dep_name == "DUAL":
                     continue
-                if not _dependency_is_available(structural, common, dep_name, checkpoint.schema, staged_synonyms):
+                if not _dependency_is_available(structural, common, dep_name, checkpoint.schema, staged_synonyms, public_synonyms):
                     raise StructuralPreflightError(f"missing view dependency {dep_name} required by {name}")
                 if dep_name not in staged_names and dep_name not in prior_provider:
                     dependency_ordinal += 1
                     preconditions.append(_dependency_check(
-                        f"structural-dependency-{index:04d}-{dependency_ordinal:02d}", dep_name,
+                        f"structural-dependency-{index:04d}-{dependency_ordinal:02d}", dep_name, acting_as=acting_as,
                     ))
 
         before_queries, after_queries = _effect_queries(
             operation, index, checkpoint.schema, replace_existing_view=replace_existing_view,
-            staged_tables=frozenset(staged_names), staged_columns=frozenset(staged_columns),
+            staged_tables=frozenset(staged_names), staged_columns=frozenset(staged_columns), acting_as=acting_as,
         )
         if kind == "ALTER_ADD_COLUMN":
             staged_columns.update((str(operation.get("table", "")), str(item)) for item in operation.get("columns", ()))
         # Preconditions for same-checkpoint dependencies are evaluated inside the
         # write session before all payloads, so omit assertions that only become
-        # true after an earlier payload in this checkpoint.
-        if kind == "CREATE_INDEX" and str(operation.get("table", "")) in staged_names:
-            before_queries = [query for query in before_queries if "ALL_TABLES" not in query.sql]
+        # true after an earlier payload in this checkpoint. _index_before_check
+        # already leaves out a table or column staged by this checkpoint.
         if kind == "GRANT_OBJECT" and name in prior_names:
             pass
         elif kind == "GRANT_OBJECT" and name in staged_names:
@@ -1029,7 +1083,7 @@ def prepare_checkpoint(
         if kind == "CREATE_SYNONYM":
             target_name = str(operation.get("target_name", ""))
             if target_name in common and target_name not in staged_names and target_name not in prior_provider:
-                preconditions.append(_dependency_check(f"structural-synonym-target-{index:04d}", target_name))
+                preconditions.append(_dependency_check(f"structural-synonym-target-{index:04d}", target_name, acting_as=acting_as))
         preconditions.extend(before_queries)
         postconditions.extend(after_queries)
 
@@ -1248,8 +1302,19 @@ def strip_prior_effects(structural: Mapping, prior_effects: Sequence[Mapping]) -
             if row.get("table_name") not in created_by_kind["CREATE_TABLE"]
             and row.get("name") not in created_by_kind["CREATE_TABLE"]
         ]
+    identity_sequences: set[str] = set()
     if "identity-columns" in result:
+        # The system-named sequence behind an identity column of an earlier-created table is an effect of that
+        # CREATE TABLE as well, and so are every index on that table (implicit or named in the same DDL).
+        identity_sequences = {
+            str(row["sequence_name"]) for row in result["identity-columns"]
+            if row.get("table_name") in created_by_kind["CREATE_TABLE"] and isinstance(row.get("sequence_name"), str)
+        }
         result["identity-columns"] = [row for row in result["identity-columns"] if row.get("table_name") not in created_by_kind["CREATE_TABLE"]]
+    if "sequences" in result and identity_sequences:
+        result["sequences"] = [row for row in result["sequences"] if row.get("name") not in identity_sequences]
+    if "indexes" in result:
+        result["indexes"] = [row for row in result["indexes"] if row.get("table_name") not in created_by_kind["CREATE_TABLE"]]
     if "indexes" in result and added_constraints:
         implicit = {
             str(effect["constraint"]) for effect in added_constraints

@@ -723,13 +723,6 @@ def _run_capsule_rollout(
             "confirmedBy": None,
             "error": None,
         }
-        if dry_run:
-            report["steps"] = [dict(step, status="planned") for step in report["steps"]]
-            rollout._finish_report(report, started, "planned", 0)
-            rollout._write_reports(report, report_paths)
-            rollout._announce_report_paths(report_paths, root)
-            return 0
-
         capsule_digests = (
             f"\nCapsule payload SHA-256: {capsule.payload_digest}"
             + f"\nWorkflow engine SHA-256: {capsule.engine_digest}"

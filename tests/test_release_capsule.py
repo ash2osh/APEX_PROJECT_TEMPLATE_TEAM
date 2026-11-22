@@ -914,5 +914,81 @@ class ReleaseCapsuleTests(unittest.TestCase):
             self.release_capsule.build_capsule(self.root, self.manifest_path, (), {})
 
 
+class EngineDigestCoverageTests(unittest.TestCase):
+    """B5: every file a capsule rollout imports, sources or includes is bound by the engine digest."""
+
+    ENTRY_POINTS = (
+        "scripts/rollout.py", "scripts/rollout_capsule.py", "scripts/feature_release.py",
+        "scripts/migrate.py", "scripts/release_state.py",
+    )
+    # Reached by the walk but never executed during a capsule rollout (developer or DEV-only paths).
+    NOT_RUNTIME: frozenset[str] = frozenset({
+        # feature_cli.py (an engine file) imports these command modules for freeze, doctor, convert-plan,
+        # release-plan and DEV apply; a capsule prepare or rollout never runs them.
+        "scripts/feature_convert.py", "scripts/feature_doctor.py", "scripts/release_plan.py",
+        "scripts/migration_plan.py", "scripts/feature_dev.py", "scripts/feature_dev_views.py",
+    })
+    # Only references that are used as paths count; a file name inside a message (for example
+    # "run scripts/team.sh reconcile-migration") does not make that file part of the rollout.
+    _PY_PATH = re.compile(r"""(?:with_name\(\s*|/\s*|["']scripts/)["']?([A-Za-z0-9_]+\.(?:sql|sh|py))["']""")
+    _SQL_INCLUDE = re.compile(r"""(?m)^\s*@@?"?(?:[^"\s]*/)?([A-Za-z0-9_]+\.sql)""")
+    _SH_PATH = re.compile(r"""\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/([A-Za-z0-9_]+\.(?:sql|sh|py))""")
+
+    def setUp(self) -> None:
+        import sys
+
+        self.root = Path(__file__).resolve().parents[1]
+        if str(self.root) not in sys.path:
+            sys.path.insert(0, str(self.root))
+        from scripts import release_capsule
+
+        self.engine = set(release_capsule._engine_file_list(self.root))
+
+    def _python_imports(self, relative: str) -> set[str]:
+        import ast
+
+        tree = ast.parse((self.root / relative).read_text(encoding="utf-8"))
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 1 and not module:
+                    names.update(alias.name for alias in node.names)
+                elif node.level == 1:
+                    names.add(module.split(".")[0])
+                elif module.startswith("scripts."):
+                    names.add(module.split(".")[1])
+                elif module == "scripts":
+                    names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.Import):
+                names.update(alias.name.split(".")[1] for alias in node.names if alias.name.startswith("scripts."))
+        return {f"scripts/{name}.py" for name in names if (self.root / "scripts" / f"{name}.py").is_file()}
+
+    def _referenced_files(self, relative: str) -> set[str]:
+        text = (self.root / relative).read_text(encoding="utf-8", errors="replace")
+        pattern = {".py": self._PY_PATH, ".sql": self._SQL_INCLUDE, ".sh": self._SH_PATH}[Path(relative).suffix]
+        found: set[str] = set()
+        for name in pattern.findall(text):
+            candidate = f"scripts/{name}"
+            if candidate != relative and (self.root / candidate).is_file() and not name.startswith("test_"):
+                found.add(candidate)
+        return found
+
+    def test_engine_files_cover_runtime_imports_and_sql_includes(self) -> None:
+        reached: set[str] = set()
+        pending = [path for path in self.ENTRY_POINTS if (self.root / path).is_file()]
+        while pending:
+            current = pending.pop()
+            if current in reached:
+                continue
+            reached.add(current)
+            following = self._referenced_files(current)
+            if current.endswith(".py"):
+                following |= self._python_imports(current)
+            pending.extend(sorted(following - reached))
+        missing = sorted(reached - self.engine - self.NOT_RUNTIME - {"scripts/__init__.py"})
+        self.assertEqual([], missing, "runtime files reached from the rollout entry points are not in the engine digest")
+
+
 if __name__ == "__main__":
     unittest.main()

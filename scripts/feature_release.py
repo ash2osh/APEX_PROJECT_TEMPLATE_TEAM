@@ -215,6 +215,14 @@ def _capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_d
             baseline_names=list(dict.fromkeys((*source_names, *view_names))),
             scope_names=object_names,
         )
+        unavailable = catalog.get("unavailable") if isinstance(catalog, Mapping) else None
+        for section in ("object-grants", "feature-synonym-access"):
+            reason = unavailable.get(section) if isinstance(unavailable, Mapping) else None
+            if reason:
+                raise FeatureReleaseError(
+                    f"selected {target.environment} capture cannot read {section} ({reason}); "
+                    "grant checks need SELECT on DBA_TAB_PRIVS when the login acts as the schema"
+                )
         baseline._complete(catalog, sections)
         identity = baseline._source_identity(catalog.get("identity"), f"{target.environment} selected feature capture")
     except (baseline.BaselineError, CatalogError, OSError, RuntimeError, ValueError) as error:
@@ -316,6 +324,24 @@ def _capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_d
     }
 
 
+_TRIGGER_BODY_START = re.compile(r"(?i)\b(?:COMPOUND\s+TRIGGER|DECLARE|BEGIN|CALL)\b")
+_TRIGGER_STATE_CLAUSE = re.compile(r"(?i)\b(?:ENABLE|DISABLE)\s+")
+
+
+def _without_trigger_state_clause(lines: list[str]) -> list[str]:
+    """Trigger source as ALL_SOURCE stores it: without the header's ENABLE or DISABLE clause.
+
+    Oracle drops the keyword and the whitespace after it, newline included (live check, 23ai): a standalone
+    "ENABLE" line disappears, and "... FOR EACH ROW DISABLE" + "BEGIN ..." becomes one line. The trigger's state
+    lives only in ALL_TRIGGERS.STATUS. Only the header, before the trigger body, is changed.
+    """
+    text = "".join(lines)
+    body = _TRIGGER_BODY_START.search(text)
+    header_end = body.start() if body is not None else len(text)
+    header = _TRIGGER_STATE_CLAUSE.sub("", text[:header_end])
+    return (header + text[header_end:]).splitlines(keepends=True)
+
+
 def _stored_source(item: FeatureInput) -> tuple[dict, dict[str, str]]:
     if item.unit is None or item.category != "stored-source":
         raise FeatureReleaseError(f"selected feature source is not a stored unit: {item.path}")
@@ -360,6 +386,8 @@ def _stored_source(item: FeatureInput) -> tuple[dict, dict[str, str]]:
         # columns, so the expected header does too. A trigger header keeps the qualifier as written (live check, 23ai).
         owner_start, name_start = header.start("first"), header.start("second")
         lines[0] = lines[0][:owner_start] + " " * (name_start - owner_start) + lines[0][name_start:]
+    if object_type == "TRIGGER":
+        lines = _without_trigger_state_clause(lines)
     overrides: dict[str, str] = {}
     for start, end in spans[:-1]:
         statement = text[start:end].strip()
@@ -711,6 +739,13 @@ def _app_targets(root: Path, steps: Sequence[Mapping], environment: str, environ
             target = resolve_target(environ, environment, "read", schema=schema)
         except (OSError, ValueError, TargetResolutionError) as error:
             raise FeatureReleaseError(f"application {app_id} target descriptor/profile is invalid: {error}") from error
+        # The rollout confirms every prepared target by its observed db_unique_name (--confirm-target and
+        # production), so an application target records the identity it was prepared against, like a step target.
+        run_dir = root / "scratch" / "feature-release-prepare" / environment / f"app-{app_id}-identity"
+        try:
+            identity = _identity(target, rollout._observe_target_identity(target, run_dir))
+        except (OSError, rollout.RolloutError, TargetResolutionError) as error:
+            raise FeatureReleaseError(f"cannot capture complete target identity for application {app_id}: {error}") from error
         targets[f"app:{app_id}"] = {
             "workspace": descriptor["workspace"]["name"],
             "schema": schema,
@@ -718,6 +753,7 @@ def _app_targets(root: Path, steps: Sequence[Mapping], environment: str, environ
             "expectedUser": target.expected_user,
             "descriptorPath": relative_to_root(descriptor_path, root).as_posix(),
             "descriptorSha256": descriptor_hash,
+            "observed": identity,
         }
     return targets
 
@@ -1442,6 +1478,18 @@ def load_target_plan(repo_root: Path, capsule: release_capsule.ReleaseCapsule, e
     supplied_step_targets = {key for key in loaded.targets if isinstance(key, str) and key.startswith("step:")}
     if supplied_step_targets != expected_step_targets:
         raise FeatureReleaseError("target plan does not bind every SQL, ORDS or migration step exactly once")
+    for step in steps:
+        if step.get("type") != "app-deploy":
+            continue
+        app_record = loaded.targets.get(f"app:{step.get('appId')}")
+        observed = complete_observed_identity(app_record.get("observed")) if isinstance(app_record, Mapping) else None
+        if (
+            observed is None
+            or observed != app_record.get("observed")
+            or observed["session_user"].upper() != str(app_record.get("expectedUser", "")).upper()
+            or observed["current_schema"].upper() != str(app_record.get("schema", "")).upper()
+        ):
+            raise FeatureReleaseError(f"application {step.get('appId')} prepared target identity is incomplete")
     target_fields = {
         "environment", "operation", "logicalSchema", "connection", "expectedUser",
         "schema", "classification", "observed",
@@ -1908,6 +1956,87 @@ def _run_apply_session(
     return identity, 1
 
 
+_UNIT_FAMILY = {"PACKAGE BODY": "PACKAGE", "TYPE BODY": "TYPE"}
+_REVALIDATED_UNIT_SECTIONS = ("stored-code", "views", "triggers", "invalid-objects", "feature-dependencies")
+
+
+def _unit_family(object_type: object) -> str:
+    text = str(object_type or "").upper()
+    return _UNIT_FAMILY.get(text, text)
+
+
+def _earlier_capsule_units(
+    capsule: release_capsule.ReleaseCapsule, checkpoint: int, schema: str,
+) -> frozenset[tuple[str, str]]:
+    """(type family, name) of stored units written by earlier checkpoints of the same schema in this capsule."""
+    units: set[tuple[str, str]] = set()
+    for prior in capsule.checkpoints[: max(0, checkpoint - 1)]:
+        if prior.schema != schema:
+            continue
+        for item in prior.inputs:
+            if item.unit is not None:
+                units.add((_unit_family(item.unit[1]), str(item.unit[2])))
+    return frozenset(units)
+
+
+def _revalidation_row_key(section: str, row: Mapping) -> tuple[str, str]:
+    if section == "views":
+        return ("VIEW", str(row.get("name", "")))
+    if section == "triggers":
+        return ("TRIGGER", str(row.get("name", "")))
+    return (_unit_family(row.get("type")), str(row.get("name", "")))
+
+
+def _revalidation_view(
+    structural: Mapping,
+    guard_structural: Mapping,
+    earlier_units: frozenset[tuple[str, str]],
+    checkpoint: int,
+) -> tuple[dict, dict]:
+    """Comparable (fresh, guard) selected metadata that ignores only this capsule's own earlier effects.
+
+    From the second checkpoint on, an earlier checkpoint of the same capsule may have rewritten a selected
+    unit (its own source verification proved that write) or invalidated a dependent by DDL. Rows of units an
+    earlier checkpoint wrote are left out on both sides, and a dependent whose metadata is unchanged except
+    VALID -> INVALID is compared as VALID. Anything else that differs is still live drift.
+    """
+    fresh = {section: [dict(row) for row in rows] for section, rows in structural.items()}
+    guard = {section: [dict(row) for row in rows] for section, rows in guard_structural.items()}
+    if checkpoint <= 1:
+        return fresh, guard
+    for side in (fresh, guard):
+        for section in _REVALIDATED_UNIT_SECTIONS:
+            if section not in side:
+                continue
+            if section == "feature-dependencies":
+                names = {name for _family, name in earlier_units}
+                side[section] = [row for row in side[section] if str(row.get("name", "")) not in names]
+            else:
+                side[section] = [row for row in side[section] if _revalidation_row_key(section, row) not in earlier_units]
+    flipped: set[tuple[str, str]] = set()
+    for section, status_field in (("stored-code", "status"), ("views", "status"), ("triggers", "object_status")):
+        guard_rows = {_revalidation_row_key(section, row): row for row in guard.get(section, ())}
+        for row in fresh.get(section, ()):
+            key = _revalidation_row_key(section, row)
+            prepared = guard_rows.get(key)
+            if (
+                prepared is not None
+                and str(prepared.get(status_field, "")).upper() == "VALID"
+                and str(row.get(status_field, "")).upper() == "INVALID"
+                and {k: v for k, v in row.items() if k != status_field} == {k: v for k, v in prepared.items() if k != status_field}
+            ):
+                row[status_field] = prepared[status_field]
+                flipped.add(key)
+    if flipped and "invalid-objects" in fresh:
+        prepared_invalid = {_revalidation_row_key("invalid-objects", row) for row in guard.get("invalid-objects", ())}
+        fresh["invalid-objects"] = [
+            row for row in fresh["invalid-objects"]
+            if _revalidation_row_key("invalid-objects", row) in prepared_invalid
+            or _revalidation_row_key("invalid-objects", row) not in flipped
+        ]
+    return fresh, guard
+
+
 def _execute_checkpoint_under_lease(
     repo_root: Path,
     capsule: release_capsule.ReleaseCapsule,
@@ -1977,7 +2106,15 @@ def _execute_checkpoint_under_lease(
             structural = feature_preflight.strip_prior_effects(structural, structural_plan.get("priorEffects", []))
         except (TypeError, ValueError) as error:
             raise FeatureReleaseError(f"selected structural revalidation is malformed: {error}") from error
-    if not isinstance(structural, Mapping) or _sha256(_canonical_bytes(structural)) != guard.get("structuralSha256"):
+    guard_structural = guard.get("structural")
+    if not isinstance(guard_structural, Mapping) or _sha256(_canonical_bytes(guard_structural)) != guard.get("structuralSha256"):
+        raise FeatureReleaseError("prepared structural checkpoint guard digest is malformed")
+    if not isinstance(structural, Mapping):
+        raise FeatureReleaseError("live selected target metadata changed after preparation")
+    fresh_view, guard_view = _revalidation_view(
+        structural, guard_structural, _earlier_capsule_units(capsule, checkpoint, selected.schema), checkpoint,
+    )
+    if _sha256(_canonical_bytes(fresh_view)) != _sha256(_canonical_bytes(guard_view)):
         raise FeatureReleaseError("live selected target metadata changed after preparation")
     fresh_state = dict(fresh, identity=observed_identity, environment=plan.environment)
     fresh_source_guards = _source_guards(selected, fresh_state, checkpoint)

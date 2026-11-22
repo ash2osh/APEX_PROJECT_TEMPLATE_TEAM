@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "4ad8884798c72d204b859c4673f4aa531997f408",
+  "coreCommit": "79b2ad3b81b2d7750e302bb7bfd4b326dba39ea8",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -229,12 +229,12 @@
     },
     {
       "path": "scripts/feature_preflight.py",
-      "sha256": "d07fa405c03cfec13daacb24e15afa0a4b6feca6ae32499ff61690456747b675",
+      "sha256": "4b2b68a92832fa668ec50be784df16d4cfcef37bfaf97a9d84049714d35257c1",
       "executable": false
     },
     {
       "path": "scripts/feature_release.py",
-      "sha256": "02adb8af275a71c969187e99fef26868f39f5a1b74d6165775eec061683d06f9",
+      "sha256": "108bd18c3ffca78a61a89bcc2a838b1d5afaa1762f90578299127340ac03dc5d",
       "executable": false
     },
     {
@@ -384,12 +384,12 @@
     },
     {
       "path": "scripts/read_only_query.py",
-      "sha256": "518b6d94059096abe672542f87832534f45fc1b25cff170363fbef303da9c32d",
+      "sha256": "96358bd1630b2b108e9738d707d29b1ae8860475a12df4268e1e2091c5c51e2e",
       "executable": false
     },
     {
       "path": "scripts/release_capsule.py",
-      "sha256": "2c935045384e2c3bde1e6316f2358c715a2d3173d45312018c27f5bb600dea80",
+      "sha256": "58da26bc97523869c47c4261236930563d344e315211be23e9ece6c3546ea06d",
       "executable": false
     },
     {
@@ -474,7 +474,7 @@
     },
     {
       "path": "scripts/staging_neutralize.py",
-      "sha256": "e6e7e586db0e35bd18812dfb755e41182b62315b4ef0e7ca25b2b6ce168766f2",
+      "sha256": "c5b8cbee04644dfb16c0760f09870bb33883d7e45a663dfb6188a20c68ebc473",
       "executable": false
     },
     {
@@ -989,12 +989,12 @@
     },
     {
       "path": "tests/test_feature_preflight.py",
-      "sha256": "43a30b554da03b2205a3463ea9724d558a1cd7ef9d97d5f4ad47404ee6f167c7",
+      "sha256": "4cd3c9be1a57bdd1b4d17bd6e80a012ba764107a8890b7c1bf2d4155a6d22877",
       "executable": false
     },
     {
       "path": "tests/test_feature_prepare.py",
-      "sha256": "b759dbd6fcc545da3dbedc4df9e056648df808f5f12cea5fdb32cbd689e7595a",
+      "sha256": "d35b2330f1de78fa4c05af999fde9c8647382e58a9cbf254477008e2241de1f2",
       "executable": false
     },
     {
@@ -1149,7 +1149,7 @@
     },
     {
       "path": "tests/test_read_only_query.py",
-      "sha256": "74be81e1855797c4b913cac5545ccef5496a8a98e1abc23658b1d919959757ec",
+      "sha256": "c13a32c29753639e92deabb9300fc1c5622767dea5cb53d64018b76014523414",
       "executable": false
     },
     {
@@ -1159,7 +1159,7 @@
     },
     {
       "path": "tests/test_release_capsule.py",
-      "sha256": "e06e4b77b880bf6ff325e4c7c574c5822cc2809caf6e65b090f9dfd112562931",
+      "sha256": "de36548b33827617ac9e0a7a9596ee6913e3424ab3c33986c9e95ba77044b0c3",
       "executable": false
     },
     {
@@ -1229,7 +1229,7 @@
     },
     {
       "path": "tests/test_staging_neutralize.py",
-      "sha256": "be58524cb2da519e7a34caa003b33a7fe271188fae3f4e609066bea9f024c253",
+      "sha256": "70f44f11c1e36213ce6842165cec07df2307e1732fa46b50f2bfda030f2596d9",
       "executable": false
     },
     {

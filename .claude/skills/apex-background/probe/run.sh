@@ -84,19 +84,24 @@ if [[ ! -e "$state_dir" ]]; then
 fi
 [[ -O "$state_dir" ]] || fail '.run must be owned by the current user'
 chmod 700 "$state_dir"
+# GNU stat prints the link count with -c %h; BSD/macOS stat with -f %l.
+link_count() {
+  stat -c %h -- "$1" 2>/dev/null || stat -f %l -- "$1"
+}
+
 safe_output() {
   local path="$1"
   [[ ! -L "$path" ]] || fail "refusing symlink output: ${path##*/}"
   [[ ! -e "$path" || -f "$path" ]] || fail "output must be a regular file: ${path##*/}"
   if [[ -e "$path" ]]; then
-    [[ "$(stat -c %h -- "$path")" == 1 ]] || fail "refusing hard-linked output: ${path##*/}"
+    [[ "$(link_count "$path")" == 1 ]] || fail "refusing hard-linked output: ${path##*/}"
   fi
 }
 
 [[ ! -L "$state_dir/.stdin" ]] || fail '.run/.stdin must not be a symlink'
 [[ ! -e "$state_dir/.stdin" || -f "$state_dir/.stdin" ]] || fail '.run/.stdin must be a regular file'
 if [[ -e "$state_dir/.stdin" ]]; then
-  [[ "$(stat -c %h -- "$state_dir/.stdin")" == 1 ]] || fail 'refusing hard-linked .run/.stdin'
+  [[ "$(link_count "$state_dir/.stdin")" == 1 ]] || fail 'refusing hard-linked .run/.stdin'
 fi
 : > "$state_dir/.stdin"
 chmod 600 "$state_dir/.stdin"

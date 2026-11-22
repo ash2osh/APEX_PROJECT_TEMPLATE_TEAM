@@ -28,6 +28,7 @@ if __package__ in (None, ""):
 from scripts import terminal_confirm
 from scripts.db_targets import looks_like_production_identity, split_list
 from scripts.local_config import ConfigError, read_project_env
+from scripts.read_only_query import _SQL_NON_PRODUCTION_MARKER, _SQL_PRODUCTION_MARKER
 from scripts.sqlcl_session import SqlclError, run_sqlcl
 
 
@@ -258,6 +259,24 @@ EXIT SUCCESS
     )
 
 
+def _production_name_guard() -> str:
+    """Refuse inside the database when an observed name looks like production (B4).
+
+    The alias check runs before SQLcl starts; this one sees the database itself, so a staging alias that points
+    at a production database is refused before anything is disabled. "preprod"/"nonprod" do not count.
+    """
+    checks = " OR ".join(
+        "REGEXP_LIKE(REGEXP_REPLACE(NVL(SYS_CONTEXT('USERENV', '" + attribute + "'), ' '), "
+        + _quote(_SQL_NON_PRODUCTION_MARKER) + ", ' ', 1, 0, 'i'), " + _quote(_SQL_PRODUCTION_MARKER) + ", 'i')"
+        for attribute in ("DB_UNIQUE_NAME", "DB_NAME", "SERVICE_NAME")
+    )
+    return (
+        f"  IF {checks} THEN\n"
+        "    RAISE_APPLICATION_ERROR(-20002, 'Refusing: the observed database name looks like production; no change was made');\n"
+        "  END IF;\n"
+    )
+
+
 def apply_script(principals: Sequence[str], confirmed: str) -> str:
     """One PL/SQL block: guard, then each job, automation and grant in its own handler."""
     return (
@@ -274,6 +293,7 @@ def apply_script(principals: Sequence[str], confirmed: str) -> str:
     RAISE_APPLICATION_ERROR(-20001, 'Refusing: DB_UNIQUE_NAME is not the confirmed target; no change was made');
   END IF;
 """
+        + _production_name_guard()
         + _discovery_and_identity()
         + f"""  -- 1. scheduler jobs of the principals and the APEX jobs that send, push, notify, sync or run automations
   FOR j IN (SELECT owner, job_name FROM dba_scheduler_jobs

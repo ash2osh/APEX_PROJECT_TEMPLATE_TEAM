@@ -637,6 +637,8 @@ if ($appEnvironment -eq "dev" -and -not $force) {
     & $python.Path @($python.Prefix) @allVerifyArgs --record-baseline
     if ($LASTEXITCODE -ne 0) { throw 'publish error: could not record the verified DEV baseline' }
   }
+  # Staging and production have no application lock block above; the import is verified here too (B3).
+  $importAttempted = $false
   $importUnverified = $false
   Write-Output "Published APEX App $AppId to $targetLabel ($($deployment.workspace.name) / $parsingSchema)."
   if ($publishedVersion) {

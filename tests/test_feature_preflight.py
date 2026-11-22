@@ -327,6 +327,105 @@ class FeaturePreflightTests(unittest.TestCase):
         )
         self.assertTrue(granted.postconditions)
 
+    def _grant_and_view_plan(self, session_user: str | None):
+        checkpoint = _checkpoint(
+            "GRANT SELECT ON APP_CODE.T TO REPORTER;\n",
+            "CREATE VIEW APP_CODE.V AS SELECT ID FROM APP_CODE.ALIAS;\n",
+        )
+        external = {"owner": "APP_CODE", "name": "ALIAS", "table_owner": "OTHER_SCHEMA", "table_name": "T2", "db_link": ""}
+        access = {"owner": "OTHER_SCHEMA", "object_name": "T2", "grantee": "APP_CODE", "privilege": "SELECT", "grantable": "NO"}
+        state = _state(tables=("T",), columns=(("T", "ID"),), synonyms=(external,), synonym_access=(access,))
+        if session_user is not None:
+            state["identity"] = {"session_user": session_user, "current_schema": "APP_CODE"}
+        plan = feature_preflight.prepare_checkpoint(checkpoint, state, ())
+        return "\n".join(check.sql for check in (*plan.preconditions, *plan.postconditions) if "TAB_PRIVS" in check.sql)
+
+    def test_acting_as_grant_checks_read_dba_tab_privs(self) -> None:
+        # B2: ALL_TAB_PRIVS hides grants between other schemas from a login acting as the schema.
+        sql = self._grant_and_view_plan("ASHERIF")
+        self.assertIn("DBA_TAB_PRIVS P WHERE P.OWNER = :target_schema", sql)
+        self.assertIn("DBA_TAB_PRIVS P WHERE P.OWNER = S.TABLE_OWNER", sql)
+        self.assertNotIn("ALL_TAB_PRIVS", sql)
+
+    def test_owner_login_grant_checks_keep_all_tab_privs(self) -> None:
+        for session_user in ("APP_CODE", "app_code", None):
+            with self.subTest(session_user=session_user):
+                sql = self._grant_and_view_plan(session_user)
+                self.assertIn("ALL_TAB_PRIVS P WHERE P.TABLE_SCHEMA = :target_schema", sql)
+                self.assertNotIn("DBA_TAB_PRIVS", sql)
+
+    def test_public_synonym_does_not_occupy_schema_namespace(self) -> None:
+        # E1a: a PUBLIC synonym lives in the PUBLIC namespace; a new table of the same name is allowed.
+        public = {"owner": "PUBLIC", "name": "FOO", "table_owner": "OTHER_SCHEMA", "table_name": "FOO", "db_link": ""}
+        plan = feature_preflight.prepare_checkpoint(
+            _checkpoint("CREATE TABLE APP_CODE.FOO (ID NUMBER);\n"), _state(synonyms=(public,)), (),
+        )
+        self.assertTrue(plan.postconditions)
+        private = {"owner": "APP_CODE", "name": "FOO", "table_owner": "OTHER_SCHEMA", "table_name": "FOO", "db_link": ""}
+        with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "occupied"):
+            feature_preflight.prepare_checkpoint(
+                _checkpoint("CREATE TABLE APP_CODE.FOO (ID NUMBER);\n"), _state(synonyms=(private,)), (),
+            )
+
+    def test_public_synonym_still_satisfies_view_dependency(self) -> None:
+        public = {"owner": "PUBLIC", "name": "ALIAS", "table_owner": "OTHER_SCHEMA", "table_name": "T", "db_link": ""}
+        access = {"owner": "OTHER_SCHEMA", "object_name": "T", "grantee": "PUBLIC", "privilege": "SELECT", "grantable": "NO"}
+        plan = feature_preflight.prepare_checkpoint(
+            _checkpoint("CREATE VIEW APP_CODE.V AS SELECT ID FROM ALIAS;\n"),
+            _state(synonyms=(public,), synonym_access=(access,)), (),
+        )
+        self.assertTrue(plan.postconditions)
+
+    def test_index_on_column_added_in_same_checkpoint_passes_before_check(self) -> None:
+        # E1b: the in-session precondition runs before every payload, so it cannot require a column that an
+        # earlier statement of the same checkpoint adds; the existing columns and the table are still required.
+        checkpoint = _checkpoint(
+            "ALTER TABLE APP_CODE.T ADD (C NUMBER);\n",
+            "CREATE INDEX APP_CODE.IX_T_C ON APP_CODE.T (ID, C);\n",
+        )
+        plan = feature_preflight.prepare_checkpoint(checkpoint, _state(tables=("T",), columns=(("T", "ID"),)), ())
+        before = {check.id: check.sql for check in plan.preconditions}
+        index_check = before["structural-before-0002"]
+        self.assertIn("ALL_TABLES", index_check)
+        self.assertIn("COLUMN_NAME = 'ID'", index_check)
+        self.assertNotIn("COLUMN_NAME = 'C'", index_check)
+        self.assertIn("NOT EXISTS (SELECT 1 FROM ALL_INDEXES", index_check)
+
+    def test_index_on_table_created_in_same_checkpoint_keeps_index_name_check(self) -> None:
+        checkpoint = _checkpoint(
+            "CREATE TABLE APP_CODE.NEW_T (ID NUMBER);\n",
+            "CREATE INDEX APP_CODE.IX_NEW ON APP_CODE.NEW_T (ID);\n",
+        )
+        plan = feature_preflight.prepare_checkpoint(checkpoint, _state(), ())
+        index_check = {check.id: check.sql for check in plan.preconditions}["structural-before-0002"]
+        self.assertNotIn("ALL_TABLES", index_check)
+        self.assertNotIn("ALL_TAB_COLUMNS", index_check)
+        self.assertIn("I.INDEX_NAME = 'IX_NEW'", index_check)
+
+    def test_strip_prior_effects_removes_identity_sequence_and_indexes_of_created_table(self) -> None:
+        # E3: the system sequence and the indexes of a table an earlier checkpoint created are its effects too.
+        first = _checkpoint(
+            "CREATE TABLE APP_CODE.T (ID NUMBER GENERATED BY DEFAULT AS IDENTITY, CODE VARCHAR2(10));\n"
+            "CREATE INDEX APP_CODE.IX_T_CODE ON APP_CODE.T (CODE);\n"
+        )
+        state = _state()
+        first_plan = feature_preflight.prepare_checkpoint(first, state, ())
+        later = _checkpoint("COMMENT ON TABLE APP_CODE.T IS 'later';\n")
+        plan = feature_preflight.prepare_checkpoint(later, state, ({
+            "checkpoint": 1, "schema": "APP_CODE", "effects": first_plan, "effectsSha256": first_plan.effects_sha256,
+        },))
+        fresh = {
+            **state["structural"],
+            "identity-columns": [{"table_name": "T", "column_name": "ID", "sequence_name": "ISEQ$$_7001"}],
+            "sequences": [{"name": "ISEQ$$_7001"}, {"name": "KEEP_SEQ"}],
+            "indexes": [{"name": "SYS_C0099", "table_name": "T"}, {"name": "IX_T_CODE", "table_name": "T"},
+                        {"name": "IX_OTHER", "table_name": "OTHER"}],
+        }
+        stripped = feature_preflight.strip_prior_effects(fresh, plan.prior_effects)
+        self.assertEqual([], stripped["identity-columns"])
+        self.assertEqual(["KEEP_SEQ"], [row["name"] for row in stripped["sequences"]])
+        self.assertEqual(["IX_OTHER"], [row["name"] for row in stripped["indexes"]])
+
     def test_view_with_cte_and_subqueries_gets_dependencies_and_checks(self) -> None:
         checkpoint = _checkpoint(
             "CREATE VIEW APP_CODE.V_CTE AS WITH CTE AS (SELECT ID FROM APP_CODE.T1) SELECT ID FROM CTE;\n"
