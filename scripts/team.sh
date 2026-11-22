@@ -98,6 +98,7 @@ Commands:
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Observe, check or explicitly operate on one scoped automation
   staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]
+  rehearsal-reset --env staging [--apply --confirm-target <db_unique_name> [--yes|-y]]
                                               Report, check, disable or undo a restored staging copy's jobs,
                                               APEX automations and network grants (DBA alias)
 Options:
@@ -144,7 +145,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != targets ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != feature ] && [ "$command_name" != reconcile-migration ] && [ "$command_name" != staging-neutralize ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != targets ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != feature ] && [ "$command_name" != reconcile-migration ] && [ "$command_name" != staging-neutralize ] && [ "$command_name" != rehearsal-reset ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -596,6 +597,19 @@ case "$command_name" in
     esac
     cd "$REPO_ROOT"
     PROJECT_ENV_FILE="$staging_neutralize_env" exec python3 -m scripts.staging_neutralize "$@"
+    ;;
+  rehearsal-reset)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh rehearsal-reset --env staging [--apply --confirm-target <db_unique_name> [--yes|-y]]"
+    rehearsal_reset_env="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v cygpath >/dev/null 2>&1; then
+          rehearsal_reset_env="$(cygpath -m -- "$rehearsal_reset_env")"
+        fi
+        ;;
+    esac
+    cd "$REPO_ROOT"
+    PROJECT_ENV_FILE="$rehearsal_reset_env" exec python3 -m scripts.rehearsal_reset "$@"
     ;;
   backup-db)
     [ "$#" -eq 0 ] || fail "backup-db does not accept arguments"

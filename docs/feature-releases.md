@@ -408,6 +408,31 @@ production: `rollout --env prod --prepare` on the frozen capsule finds the
 refusals before the copy exists, so the staging day holds only the writes and
 their checks.
 
+### After restoring staging
+
+Restoring staging from a snapshot or a production copy puts the database back in time, but this checkout
+still holds the release state of the writes made before the restore: the local ledger
+(`releases/.local-state.json`), rollout receipts, migration receipts and attempt records. The next rollout or
+migrate then refuses, for example "a running or unresolved rollout owns one of these target scopes", "step 1
+receipt path is already occupied", "already has a verified staging receipt" or "a prior staging write attempt
+... has no current verified receipt". Archive that state after every restore:
+
+```bash
+scripts/team.sh rehearsal-reset --env staging                                         # read-only list
+scripts/team.sh rehearsal-reset --env staging --apply --confirm-target <db_unique_name>   # moves it; nothing is deleted
+```
+
+It reads the target identity with one read-only query and selects only what belongs to that database (its
+`db_unique_name` and container): its ledger runs, attempts, checkpoint verifications and recovery links, its
+`status.staging.json` receipts, attempt events and `scratch/migration-attempt-*` folders, and every staging
+rollout receipt and run folder (those record no database). Production and DEV records stay. `--apply` moves
+the selection unchanged into `scratch/rehearsal-reset/<time>/`, with the original ledger and a
+`reset-record.json` of what moved and who confirmed it. It refuses production and a production-looking name,
+requires `--confirm-target` to equal the observed `db_unique_name`, asks `[y/N]` unless `--yes`, and holds the
+target writer lease while it moves anything, so it refuses while a rollout or migration runs there. The listing
+names any moved receipt that Git tracks (it then shows as deleted) and any capsule whose staging proof the
+reset removes; production needs a new staging run of that capsule.
+
 ## Execute staging and promote
 
 Execute staging only after reviewing its target plan:
