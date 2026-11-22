@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "613be0e8c39cb8e2a94ad04d3b142025f8cf69ff",
+  "coreCommit": "b22e4dc1a65fc7e8aa428fb5c5e19298a5e47775",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -229,7 +229,7 @@
     },
     {
       "path": "scripts/feature_preflight.py",
-      "sha256": "09f96dde343437238624fa1a9d834b1e455348b6816ad63cefb094b268b2fa41",
+      "sha256": "3358dfe1d2bc6d87d4775bbd1445b27ef00b717fb2cf2a2728d963a399d85575",
       "executable": false
     },
     {
@@ -999,7 +999,7 @@
     },
     {
       "path": "tests/test_feature_preflight.py",
-      "sha256": "678fd0593aba99415c0e8d3abee8f328e22bde495393c6762d6f26063cf252aa",
+      "sha256": "5056bdc4c7b800a59526033a7fe61eef9c74d29f42ff2cadf5b672d578b07291",
       "executable": false
     },
     {

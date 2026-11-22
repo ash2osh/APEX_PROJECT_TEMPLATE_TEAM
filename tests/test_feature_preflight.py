@@ -359,6 +359,28 @@ class FeaturePreflightTests(unittest.TestCase):
         self.assertEqual([], stripped["tables"])
         self.assertEqual([], stripped["indexes"])
 
+    def test_an_earlier_synonym_or_view_on_a_table_is_a_prior_effect_of_a_later_change_to_it(self) -> None:
+        # A later checkpoint that touches T captures the synonyms that point to T and the views that read it, so
+        # the earlier checkpoint that created them must be a prior effect even though it never named T itself.
+        state = _state(tables=("T",), columns=(("T", "ID"),))
+        first = _checkpoint(
+            "CREATE SYNONYM APP_CODE.SYN_T FOR APP_CODE.T;\n",
+            "CREATE VIEW APP_CODE.V_T AS SELECT ID FROM APP_CODE.T;\n",
+        )
+        earlier_plan = feature_preflight.prepare_checkpoint(first, state, ())
+        earlier = ({"checkpoint": 1, "schema": "APP_CODE", "effects": earlier_plan, "effectsSha256": earlier_plan.effects_sha256},)
+
+        plan = feature_preflight.prepare_checkpoint(_checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n"), state, earlier)
+
+        self.assertEqual((1,), plan.prior_checkpoints)
+        fresh = {
+            "synonyms": [{"owner": "APP_CODE", "name": "SYN_T", "table_owner": "APP_CODE", "table_name": "T"}],
+            "views": [{"name": "V_T", "status": "VALID"}],
+        }
+        stripped = feature_preflight.strip_prior_effects(fresh, plan.prior_effects)
+        self.assertEqual([], stripped["synonyms"])
+        self.assertEqual([], stripped["views"])
+
     def test_a_private_synonym_effect_does_not_strip_a_public_synonym_of_the_same_name(self) -> None:
         effects = [{"name": "FOO", "kind": "CREATE_SYNONYM", "table": "", "checkpoint": 1, "owner": "APP_CODE"}]
         fresh = {"synonyms": [{"owner": "APP_CODE", "name": "FOO"}, {"owner": "PUBLIC", "name": "FOO"}]}

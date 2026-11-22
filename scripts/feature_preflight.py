@@ -964,6 +964,16 @@ def prepare_checkpoint(
         prior_touched.setdefault(row["name"], set()).add(row["_checkpoint"])
         if isinstance(row.get("table"), str) and row["table"]:
             prior_touched.setdefault(row["table"], set()).add(row["_checkpoint"])
+        # A selected capture of a table also returns the synonyms that point to it and the views that read it.
+        if row.get("kind") == "CREATE_SYNONYM" and isinstance(row.get("target_name"), str) and row["target_name"]:
+            prior_touched.setdefault(row["target_name"], set()).add(row["_checkpoint"])
+        if row.get("kind") == "CREATE_VIEW":
+            for dependency in row.get("dependencies", ()):
+                if (
+                    isinstance(dependency, (list, tuple)) and len(dependency) == 2
+                    and str(dependency[0]).upper() == checkpoint.schema.upper() and isinstance(dependency[1], str)
+                ):
+                    prior_touched.setdefault(dependency[1], set()).add(row["_checkpoint"])
     preconditions: list[QueryCheck] = []
     postconditions: list[QueryCheck] = []
     references = set(dependent_references(operations))
