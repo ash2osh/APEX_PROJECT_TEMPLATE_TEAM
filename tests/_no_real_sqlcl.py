@@ -29,6 +29,9 @@ import tempfile
 
 import _windows_lf  # noqa: F401  (Path.write_text writes LF on Windows too)
 
+# Test fakes run one SQLcl per script; only the session-pool tests turn persistent sessions on.
+os.environ.setdefault("SQLCL_PERSISTENT_SESSIONS", "0")
+
 _MESSAGE = "a unit test reached a real SQLcl; the test's fake sql did not run first"
 _DONE = False
 

@@ -64,6 +64,8 @@ _BASE_ALLOWED_KEYS = frozenset({
     "MIGRATION_CHECK_TIMEOUT_SECONDS",
     "MIGRATION_CHECK_BATCH_BYTES",
     "MIGRATION_PREFLIGHT_INVENTORY_RETRIES",
+    "SQLCL_PERSISTENT_SESSIONS",
+    "SQLCL_POOL_MAX_READERS",
     "DEV_DBA_SQLCL_CONNECTION",
     "STAGING_DBA_SQLCL_CONNECTION",
     "STAGING_NEUTRALIZE_PRINCIPALS",
@@ -242,6 +244,10 @@ def read_project_env(path: Path) -> dict[str, str]:
     retry_key = "MIGRATION_PREFLIGHT_INVENTORY_RETRIES"
     if retry_key in values and not RE_NONNEGATIVE_INTEGER.fullmatch(values[retry_key]):
         raise ConfigError(f"{retry_key} must be a non-negative integer")
+    if values.get("SQLCL_PERSISTENT_SESSIONS", "1") not in ("0", "1"):
+        raise ConfigError("SQLCL_PERSISTENT_SESSIONS must be 1 (persistent SQLcl sessions) or 0 (one SQLcl per script)")
+    if values.get("SQLCL_POOL_MAX_READERS", "2") not in ("1", "2", "3", "4"):
+        raise ConfigError("SQLCL_POOL_MAX_READERS must be 1, 2, 3 or 4")
 
     # Developer name validation
     if not RE_DEVELOPER_NAME.fullmatch(values["DEVELOPER_NAME"]):

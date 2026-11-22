@@ -144,6 +144,8 @@ def hermetic_environment(base: Mapping[str, str], git_config: str) -> dict[str, 
         "GIT_CONFIG_NOSYSTEM": "1",
         "NO_COLOR": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
+        # Test fakes run one SQLcl per script; only the session-pool tests turn persistent sessions on.
+        "SQLCL_PERSISTENT_SESSIONS": "0",
     })
     return environment
 

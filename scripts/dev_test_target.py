@@ -38,7 +38,7 @@ from scripts.dev_test_report import (
 )
 from scripts.migration_checks import OBSERVED_IDENTITY_FIELDS, run_checks
 from scripts.migration_manifest import QueryCheck
-from scripts.sqlcl_session import SqlclResult, run_sqlcl
+from scripts.sqlcl_session import SqlclResult, driver_epilogue, run_sqlcl
 from scripts.sqlcl_version import CompatibilityError, parse_sqlcl_version
 
 
@@ -293,7 +293,7 @@ def _render_planning_driver(
         "  DBMS_OUTPUT.PUT_LINE('PLAN_VERIFIED:plan');",
         "END;",
         "/",
-        "EXIT SUCCESS ROLLBACK",
+        driver_epilogue(False),
         "",
     ])
     return "\n".join(lines)

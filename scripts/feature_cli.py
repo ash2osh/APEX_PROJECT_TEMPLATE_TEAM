@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from scripts import sqlcl_pool
 from scripts import feature_claims, feature_convert, feature_doctor, feature_sources, release_capsule, release_plan, release_state, rollout, terminal_confirm
 from scripts.feature_manifest import FEATURE_RE, SCHEMA_RE, FeatureManifestError, load_feature_checkpoint
 from scripts.path_utils import relative_to_root
@@ -340,6 +341,7 @@ def _reconcile_run(
     return 0
 
 
+@sqlcl_pool.with_deployment_sessions
 def main(
     argv: Sequence[str] | None = None,
     *,

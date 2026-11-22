@@ -1907,7 +1907,7 @@ def _run_apply_session(
         *migrate._compile_guard_lines(_compile_units_for_apply(checkpoint, source_guards)),
         "PROMPT MIGRATION_APPLY_COMPLETED",
         "PROMPT FEATURE_CHECKPOINT_APPLY_COMPLETED",
-        "EXIT SUCCESS COMMIT",
+        sqlcl_session.driver_epilogue(True),
         "",
     ))
     driver = run_dir / "checkpoint-apply.sql"

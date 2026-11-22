@@ -16,7 +16,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.db_targets import Target, looks_like_production_identity, ORACLE_IDENTIFIER, SQLCL_ALIAS
-from scripts.sqlcl_session import run_sqlcl, SqlclError
+from scripts.sqlcl_session import run_sqlcl, SqlclError, driver_epilogue
 
 WORKFLOW_TERMINAL = {'COMPLETED', 'TERMINATED', 'FAULTED'}
 TASK_TERMINAL = {'COMPLETED', 'CANCELED', 'ERRORED', 'EXPIRED', 'FAILED'}
@@ -130,7 +130,7 @@ def capture_lifecycle(target: Target, workspace: str, app_id: int, run_dir: Path
     driver=run_dir/'lifecycle-driver.sql'
     adapter=Path(__file__).with_suffix('.sql').resolve()
     if any(c in str(adapter) for c in ('"','\n','\r')): raise ValueError('unsupported SQL driver path')
-    driver.write_text('\n'.join(['SET DEFINE ON','SET VERIFY OFF','SET ECHO OFF','SET FEEDBACK OFF','SET HEADING OFF','SET LINESIZE 32767','SET SERVEROUTPUT ON SIZE UNLIMITED','WHENEVER SQLERROR EXIT FAILURE ROLLBACK','WHENEVER OSERROR EXIT FAILURE ROLLBACK',f'ALTER SESSION SET CURRENT_SCHEMA = {target.schema};','SET TRANSACTION READ ONLY;',f'DEFINE lifecycle_user_hex = {target.expected_user.encode().hex().upper()}',f'DEFINE lifecycle_schema_hex = {target.schema.encode().hex().upper()}',f'@"{adapter}" {workspace.encode("utf-8").hex().upper()} {app_id} CAPTURE','EXIT SUCCESS ROLLBACK','']),encoding='utf-8')
+    driver.write_text('\n'.join(['SET DEFINE ON','SET VERIFY OFF','SET ECHO OFF','SET FEEDBACK OFF','SET HEADING OFF','SET LINESIZE 32767','SET SERVEROUTPUT ON SIZE UNLIMITED','WHENEVER SQLERROR EXIT FAILURE ROLLBACK','WHENEVER OSERROR EXIT FAILURE ROLLBACK',f'ALTER SESSION SET CURRENT_SCHEMA = {target.schema};','SET TRANSACTION READ ONLY;',f'DEFINE lifecycle_user_hex = {target.expected_user.encode().hex().upper()}',f'DEFINE lifecycle_schema_hex = {target.schema.encode().hex().upper()}',f'@"{adapter}" {workspace.encode("utf-8").hex().upper()} {app_id} CAPTURE',driver_epilogue(False),'']),encoding='utf-8')
     result=_runner(target,driver,run_dir)
     lines=result.output.splitlines()
     if result.returncode or lines.count('LIFECYCLE_PAYLOAD_BEGIN')!=1 or lines.count('LIFECYCLE_PAYLOAD_END')!=1 or lines.count('LIFECYCLE_VERIFIED')!=1: raise ValueError('lifecycle SQLcl observation is unavailable or incomplete')
@@ -227,7 +227,7 @@ def _automation_restore_driver(
             f"    DBMS_OUTPUT.PUT_LINE('AUTOMATION_RESTORE_FAILED:{identifier_hex}:' || TO_CHAR(SQLCODE));",
             '  END;',
         ])
-    lines.extend(['END;','/','PROMPT AUTOMATION_RESTORE_COMPLETE','EXIT SUCCESS COMMIT',''])
+    lines.extend(['END;','/','PROMPT AUTOMATION_RESTORE_COMPLETE',driver_epilogue(True),''])
     driver.write_text('\n'.join(lines),encoding='utf-8')
     return driver
 
