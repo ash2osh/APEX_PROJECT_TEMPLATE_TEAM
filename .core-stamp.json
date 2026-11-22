@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "8955a49f7c46f537daba85b357c6d0fc371e795e",
+  "coreCommit": "26b8453b2c16e101c36a5cde6ba45ebd074f9a98",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -385,6 +385,11 @@
     {
       "path": "scripts/read_only_query.py",
       "sha256": "eff19cc67c8419985fc1b7df31f882b066b15c2259a7e0597e506729a7440907",
+      "executable": false
+    },
+    {
+      "path": "scripts/rehearsal_reset.py",
+      "sha256": "de37a7af888cc264e8b93ae9d30c8d220a9f7e8e6aed91bb24d3cb081f2d33ac",
       "executable": false
     },
     {
@@ -1165,6 +1170,11 @@
     {
       "path": "tests/test_readonly_scratch.py",
       "sha256": "d66522c3bb2e96b62c883116974e0937bb54b336eebc9b95708788aee748976b",
+      "executable": false
+    },
+    {
+      "path": "tests/test_rehearsal_reset.py",
+      "sha256": "d0aa4e09338f5ac74d1755c26994f81b1faed448d549b105a94809232f85b573",
       "executable": false
     },
     {

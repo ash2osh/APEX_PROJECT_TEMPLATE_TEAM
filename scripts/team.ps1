@@ -149,6 +149,7 @@ Commands:
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Observe, check or explicitly operate on one scoped automation
   staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]
+  rehearsal-reset --env staging [--apply --confirm-target <db_unique_name> [--yes|-y]]
                                               Report, check, disable or undo a restored staging copy's jobs,
                                               APEX automations and network grants (DBA alias)
 Options:
@@ -318,7 +319,7 @@ if ($Command -in @("--help", "-h")) {
 
 # --schema NAME is the one selection channel: strip it and set PROJECT_SCHEMA so
 # every child script's loader narrows to that schema.
-if ($Command -notin @("upgrade-template", "verify-local", "template-status", "targets", "migration-plan", "archive-migrations", "dev-test", "skills", "mcp", "feature", "reconcile-migration", "staging-neutralize")) {
+if ($Command -notin @("upgrade-template", "verify-local", "template-status", "targets", "migration-plan", "archive-migrations", "dev-test", "skills", "mcp", "feature", "reconcile-migration", "staging-neutralize", "rehearsal-reset")) {
   $schemaFiltered = @()
   for ($index = 0; $index -lt $Arguments.Count; $index++) {
     if ($Arguments[$index] -eq "--schema") {
@@ -690,6 +691,10 @@ try {
     "staging-neutralize" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]" }
       Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("staging-neutralize") + @($Arguments))
+    }
+    "rehearsal-reset" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 rehearsal-reset --env staging [--apply --confirm-target <db_unique_name> [--yes|-y]]" }
+      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("rehearsal-reset") + @($Arguments))
     }
     "backup-db" {
       if ($Arguments.Count -ne 0) { Fail "backup-db does not accept arguments" }
