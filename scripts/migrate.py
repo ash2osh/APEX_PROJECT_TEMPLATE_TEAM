@@ -73,7 +73,8 @@ from .schema_catalog import (
     capture_snapshot,
 )
 from .schema_normalization import normalization_coverage
-from .sqlcl_session import SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
+from . import sqlcl_pool
+from .sqlcl_session import SqlclError, SqlclTimeout, driver_epilogue, run_sqlcl, safe_rmtree
 from .sqlcl_transport import generated_clob_assembly, lint_sqlcl_transport
 
 
@@ -757,7 +758,7 @@ def apply_folder(
         "WHENEVER OSERROR EXIT FAILURE ROLLBACK",
         *_compile_guard_lines(compiled_units(migration, target.schema)),
     ))
-    driver_lines.extend(("PROMPT MIGRATION_APPLY_COMPLETED", "EXIT SUCCESS COMMIT", ""))
+    driver_lines.extend(("PROMPT MIGRATION_APPLY_COMPLETED", driver_epilogue(True), ""))
     driver = run_dir / "migration-driver.sql"
     driver.write_text("\n".join(driver_lines), encoding="utf-8", newline="\n")
     driver.chmod(0o600)
@@ -1353,6 +1354,7 @@ def rehearse_batch(
     return run_rehearsal(repo_root, migrations, target, confirm, **options)
 
 
+@sqlcl_pool.with_deployment_sessions
 def main(
     argv: Sequence[str] | None = None,
     *,

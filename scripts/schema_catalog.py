@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from .db_targets import Target, looks_like_production_identity
-from .sqlcl_session import SqlclResult, run_sqlcl
+from .sqlcl_session import SqlclResult, driver_epilogue, run_sqlcl
 
 
 SCHEMA_VERSION = 2
@@ -749,7 +749,7 @@ def _catalog_driver(run_dir: Path, phase: str, target: Target, keys: Sequence[tu
                 raise CatalogError("one selected object batch exceeds the SQLcl safe input limit")
             lines.append("SET DEFINE ON")
             lines.append(f"@@schema_catalog.sql {phase} {_hex(target.schema)} {_hex(target.expected_user)} {hex_chunk}")
-    lines.extend(("SET DEFINE OFF", "EXIT SUCCESS ROLLBACK", ""))
+    lines.extend(("SET DEFINE OFF", driver_epilogue(False), ""))
     wrapper.write_text("\n".join(lines), encoding="utf-8", newline="\n")
     os.chmod(wrapper, 0o600)
     return wrapper

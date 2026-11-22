@@ -28,7 +28,7 @@ from .migration_manifest import (
     validate_check_query,
 )
 from .schema_catalog import CatalogError, ObjectKey, SchemaSnapshot
-from .sqlcl_session import SqlclCancelled, SqlclError, SqlclTimeout, run_sqlcl, safe_rmtree
+from .sqlcl_session import SqlclCancelled, SqlclError, SqlclTimeout, driver_epilogue, run_sqlcl, safe_rmtree
 from .validate_migration import statement_spans
 
 
@@ -984,7 +984,7 @@ def _render_check_driver(
         ])
     sql_lines.extend(["END;", "/"])
     if exit_on_finish:
-        sql_lines.append("EXIT SUCCESS ROLLBACK")
+        sql_lines.append(driver_epilogue(False))
     sql_lines.append("")
     return "\n".join(sql_lines)
 

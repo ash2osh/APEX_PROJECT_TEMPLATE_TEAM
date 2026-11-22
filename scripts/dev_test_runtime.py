@@ -50,6 +50,7 @@ from scripts.sqlcl_session import (
     SqlclError,
     SqlclResult,
     SqlclTimeout,
+    driver_epilogue,
     run_sqlcl,
 )
 from scripts.sqlcl_transport import (
@@ -431,7 +432,7 @@ def read_rows(
         f"PROMPT {marker}_DATA_END",
         "SET SQLFORMAT DEFAULT",
         f"PROMPT {marker}_SUCCESS",
-        "EXIT SUCCESS ROLLBACK",
+        driver_epilogue(False),
         "",
     ])
 
@@ -752,7 +753,7 @@ def execute_step(
         "@@payload.sql",
         f"PROMPT DEVTEST_STEP_COMPLETED:{step_id}",
         # Keep the caller's explicit transaction behavior; never use SQLcl's implicit exit commit.
-        "EXIT SUCCESS ROLLBACK",
+        driver_epilogue(False),
         "",
     ])
 

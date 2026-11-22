@@ -23,7 +23,7 @@ from scripts.deployment_descriptor import DescriptorError, read_descriptor
 from scripts.local_config import ConfigError, read_project_env
 from scripts.read_only_query import QueryError, resolve_query_target
 from scripts import terminal_confirm
-from scripts.sqlcl_session import SqlclError, run_sqlcl
+from scripts.sqlcl_session import SqlclError, driver_epilogue, run_sqlcl
 
 
 AUTOMATION_STATUSES = frozenset({"ACTIVE", "DISABLED", "ERROR"})
@@ -258,7 +258,7 @@ def render_action_driver(
         "WHENEVER SQLERROR EXIT FAILURE ROLLBACK", "WHENEVER OSERROR EXIT FAILURE ROLLBACK",
         f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};",
         f'@"{adapter}" ' + " ".join(arguments),
-        "SET DEFINE OFF", "EXIT SUCCESS ROLLBACK", "",
+        "SET DEFINE OFF", driver_epilogue(False), "",
     ]
     driver.write_text("\n".join(lines), encoding="utf-8", newline="\n")
     driver.chmod(0o600)

@@ -71,6 +71,7 @@ ENGINE_HELPER_FILES = (
     "scripts/sqlcl_version.py",
     "scripts/sqlcl_session.py",
     "scripts/sqlcl_session.sh",
+    "scripts/sqlcl_pool.py",
     "scripts/windows_job.py",
     "scripts/sqlcl_transport.py",
     "scripts/path_utils.py",

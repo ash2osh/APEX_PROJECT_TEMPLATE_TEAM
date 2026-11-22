@@ -355,5 +355,42 @@ class SqlclBoundedOutputTests(unittest.TestCase):
             self.assertFalse(started.exists())
 
 
+class DriverEpilogueTests(unittest.TestCase):
+    """Task 13: one shared driver ending; the pooled form never ends the long-lived SQLcl."""
+
+    def tearDown(self) -> None:
+        sqlcl_session._set_active_pool(None)
+
+    def test_driver_epilogue_one_shot_matches_legacy_lines(self) -> None:
+        self.assertIsNone(sqlcl_session.active_pool())
+        self.assertEqual("EXIT SUCCESS COMMIT", sqlcl_session.driver_epilogue(True))
+        self.assertEqual("EXIT SUCCESS ROLLBACK", sqlcl_session.driver_epilogue(False))
+        self.assertFalse(sqlcl_session.is_pooled_driver("SELECT 1 FROM dual;\nEXIT SUCCESS ROLLBACK\n"))
+
+    def test_driver_epilogue_pooled_has_marker(self) -> None:
+        sqlcl_session._set_active_pool(object())
+        commit, rollback = sqlcl_session.driver_epilogue(True), sqlcl_session.driver_epilogue(False)
+        self.assertEqual("COMMIT;\n" + sqlcl_session.POOLED_EPILOGUE_MARKER, commit)
+        self.assertEqual("ROLLBACK;\n" + sqlcl_session.POOLED_EPILOGUE_MARKER, rollback)
+        for ending in (commit, rollback):
+            self.assertNotIn("EXIT", ending)
+            self.assertTrue(sqlcl_session.is_pooled_driver("SELECT 1 FROM dual;\n" + ending + "\n"))
+        self.assertFalse(sqlcl_session.is_pooled_driver(sqlcl_session.POOLED_EPILOGUE_MARKER + "\n"))
+        self.assertFalse(sqlcl_session.is_pooled_driver(rollback + "\nEXIT SUCCESS ROLLBACK\n"))
+
+    def test_no_generator_writes_literal_exit_success(self) -> None:
+        # Every generated driver ends through driver_epilogue, so a pooled run never ends its SQLcl by
+        # accident. staging-neutralize launches SQLcl once per command and is never pooled.
+        scripts = Path(__file__).resolve().parents[1] / "scripts"
+        exempt = {"sqlcl_session.py", "staging_neutralize.py"}
+        offenders = [
+            f"{path.name}:{number}"
+            for path in sorted(scripts.glob("*.py")) if path.name not in exempt
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            if "EXIT SUCCESS" in line
+        ]
+        self.assertEqual([], offenders)
+
+
 if __name__ == "__main__":
     unittest.main()

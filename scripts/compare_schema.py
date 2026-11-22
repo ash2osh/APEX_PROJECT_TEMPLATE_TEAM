@@ -40,7 +40,8 @@ from .schema_normalization import (
     normalize_definition,
     normalization_coverage,
 )
-from .sqlcl_session import run_sqlcl, safe_rmtree
+from . import sqlcl_pool
+from .sqlcl_session import driver_epilogue, run_sqlcl, safe_rmtree
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1337,7 +1338,7 @@ def _environment_driver(
             _environment_hex(scope_names_json),
         )),
         "SET DEFINE OFF",
-        "EXIT SUCCESS ROLLBACK",
+        driver_epilogue(False),
         "",
     ))
     driver.write_text(content, encoding="utf-8", newline="\n")
@@ -1469,6 +1470,7 @@ def _write_dba_script(path_value: str, script: str) -> Path:
     return path
 
 
+@sqlcl_pool.with_deployment_sessions
 def main_compare_env(
     argv: Sequence[str] | None = None,
     *,
@@ -1683,6 +1685,7 @@ def _parser() -> _ArgumentParser:
     return parser
 
 
+@sqlcl_pool.with_deployment_sessions
 def main(
     argv: Sequence[str] | None = None,
     *,

@@ -20,7 +20,7 @@ from .dev_test_bindings import validate_bindings
 from .db_targets import Target, TargetResolutionError, looks_like_production_identity, resolve_target, split_list
 from .local_config import ConfigError, read_project_env
 from .migration_manifest import SAFE_FUNCTIONS, SAFE_SQL_FORMS
-from .sqlcl_session import SqlclError, run_sqlcl
+from .sqlcl_session import SqlclError, driver_epilogue, run_sqlcl
 
 
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -719,7 +719,7 @@ def build_driver(
         f"PROMPT {marker}_DATA_END",
         "SET SQLFORMAT DEFAULT",
         f"PROMPT {marker}_SUCCESS",
-        "EXIT SUCCESS ROLLBACK",
+        driver_epilogue(False),
         "",
     ])
     return "\n".join(lines)

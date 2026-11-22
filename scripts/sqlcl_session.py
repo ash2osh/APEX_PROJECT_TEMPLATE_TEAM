@@ -48,6 +48,35 @@ ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z", re.ASCII)
 # does not stop the script and SQLcl still exits 0; only the report shows it.
 SQLCL_ERROR_RE = re.compile(r"(?m)^(?:(?:ORA-\d{5}|SP2-\d{4}|SQLcl Error):|Error starting at line\b|Error report -)")
 
+# A persistent SQLcl session pool (scripts/sqlcl_pool.py) registers itself here while a deployment runs.
+# Drivers generated while it is active end without EXIT, so the long-lived SQLcl keeps running; a driver
+# generated without it keeps today's EXIT line. A failure still ends SQLcl through WHENEVER ... EXIT.
+POOLED_EPILOGUE_MARKER = "-- TEAM_POOLED_EPILOGUE"
+_active_pool: object | None = None
+
+
+def _set_active_pool(pool: object | None) -> None:
+    global _active_pool
+    _active_pool = pool
+
+
+def active_pool() -> object | None:
+    """The session pool of the running deployment command, or None (one SQLcl launch per script)."""
+    return _active_pool
+
+
+def driver_epilogue(commit: bool) -> str:
+    """Last line(s) of a generated driver: EXIT ... COMMIT/ROLLBACK, or the pooled form without EXIT."""
+    if _active_pool is None:
+        return "EXIT SUCCESS COMMIT" if commit else "EXIT SUCCESS ROLLBACK"
+    return ("COMMIT;" if commit else "ROLLBACK;") + "\n" + POOLED_EPILOGUE_MARKER
+
+
+def is_pooled_driver(text: str) -> bool:
+    """True when a driver ends with the pooled epilogue, so it may run in a long-lived SQLcl."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return len(lines) >= 2 and lines[-1] == POOLED_EPILOGUE_MARKER and lines[-2] in {"COMMIT;", "ROLLBACK;"}
+
 
 _WSL_LAUNCHER_RE = re.compile(r"(?i)[\\/](System32|SysWOW64|Sysnative|WindowsApps)[\\/]")
 
@@ -339,6 +368,40 @@ def _run_bridge(
     return subprocess.CompletedProcess(command, process.returncode, output, None)
 
 
+def _run_pooled(
+    target,
+    driver: Path,
+    run_dir: Path,
+    *,
+    phase: str | None,
+    timeout_seconds: float,
+    environment: Mapping[str, str],
+    output_limit_bytes: int | None,
+    cancel_event: threading.Event | None,
+) -> subprocess.CompletedProcess | None:
+    """Send a pooled driver to the active session pool; None means run it with its own SQLcl."""
+    pool = _active_pool
+    if pool is None or str(environment.get("SQLCL_PERSISTENT_SESSIONS", "1")).strip() == "0":
+        return None
+    try:
+        text = driver.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if not is_pooled_driver(text):
+        return None
+    from .sqlcl_pool import PoolUnavailable
+
+    try:
+        return pool.run_driver(  # type: ignore[attr-defined]
+            target.connection, driver, run_dir, phase=phase, timeout_seconds=timeout_seconds,
+            environment=environment, output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,
+        )
+    except PoolUnavailable:
+        # Nothing of this driver ran: a pooled driver ends with its own COMMIT;/ROLLBACK;, so it is safe to
+        # run with a one-shot SQLcl, whose end of input then has nothing left to commit.
+        return None
+
+
 def run_sqlcl(
     target,
     driver_path: Path,
@@ -402,17 +465,23 @@ def run_sqlcl(
     timeout_elapsed: float | None = None
     cancelled = False
     try:
-        completed = _run_bridge(
-            # as_posix: the bridge compares the driver path with the run directory
-            # as strings, which only works when both use "/" (Git Bash accepts
-            # C:/dir/file); on Linux and macOS it is the same as str().
-            [bash_command(), bridge.as_posix(), resolved_run.as_posix(), target.connection, resolved_driver.as_posix()],
-            cwd=resolved_run,
-            env=child_environment,
-            timeout_seconds=effective_timeout,
-            output_limit_bytes=output_limit_bytes,
-            cancel_event=cancel_event,
+        completed = _run_pooled(
+            target, resolved_driver, resolved_run,
+            phase=phase, timeout_seconds=effective_timeout, environment=child_environment,
+            output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,
         )
+        if completed is None:
+            completed = _run_bridge(
+                # as_posix: the bridge compares the driver path with the run directory
+                # as strings, which only works when both use "/" (Git Bash accepts
+                # C:/dir/file); on Linux and macOS it is the same as str().
+                [bash_command(), bridge.as_posix(), resolved_run.as_posix(), target.connection, resolved_driver.as_posix()],
+                cwd=resolved_run,
+                env=child_environment,
+                timeout_seconds=effective_timeout,
+                output_limit_bytes=output_limit_bytes,
+                cancel_event=cancel_event,
+            )
         output = completed.stdout or ""
         reason = None
         if completed.returncode != 0:

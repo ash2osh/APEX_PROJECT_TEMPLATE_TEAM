@@ -10,6 +10,9 @@ import subprocess
 import time
 
 
+# Test fakes run one SQLcl per script; only the session-pool tests turn persistent sessions on.
+os.environ.setdefault("SQLCL_PERSISTENT_SESSIONS", "0")
+
 DEFAULT_TIMEOUT_SECONDS = 300
 # Seconds between the child's readiness marker and the interrupt. See interrupt_process_group.
 INTERRUPT_SETTLE_SECONDS = 0.1
