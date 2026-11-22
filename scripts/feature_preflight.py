@@ -61,6 +61,7 @@ class StructuralPlan:
     prior_checkpoints: tuple[int, ...]
     operations: tuple[dict, ...] = ()
     prior_effects: tuple[dict, ...] = ()
+    tolerated_dependents: tuple[tuple[str, str], ...] = ()
 
 
 def _canonical(value: object) -> bytes:
@@ -626,15 +627,45 @@ def _modify_column_queries(
     return before, after
 
 
-def _dependent_check(index: int, reference_name: str) -> QueryCheck:
+def _dependent_check(index: int, reference_name: str, tolerated: Sequence[tuple[str, str]] = ()) -> QueryCheck:
+    # ASHARIF 2026-11-22: a dependent that a later checkpoint of the same capsule re-creates may stay invalid
+    # until then; that checkpoint re-creates it and its unit validity postcondition requires it VALID.
+    excluded = ""
+    if tolerated:
+        pairs = ", ".join(f"({_literal(object_type)}, {_literal(name)})" for object_type, name in tolerated)
+        excluded = f" AND (O.OBJECT_TYPE, O.OBJECT_NAME) NOT IN ({pairs})"
     return _query(
         f"structural-dependent-{index:04d}",
         "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM ALL_DEPENDENCIES D JOIN ALL_OBJECTS O "
         "ON O.OWNER = D.OWNER AND O.OBJECT_NAME = D.NAME AND O.OBJECT_TYPE = D.TYPE "
         "WHERE D.OWNER = :target_schema AND D.REFERENCED_OWNER = :target_schema "
-        f"AND D.REFERENCED_NAME = {_literal(reference_name)} AND O.STATUS = 'INVALID') "
+        f"AND D.REFERENCED_NAME = {_literal(reference_name)} AND O.STATUS = 'INVALID'{excluded}) "
         "THEN 1 ELSE 0 END FROM DUAL",
     )
+
+
+_DEPENDENT_TABLE_KINDS = frozenset({"CREATE_INDEX", "ALTER_ADD_COLUMN", "ALTER_MODIFY_COLUMN"})
+_DEPENDENT_NAME_KINDS = frozenset({"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE", "ADD_CONSTRAINT"})
+
+
+def _dependent_reference(operation: Mapping) -> str | None:
+    """The object whose direct dependents an effect's structural-dependent check covers, or None."""
+    kind, name = operation.get("kind"), operation.get("name")
+    if not isinstance(name, str):
+        return None
+    if kind in _DEPENDENT_TABLE_KINDS:
+        return str(operation.get("table", name))
+    if kind in _DEPENDENT_NAME_KINDS:
+        return name
+    return None
+
+
+def dependent_references(operations: Sequence[Mapping]) -> tuple[str, ...]:
+    """Sorted names whose invalid direct dependents a checkpoint's apply session recompiles."""
+    return tuple(sorted({
+        reference for operation in operations if isinstance(operation, Mapping)
+        for reference in (_dependent_reference(operation),) if reference is not None
+    }))
 
 
 def _effect_queries(
@@ -646,6 +677,7 @@ def _effect_queries(
     staged_tables: frozenset[str] = frozenset(),
     staged_columns: frozenset[tuple[str, str]] = frozenset(),
     acting_as: bool = False,
+    tolerated: Sequence[tuple[str, str]] = (),
 ) -> tuple[list[QueryCheck], list[QueryCheck]]:
     kind, name = operation.get("kind"), operation.get("name")
     if not isinstance(name, str):
@@ -655,12 +687,12 @@ def _effect_queries(
         return _comment_queries(operation, index, staged_tables, staged_columns)
     if kind == "ADD_CONSTRAINT":
         before_constraint, after_constraint = _add_constraint_queries(operation, index, staged_tables, staged_columns)
-        after_constraint.append(_dependent_check(index, name))
+        after_constraint.append(_dependent_check(index, name, tolerated))
         return before_constraint, after_constraint
     if kind == "ALTER_MODIFY_COLUMN":
         before_mod, after_mod = _modify_column_queries(operation, index, staged_tables, staged_columns)
         table = str(operation.get("table", name))
-        after_mod.append(_dependent_check(index, table))
+        after_mod.append(_dependent_check(index, table, tolerated))
         return before_mod, after_mod
     before: list[QueryCheck] = []
     after: list[QueryCheck] = []
@@ -788,7 +820,7 @@ def _effect_queries(
     # Every selected effect is followed by a narrow invalid-dependent assertion.
     if kind in {"CREATE_TABLE", "CREATE_VIEW", "CREATE_SEQUENCE", "CREATE_INDEX", "ALTER_ADD_COLUMN", "ALTER_MODIFY_COLUMN"}:
         reference_name = str(operation.get("table", name)) if kind in {"CREATE_INDEX", "ALTER_ADD_COLUMN", "ALTER_MODIFY_COLUMN"} else name
-        after.append(_dependent_check(index, reference_name))
+        after.append(_dependent_check(index, reference_name, tolerated))
     return before, after
 
 
@@ -879,8 +911,15 @@ def prepare_checkpoint(
     earlier_effects: Sequence[Mapping],
     *,
     guarded_view_replacements: frozenset[str] = frozenset(),
+    later_units: frozenset[tuple[str, str]] = frozenset(),
 ) -> StructuralPlan:
-    """Prove the ordered selected DDL against exact selected catalog evidence."""
+    """Prove the ordered selected DDL against exact selected catalog evidence.
+
+    later_units are the (object type, name) stored units that later checkpoints of the same schema in this
+    capsule re-create. A direct dependent of this checkpoint's DDL that is one of them may stay invalid until
+    then: it is left out of the dependent checks and recorded in tolerated_dependents. The later checkpoint
+    re-creates it and its usual unit validity postcondition requires it VALID.
+    """
     if not isinstance(checkpoint, FeatureCheckpoint) or not isinstance(state, Mapping):
         raise StructuralPreflightError("selected checkpoint or catalog state is malformed")
     structural = _structural(state)
@@ -918,6 +957,15 @@ def prepare_checkpoint(
     }
     preconditions: list[QueryCheck] = []
     postconditions: list[QueryCheck] = []
+    references = set(dependent_references(operations))
+    tolerated = tuple(sorted({
+        (str(row["type"]).upper(), str(row["name"]))
+        for row in structural["feature-dependencies"]
+        if isinstance(row.get("name"), str) and isinstance(row.get("type"), str)
+        and str(row.get("referenced_owner", "")).upper() == checkpoint.schema.upper()
+        and row.get("referenced_name") in references
+        and (str(row["type"]).upper(), str(row["name"])) in later_units
+    }))
 
     # A selected exact catalog is not a complete ALL_OBJECTS inventory; only the
     # rows for names in this scope are used to decide these local effects.
@@ -935,8 +983,11 @@ def prepare_checkpoint(
                     item.get("name", "") == dependent_name
                     and item.get("type", "").upper() == dependent_type.upper()
                     for item in structural["invalid-objects"]
-                ):
-                    raise StructuralPreflightError(f"required dependent {dependent_type} {dependent_name} is already invalid")
+                ) and (dependent_type.upper(), dependent_name) not in later_units:
+                    raise StructuralPreflightError(
+                        f"required dependent {dependent_type} {dependent_name} is already invalid; recompile it on the "
+                        "target, or re-create it in a later checkpoint of this release, then prepare again"
+                    )
 
     for index, operation in enumerate(operations, 1):
         kind = operation.get("kind")
@@ -1067,6 +1118,7 @@ def prepare_checkpoint(
         before_queries, after_queries = _effect_queries(
             operation, index, checkpoint.schema, replace_existing_view=replace_existing_view,
             staged_tables=frozenset(staged_names), staged_columns=frozenset(staged_columns), acting_as=acting_as,
+            tolerated=tolerated,
         )
         if kind == "ALTER_ADD_COLUMN":
             staged_columns.update((str(operation.get("table", "")), str(item)) for item in operation.get("columns", ()))
@@ -1140,6 +1192,7 @@ def prepare_checkpoint(
         prior_checkpoints=prior_checkpoints,
         operations=tuple(dict(item) for item in operations),
         prior_effects=tuple(prior_effects),
+        tolerated_dependents=tolerated,
     )
 
 
@@ -1157,6 +1210,7 @@ def plan_to_dict(plan: StructuralPlan) -> dict:
         "priorCheckpoints": list(plan.prior_checkpoints),
         "operations": [_effect_record(item) for item in plan.operations],
         "priorEffects": [dict(item) for item in plan.prior_effects],
+        "toleratedDependents": [list(pair) for pair in plan.tolerated_dependents],
     }
 
 
@@ -1186,7 +1240,7 @@ def validate_plan_record(record: Mapping, checkpoint: FeatureCheckpoint, structu
     fields = {
         "owner", "objectKeys", "prerequisiteKeys", "sections", "expectedBeforeSha256",
         "effectsSha256", "preconditions", "postconditions", "compileUnits", "priorCheckpoints",
-        "operations", "priorEffects",
+        "operations", "priorEffects", "toleratedDependents",
     }
     if not isinstance(record, Mapping) or set(record) != fields:
         raise StructuralPreflightError("structural plan has unsupported or missing fields")
@@ -1236,6 +1290,13 @@ def validate_plan_record(record: Mapping, checkpoint: FeatureCheckpoint, structu
         for row in effects
     ):
         raise StructuralPreflightError("structural plan prior effects are malformed")
+    tolerated = record.get("toleratedDependents")
+    if (
+        not isinstance(tolerated, list)
+        or any(not isinstance(pair, list) or len(pair) != 2 or not all(isinstance(part, str) and part for part in pair) for pair in tolerated)
+        or [tuple(pair) for pair in tolerated] != sorted({tuple(pair) for pair in tolerated})
+    ):
+        raise StructuralPreflightError("structural plan tolerated dependents are malformed")
     units = record.get("compileUnits")
     try:
         expected_units = [list(unit) for unit in migration_checks.compiled_units(

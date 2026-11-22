@@ -256,6 +256,70 @@ class FeaturePreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "invalid"):
             feature_preflight.prepare_checkpoint(checkpoint, state, ())
 
+    # A dependent that a later checkpoint of the same capsule re-creates may stay invalid until that checkpoint.
+    @staticmethod
+    def _dependent_state(*, invalid: bool = False) -> dict:
+        state = _state(
+            tables=("T",), columns=(("T", "ID"),),
+            invalid=({"name": "PKG", "type": "PACKAGE BODY", "status": "INVALID"},) if invalid else (),
+        )
+        state["structural"]["feature-dependencies"] = [{
+            "name": "PKG", "type": "PACKAGE BODY", "referenced_name": "T", "referenced_owner": "APP_CODE",
+        }]
+        return state
+
+    @staticmethod
+    def _dependent_checks(plan) -> list[QueryCheck]:
+        return [check for check in plan.postconditions if check.id.startswith("structural-dependent-")]
+
+    def test_dependent_owned_by_a_later_checkpoint_is_left_out_of_the_dependent_check(self) -> None:
+        checkpoint = _checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n")
+        plan = feature_preflight.prepare_checkpoint(
+            checkpoint, self._dependent_state(), (),
+            later_units=frozenset({("PACKAGE BODY", "PKG"), ("PACKAGE", "OTHER")}),
+        )
+
+        self.assertEqual((("PACKAGE BODY", "PKG"),), plan.tolerated_dependents)
+        (dependent,) = self._dependent_checks(plan)
+        self.assertIn("AND (O.OBJECT_TYPE, O.OBJECT_NAME) NOT IN (('PACKAGE BODY', 'PKG'))", dependent.sql)
+        record = feature_preflight.plan_to_dict(plan)
+        self.assertEqual([["PACKAGE BODY", "PKG"]], record["toleratedDependents"])
+        feature_preflight.validate_plan_record(record, checkpoint, self._dependent_state()["structural"])
+        self.assertEqual(("T",), feature_preflight.dependent_references(record["operations"]))
+
+    def test_dependent_not_owned_by_a_later_checkpoint_is_still_checked(self) -> None:
+        checkpoint = _checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n")
+        plan = feature_preflight.prepare_checkpoint(
+            checkpoint, self._dependent_state(), (), later_units=frozenset({("PACKAGE BODY", "OTHER")}),
+        )
+
+        self.assertEqual((), plan.tolerated_dependents)
+        (dependent,) = self._dependent_checks(plan)
+        self.assertNotIn("NOT IN", dependent.sql)
+
+    def test_already_invalid_dependent_of_a_later_checkpoint_does_not_refuse(self) -> None:
+        checkpoint = _checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n")
+        plan = feature_preflight.prepare_checkpoint(
+            checkpoint, self._dependent_state(invalid=True), (), later_units=frozenset({("PACKAGE BODY", "PKG")}),
+        )
+        self.assertEqual((("PACKAGE BODY", "PKG"),), plan.tolerated_dependents)
+
+    def test_already_invalid_dependent_refusal_names_the_remedy(self) -> None:
+        checkpoint = _checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n")
+        with self.assertRaisesRegex(
+            feature_preflight.StructuralPreflightError,
+            r"required dependent PACKAGE BODY PKG is already invalid; recompile it on the target",
+        ):
+            feature_preflight.prepare_checkpoint(checkpoint, self._dependent_state(invalid=True), ())
+
+    def test_malformed_tolerated_dependents_are_refused(self) -> None:
+        checkpoint = _checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n")
+        state = self._dependent_state()
+        record = feature_preflight.plan_to_dict(feature_preflight.prepare_checkpoint(checkpoint, state, ()))
+        for bad in ([["PACKAGE BODY"]], [["PACKAGE BODY", "B"], ["PACKAGE BODY", "A"]], [["VIEW", "A"], ["VIEW", "A"]], "x"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "tolerated dependents"):
+                feature_preflight.validate_plan_record(dict(record, toleratedDependents=bad), checkpoint, state["structural"])
+
     def test_scope_includes_existing_dependents_of_selected_table(self) -> None:
         checkpoint = _checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n")
         state = _state(tables=("T",), columns=(("T", "ID"),), views=("V_T",))

@@ -357,6 +357,21 @@ the target has no body, or when the body is a unit of the same checkpoint. The b
 from the read-only catalog capture that prepare already makes, so the check adds no connection and no
 write.
 
+A checkpoint's DDL can invalidate stored units that read the changed object, directly or through another
+object and in another schema, for example a package body that selects from a view over an altered table. Before
+its payload, each checkpoint's apply session records the INVALID objects of the release's schemas; after it, the
+session recompiles (`DBMS_UTILITY.VALIDATE`) the views and stored units that were not INVALID before, as Oracle
+would on next use. Objects that were already INVALID are left alone. The `structural-dependent-*` postconditions
+then require the direct dependents VALID. From the second checkpoint on, the validity of a unit the checkpoint
+re-creates is not compared with the prepared plan, because an earlier checkpoint may have invalidated it and
+`CREATE OR REPLACE` replaces it anyway; its unit validity postcondition still requires it VALID afterwards.
+
+A dependent that cannot compile until a later checkpoint of the same schema in this capsule re-creates it may stay
+INVALID until then: prepare records it in the target plan as `toleratedDependents`, leaves it out of the earlier
+checkpoint's dependent check, and makes the later checkpoint re-create it even when its source is unchanged; that
+checkpoint's unit validity postcondition then requires it VALID. An already INVALID dependent that no later
+checkpoint re-creates still refuses at prepare; the refusal says to recompile it on the target first.
+
 The capsule payload digest is
 shared by staging and production; the target-plan digest is specific to each
 environment. Re-run `feature freeze` and prepare again if selected source or

@@ -1594,6 +1594,44 @@ class FeaturePrepareTests(unittest.TestCase):
         self.assertTrue(guard["targetExists"])
         self.assertFalse(guard["noOp"])
 
+    def test_a_unit_an_earlier_checkpoint_may_leave_invalid_is_always_recreated(self) -> None:
+        from scripts import feature_release
+
+        exact_lines = ["PACKAGE" + " " * 10 + "DISPATCH AS\n", "  PROCEDURE RUN;\n", "END DISPATCH;\n"]
+        tolerated = frozenset({("PACKAGE", "DISPATCH")})
+        prepared = feature_release._source_guards(
+            self.checkpoint, self._state(environment="stage", lines=exact_lines, valid=True), 2, tolerated=tolerated,
+        )
+        invalid_now = feature_release._source_guards(
+            self.checkpoint, self._state(environment="stage", lines=exact_lines, valid=False), 2, tolerated=tolerated,
+        )
+
+        self.assertFalse(prepared[0]["noOp"])
+        self.assertIsNone(prepared[0]["valid"])
+        self.assertEqual(feature_release._canonical_bytes(prepared), feature_release._canonical_bytes(invalid_now))
+        (validity,) = [query for query in prepared[0]["preconditions"] if query["id"].startswith("validity-")]
+        self.assertIn("STATUS IN ('VALID', 'INVALID')", validity["sql"])
+        untolerated = feature_release._source_guards(
+            self.checkpoint, self._state(environment="stage", lines=exact_lines, valid=True), 2,
+        )
+        self.assertTrue(untolerated[0]["noOp"])
+
+    def test_a_recreated_unit_is_not_guarded_on_validity_after_the_first_checkpoint(self) -> None:
+        from scripts import feature_release
+
+        changed = ["PACKAGE DISPATCH AS\n", "  PROCEDURE OLD;\n", "END DISPATCH;\n"]
+        later = [
+            feature_release._source_guards(self.checkpoint, self._state(environment="stage", lines=changed, valid=valid), 2)
+            for valid in (True, False)
+        ]
+        self.assertEqual(feature_release._canonical_bytes(later[0]), feature_release._canonical_bytes(later[1]))
+        self.assertIsNone(later[0][0]["valid"])
+        self.assertFalse(later[0][0]["noOp"])
+        first = feature_release._source_guards(self.checkpoint, self._state(environment="stage", lines=changed, valid=True), 1)
+        (validity,) = [query for query in first[0]["preconditions"] if query["id"].startswith("validity-")]
+        self.assertIn("STATUS = 'VALID'", validity["sql"])
+        self.assertTrue(first[0]["valid"])
+
     def test_an_unchanged_specification_is_allowed_while_its_body_is_on_the_target(self) -> None:
         # The no-op comparison of the same identical, valid unit (see test_only_identical_valid_stored_unit_is_marked_noop).
         exact_lines = ["PACKAGE" + " " * 10 + "DISPATCH AS\n", "  PROCEDURE RUN;\n", "END DISPATCH;\n"]
@@ -1728,6 +1766,80 @@ class RevalidationViewTests(unittest.TestCase):
         guard = {"stored-code": [self._code("DEPENDENT")]}
         fresh = {"stored-code": [self._code("DEPENDENT", status="INVALID")]}
         self.assertFalse(self._compare(fresh, guard, checkpoint=1))
+
+
+class DependentRevalidationTests(unittest.TestCase):
+    """A checkpoint recompiles what its DDL invalidated; a dependent a later checkpoint re-creates may wait for it."""
+
+    _capsule = staticmethod(RevalidationViewTests._capsule)
+
+    def test_later_capsule_units_are_exact_same_schema_units_after_the_checkpoint(self) -> None:
+        from scripts import feature_release
+
+        capsule = self._capsule(
+            ("APP_CODE", [("APP_CODE", "PACKAGE BODY", "EARLY")]),
+            ("APP_CODE", [("APP_CODE", "VIEW", "CURRENT")]),
+            ("APP_DATA", [("APP_DATA", "PACKAGE BODY", "OTHER_SCHEMA")]),
+            ("APP_CODE", [("APP_CODE", "PACKAGE", "LATE"), ("APP_CODE", "PACKAGE BODY", "LATE")]),
+        )
+        self.assertEqual(
+            frozenset({("PACKAGE", "LATE"), ("PACKAGE BODY", "LATE")}),
+            feature_release._later_capsule_units(capsule, 2, "APP_CODE"),
+        )
+        self.assertEqual(frozenset(), feature_release._later_capsule_units(capsule, 4, "APP_CODE"))
+
+    def test_tolerated_by_earlier_collects_earlier_same_schema_guards(self) -> None:
+        from scripts import feature_release
+
+        guards = [
+            {"checkpoint": 1, "schema": "APP_CODE", "structuralPlan": {"toleratedDependents": [["PACKAGE BODY", "LATE"]]}},
+            {"checkpoint": 2, "schema": "APP_DATA", "structuralPlan": {"toleratedDependents": [["PACKAGE BODY", "X"]]}},
+            {"checkpoint": 3, "schema": "APP_CODE", "structuralPlan": {"toleratedDependents": [["VIEW", "V2"]]}},
+        ]
+        self.assertEqual(
+            frozenset({("PACKAGE BODY", "LATE")}), feature_release._tolerated_by_earlier(guards, 3, "APP_CODE"),
+        )
+
+    def test_revalidation_recompiles_only_objects_the_checkpoint_newly_invalidated(self) -> None:
+        from scripts import feature_release
+
+        before, after = feature_release._revalidation_lines(["APP_CODE", "APP_DATA"])
+        before_text, after_text = "\n".join(before), "\n".join(after)
+        self.assertIn("VARIABLE team_invalid_before CLOB", before_text)
+        self.assertIn("o.owner IN ('APP_CODE', 'APP_DATA') AND o.status = 'INVALID'", before_text)
+        for fragment in (
+            "DBMS_UTILITY.VALIDATE(r.object_id)", "o.owner IN ('APP_CODE', 'APP_DATA') AND o.status = 'INVALID'",
+            "o.object_id NOT IN (", "JSON_TABLE(NVL(:team_invalid_before, '[]')", "'PACKAGE BODY'", "FOR pass IN 1 .. 2",
+        ):
+            self.assertIn(fragment, after_text)
+        self.assertNotIn("'INDEX'", after_text)
+        self.assertEqual(["/", "PROMPT FEATURE_DEPENDENTS_REVALIDATED"], after[-2:])
+        self.assertEqual(([], []), feature_release._revalidation_lines([]))
+
+    def test_revalidation_runs_after_the_payload_and_before_the_compile_guard(self) -> None:
+        from scripts import feature_release
+
+        driver_text = {}
+
+        def fake_run(target, driver, run_dir, phase):
+            driver_text["sql"] = Path(driver).read_text(encoding="utf-8")
+            raise RuntimeError("stop after writing the driver")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            checkpoint = FeatureCheckpoint("APP_CODE", (), (), (), ())
+            target = Target("staging", "conn", "APP_CODE", "APP_CODE", "staging")
+            with patch.object(feature_release.sqlcl_session, "run_sqlcl", side_effect=fake_run), \
+                 self.assertRaises(feature_release.FeatureReleaseError):
+                feature_release._run_apply_session(
+                    checkpoint, target, dict(IDENTITY_FIELDS), (), run_dir, {}, [("payload/checkpoint-001-input-001.sql", None, None)],
+                    before_run=lambda: None, before_payload=["PROMPT BEFORE_PAYLOAD_MARKER"],
+                    after_payload=["PROMPT AFTER_PAYLOAD_MARKER"],
+                )
+        sql = driver_text["sql"]
+        self.assertLess(sql.index("PROMPT BEFORE_PAYLOAD_MARKER"), sql.index("@@payload/checkpoint-001-input-001.sql"))
+        self.assertLess(sql.index("@@payload/checkpoint-001-input-001.sql"), sql.index("PROMPT AFTER_PAYLOAD_MARKER"))
+        self.assertLess(sql.index("PROMPT AFTER_PAYLOAD_MARKER"), sql.index("PROMPT MIGRATION_APPLY_COMPLETED"))
 
 
 if __name__ == "__main__":
