@@ -200,21 +200,25 @@ def _validate_completion_proof(capsule: ReleaseCapsule, report: Mapping, *, envi
     report_budget = report.get("objectBudget")
     expected_seconds = getattr(capsule, "database_object_budget_seconds", None)
     expected_migrations = [number for number, step in enumerate(step_definitions, start=1) if step.get("type") == "migrate"]
+    # ASHARIF 2026-11-22: the object budget is a planning measure. A completion proof records the time and coverage
+    # as measured; it no longer requires them within budget or complete, only consistent with the report and capsule.
+    elapsed = clean_budget["elapsedSeconds"]
+    coverage = expected_excluded == []
+    within = elapsed is not None and expected_seconds is not None and elapsed <= expected_seconds
     if (
-        clean_budget["seconds"] != expected_seconds or clean_budget["coverageComplete"] is not True
-        or clean_budget["passed"] is not True or clean_budget["elapsedSeconds"] is None
-        or clean_budget["elapsedSeconds"] > expected_seconds
+        clean_budget["seconds"] != expected_seconds or elapsed is None
+        or clean_budget["coverageComplete"] is not coverage
+        or clean_budget["passed"] is not (coverage and within)
         or not isinstance(report_budget, Mapping)
         or report_budget.get("seconds") != clean_budget["seconds"]
-        or report_budget.get("elapsedSeconds") != clean_budget["elapsedSeconds"]
-        or report_budget.get("coverageComplete") is not True
-        or report_budget.get("withinBudget") is not True
+        or report_budget.get("elapsedSeconds") != elapsed
+        or report_budget.get("coverageComplete") is not coverage
+        or report_budget.get("withinBudget") is not within
         or report_budget.get("includedCheckpoints") != checkpoints
         or report_budget.get("includedMigrationSteps") != expected_migrations
         or report_budget.get("excludedObjectSteps") != expected_excluded
-        or expected_excluded != []
     ):
-        raise release_state.ReleaseStateError("completion proof budget does not prove full in-budget checkpoint coverage")
+        raise release_state.ReleaseStateError("completion proof budget does not match its report and capsule")
     if any(step.get("type") in {"sql-script", "ords-import"} for step in step_definitions):
         data_seconds = release_state._number(report.get("dataSeconds"), "rollout dataSeconds")
         ords_seconds = release_state._number(report.get("ordsSeconds"), "rollout ordsSeconds")

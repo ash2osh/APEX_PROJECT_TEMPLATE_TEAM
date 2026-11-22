@@ -991,7 +991,8 @@ class FeatureRolloutTests(unittest.TestCase):
             self.assertIn("target identity changed after preparation", rep["error"])
             exec_mock.assert_not_called()
 
-    def test_budget_boundary_stops_before_second_feature_checkpoint(self) -> None:
+    def test_budget_boundary_does_not_stop_the_next_feature_checkpoint(self) -> None:
+        # ASHARIF 2026-11-22: the object budget is measured, never enforced; reaching it does not stop the rollout.
         from scripts import feature_release
 
         patches = self._patches()
@@ -1014,14 +1015,20 @@ class FeatureRolloutTests(unittest.TestCase):
                 report_path=report_base, confirm=lambda _prompt: True,
             )
 
-        self.assertEqual(status, 2)
-        self.assertEqual(execute.call_count, 1)
         report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(status, 0, report.get("error"))
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(report["status"], "success")
         self.assertEqual(report["databaseState"], "verified")
-        self.assertEqual(report["objectBudget"]["elapsedSeconds"], 120.0)
-        self.assertEqual(report["objectBudget"]["includedCheckpoints"], [1])
-        self.assertEqual(report["checkpointSqlclSessions"], {"1": 2})
-        self.assertEqual(report["steps"][1]["status"], "not-run")
+        self.assertEqual(report["objectBudget"]["elapsedSeconds"], 240.0)
+        self.assertEqual(report["objectBudget"]["includedCheckpoints"], [1, 2])
+        self.assertFalse(report["objectBudget"]["withinBudget"])
+        self.assertIn("over the planning budget", report["budgetWarning"])
+        self.assertEqual(report["checkpointSqlclSessions"], {"1": 2, "2": 2})
+        self.assertEqual(report["steps"][1]["status"], "succeeded")
+        markdown = report_base.with_suffix(".md").read_text(encoding="utf-8")
+        self.assertIn("Budget warning:", markdown)
+        self.assertIn("it never stops a rollout", markdown)
 
     def test_verified_300_second_overrun_is_reported_without_losing_verified_state(self) -> None:
         from scripts import feature_release
@@ -1054,13 +1061,15 @@ class FeatureRolloutTests(unittest.TestCase):
                 report_path=report_base, confirm=lambda _prompt: True,
             )
 
-        self.assertEqual(status, 2)
         execute.assert_called_once()
         report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(status, 0, report.get("error"))
+        self.assertEqual(report["status"], "success")
         self.assertEqual(report["databaseState"], "verified")
         self.assertEqual(report["objectBudget"]["seconds"], 300)
         self.assertEqual(report["objectBudget"]["elapsedSeconds"], 301.0)
         self.assertFalse(report["objectBudget"]["withinBudget"])
+        self.assertIn("301.0 s is over the planning budget of 300 s", report["budgetWarning"])
         self.assertEqual(report["applicationSeconds"], 0.0)
 
     def test_app_import_duration_is_reported_outside_database_object_budget(self) -> None:
@@ -1249,15 +1258,16 @@ class FeatureRolloutTests(unittest.TestCase):
                 refusal = captured.getvalue() + (report or {}).get("error", "")
                 self.assertIn(expected, refusal)
 
-    def test_migration_step_over_budget_fails_with_verified_database_state(self) -> None:
+    def test_migration_step_over_budget_completes_with_a_budget_warning(self) -> None:
         status, report, migrate = self._run_migration_release(
             self._migration_release_patches(), migrate_seconds=200.0, label="migration-over-budget",
         )
 
-        self.assertEqual(status, 2)
+        self.assertEqual(status, 0, report.get("error"))
         migrate.assert_called_once()
+        self.assertEqual(report["status"], "success")
         self.assertEqual(report["databaseState"], "verified")
-        self.assertIn("after a verified feature or migration checkpoint", report["error"])
+        self.assertIn("over the planning budget", report["budgetWarning"])
         self.assertEqual(report["objectBudget"]["includedMigrationSteps"], [2])
         self.assertFalse(report["objectBudget"]["withinBudget"])
 

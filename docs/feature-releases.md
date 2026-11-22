@@ -240,7 +240,7 @@ The object budget covers feature checkpoints and `migrate` steps. A SQL-script i
 the separate data phase only when every statement is lexically validated,
 top-level `INSERT`, `UPDATE`, `DELETE`, or `MERGE`, plus optional explicit
 `COMMIT`/`ROLLBACK`. DDL, PL/SQL blocks, calls, queries, and other forms remain
-uncovered object work and block complete fast-path promotion. Recognized ORDS
+uncovered object work and leave the report's budget coverage incomplete. Recognized ORDS
 exports keep their own phase and timing after the existing structure, OAuth,
 exclusion, and owner checks. Static DML classification describes the source
 statements; it cannot rule out trigger, autonomous-transaction, or external
@@ -309,7 +309,8 @@ the old behaviour).
 [the example release manifest](feature-release.example.json) to
 `releases/current.json`, then select the real source paths, step order, app IDs,
 and reviewed database-object budget. Version 2 defaults to 120 seconds and
-accepts a budget from 1 through 300 seconds. Commit the selected source and
+accepts a budget from 1 through 300 seconds. The budget is a planning target: a
+rollout that takes longer still finishes and reports a `budgetWarning`. Commit the selected source and
 manifest before freezing; unrelated local edits do not block the freeze.
 
 ```bash
@@ -483,8 +484,9 @@ scripts/team.sh rollout releases/current.json --env prod --capsule <capsule-dir>
 ```
 
 Production validates the staging report's payload and engine digests, shared
-source hashes, complete in-budget coverage of every feature checkpoint and every
-`migrate` step (`includedMigrationSteps`), and matching data/ORDS phase
+source hashes, a verified outcome for every feature checkpoint and every
+`migrate` step (`includedMigrationSteps`), budget flags that agree with the
+measured time, and matching data/ORDS phase
 classifications before it asks for confirmation. It uses the staged capsule
 payload and independently revalidates the production target plan and app
 descriptors. SQL, ORDS and migration targets are observed during preparation and
@@ -611,12 +613,18 @@ Reports separate preparation, selected feature database-object time, APEX app
 imports, ORDS imports, and data scripts. Object time covers checkpoint
 revalidation, preconditions, apply, and postconditions for feature checkpoints,
 and the elapsed time of each `migrate` step, which counts toward the same budget.
-It is not a hard stop: Oracle DDL may commit before the command can report a
-budget overrun. Data, ORDS, preparation, and manual pauses have separate times.
+The budget is measured, never enforced: a rollout does not stop or fail when its
+object time passes the budget, because stopping between checkpoints would leave the
+target half released with no way to resume the same capsule. The report records
+`elapsedSeconds`, `withinBudget` and `coverageComplete`, and adds a `budgetWarning`
+sentence when the time is over budget or coverage is incomplete; a completed run
+still counts as staging proof and still creates the production release tag. Use
+those numbers from a staging or local rehearsal to split the next release into
+more capsules. Data, ORDS, preparation, and manual pauses have separate times.
 Unclassified SQL-script object work is listed as excluded, and its presence means
-coverage is incomplete. A complete, within-budget report covers every capsule
-checkpoint, every `migrate` step (`includedMigrationSteps`) and every classified
-phase, not the whole database or deployment window.
+coverage is incomplete. A complete report covers every capsule checkpoint, every
+`migrate` step (`includedMigrationSteps`) and every classified phase, not the whole
+database or deployment window.
 
 Attempt state is local in `releases/.local-state.json`; it is not a shared
 database ledger and cannot see another developer's repository. Its schema-2

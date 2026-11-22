@@ -496,7 +496,8 @@ In a schema-version 2 capsule, a `migrate` step is a covered checkpoint: its tar
 and read-only preflight are prepared, it runs under the writer lease, and its elapsed time counts
 toward the capsule's database-object budget (`includedMigrationSteps` in the budget record).
 SQL-script, ORDS and app-deploy time stays excluded. When object work remains outside feature
-checkpoints and migrate steps, budget coverage is incomplete. A release made only of migrate steps
+checkpoints and migrate steps, budget coverage is incomplete. The budget is a planning measure: an
+overrun is reported and never stops or fails the rollout. A release made only of migrate steps
 is a migration-only capsule; see [migration-only releases](feature-releases.md#migration-only-releases).
 
 The manifest is UTF-8 JSON with no duplicate keys. Its root has exactly these

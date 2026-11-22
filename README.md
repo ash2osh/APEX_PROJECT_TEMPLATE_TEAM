@@ -615,7 +615,7 @@ current path. Capsule runs use a separate target plan and local attempt state;
 an unresolved write requires reconciliation before recovery. Production also
 requires the verified staging report for the same capsule. Budget timing covers
 selected feature checkpoints and migrate steps, not app imports or excluded
-unclassified object work. Read the [feature release guide](docs/feature-releases.md) before using a
+unclassified object work; it is measured and reported, and never stops a rollout. Read the [feature release guide](docs/feature-releases.md) before using a
 capsule against a shared target.
 
 ## Staging and production deployments
