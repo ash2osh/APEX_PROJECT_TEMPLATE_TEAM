@@ -997,9 +997,15 @@ def _markdown_report(report: dict) -> str:
     budget = report.get("objectBudget")
     if isinstance(budget, Mapping):
         lines.append(
+            f"- Object time: `{budget.get('elapsedSeconds')}` of `{budget.get('seconds')}` planning seconds "
+            f"(within budget `{budget.get('withinBudget')}`; the budget is measured, it never stops a rollout)"
+        )
+        lines.append(
             f"- Object budget: coverage complete `{budget.get('coverageComplete')}`; included checkpoints "
             f"`{budget.get('includedCheckpoints', [])}`; included migration steps `{budget.get('includedMigrationSteps', [])}`"
         )
+    if report.get("budgetWarning"):
+        lines.append(f"- **Budget warning:** {report['budgetWarning']}")
     lines.extend((
         "",
         "| Step | Type | Status | SHA-256 | Start | End | Seconds | Evidence |",

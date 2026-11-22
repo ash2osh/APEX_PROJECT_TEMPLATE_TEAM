@@ -221,6 +221,7 @@ class ReleasePromotionTests(unittest.TestCase):
 
     def complete_rollout(
         self, *, environment: str = "prod", modes: tuple[str, ...] = ("applied", "no-op"),
+        object_seconds: float | None = None,
     ) -> tuple[dict, str, SimpleNamespace]:
         from scripts import release_ownership
 
@@ -316,7 +317,9 @@ class ReleasePromotionTests(unittest.TestCase):
                 "receiptSha256": receipt_hash,
             })
 
-        budget = {"seconds": 120, "elapsedSeconds": float(len(modes)), "coverageComplete": True, "passed": True}
+        elapsed = float(len(modes)) if object_seconds is None else object_seconds
+        within = elapsed <= 120
+        budget = {"seconds": 120, "elapsedSeconds": elapsed, "coverageComplete": True, "passed": within}
         report = {
             "schemaVersion": 2, "environment": environment, "status": "success",
             "databaseState": "verified", "payloadDigest": self.payload_digest,
@@ -324,7 +327,7 @@ class ReleasePromotionTests(unittest.TestCase):
             "targetPlanDigest": plan.plan_digest, "inputHashes": list(self.input_hashes),
             "objectBudget": {
                 "seconds": 120, "elapsedSeconds": budget["elapsedSeconds"],
-                "coverageComplete": True, "withinBudget": True,
+                "coverageComplete": True, "withinBudget": within,
                 "includedCheckpoints": list(range(1, len(modes) + 1)),
                 "includedMigrationSteps": [
                     number for number, definition in enumerate(self.payload_definition["steps"], start=1)
@@ -417,7 +420,16 @@ class ReleasePromotionTests(unittest.TestCase):
         with self.assertRaisesRegex(state.ReleaseStateError, "input|source|hash"):
             state.validate_stage_proof(self.capsule, report)
 
-    def test_stage_report_requires_complete_in_budget_object_coverage(self) -> None:
+    def test_over_budget_staging_run_is_still_proof_for_production(self) -> None:
+        # ASHARIF 2026-11-22: the object budget is a planning measure. A verified staging run that took longer than
+        # the budget completes, and production accepts it as proof; its report keeps the real time and flags.
+        state = self.state_module()
+        report, _run_id, _plan = self.complete_rollout(environment="staging", object_seconds=480.5)
+        self.assertFalse(report["objectBudget"]["withinBudget"])
+        self.assertFalse(report["completionProof"]["budget"]["passed"])
+        state.validate_stage_proof(self.capsule, report)
+
+    def test_stage_report_budget_flags_must_match_its_time_and_coverage(self) -> None:
         state = self.state_module()
         mutations = (
             ("coverageComplete", False),

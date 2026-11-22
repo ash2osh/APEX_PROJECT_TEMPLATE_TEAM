@@ -604,7 +604,9 @@ def _validate_rollout(row: object) -> dict:
             or len(result["steps"]) != result["expectedStepCount"]
             or any(step["status"] != "verified" for step in result["steps"])
             or result["databaseState"] != "verified"
-            or result["budget"]["passed"] is not True
+            # ASHARIF 2026-11-22: the object budget is a planning measure, not a gate. A verified rollout records
+            # its time and coverage; being over budget or incompletely covered does not stop it or void its proof.
+            or result["budget"]["elapsedSeconds"] is None
             or result["finalReportPath"] is None
             or result["finalReportSha256"] is None
         ):
@@ -2016,14 +2018,17 @@ def validate_stage_proof(capsule: ReleaseCapsule, report: Mapping) -> None:
     if type(seconds) is not int or not 1 <= seconds <= 300 or seconds != expected_seconds:
         raise ReleaseStateError("stage report budget seconds do not match the capsule")
     elapsed = _number(budget.get("elapsedSeconds"), "stage report elapsedSeconds")
-    if budget.get("coverageComplete") is not True or budget.get("withinBudget") is not True or elapsed > seconds:
-        raise ReleaseStateError("stage report must have complete object coverage within budget")
+    # ASHARIF 2026-11-22: staging proof needs every checkpoint verified, not a run within the planning budget. The
+    # report's own flags must still agree with its numbers, so a reviewer reads the real time and coverage.
+    if type(budget.get("coverageComplete")) is not bool or budget.get("withinBudget") is not (elapsed <= seconds):
+        raise ReleaseStateError("stage report object budget flags do not match its time")
     checkpoints = list(range(1, len(capsule.checkpoints) + 1))
     included = budget.get("includedCheckpoints")
     excluded = budget.get("excludedObjectSteps")
     if (
         not isinstance(included, list) or any(type(item) is not int for item in included)
-        or included != checkpoints or not isinstance(excluded, list) or excluded != []
+        or included != checkpoints or not isinstance(excluded, list) or any(type(item) is not str for item in excluded)
+        or budget.get("coverageComplete") is not (excluded == [])
     ):
         raise ReleaseStateError("stage report object budget does not cover every capsule checkpoint")
     included_migrations = budget.get("includedMigrationSteps")

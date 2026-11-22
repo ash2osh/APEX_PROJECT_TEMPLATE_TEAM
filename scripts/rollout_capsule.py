@@ -271,6 +271,20 @@ def _capsule_object_budget(
     }
 
 
+def _budget_warning(object_budget: Mapping) -> str | None:
+    """A plain sentence when the measured object time is over the planning budget or not fully covered, else None."""
+    notes = []
+    if object_budget.get("withinBudget") is not True:
+        notes.append(
+            f"database-object time {object_budget.get('elapsedSeconds')} s is over the planning budget of "
+            f"{object_budget.get('seconds')} s; consider splitting this work into more capsules for the next target"
+        )
+    if object_budget.get("coverageComplete") is not True:
+        excluded = ", ".join(object_budget.get("excludedObjectSteps") or ()) or "none listed"
+        notes.append(f"object time does not cover every step (not timed as object work: {excluded})")
+    return "; ".join(notes) if notes else None
+
+
 def _selected_capsule_signature(capsule) -> tuple:
     """The capsule whose hashes were prepared and shown for confirmation."""
     return (
@@ -413,8 +427,10 @@ def _run_capsule_rollout(
                 raise rollout.RolloutError("whole-rollout checkpoint verification index changed during execution")
             for row in verification_rows:
                 release_state._verify_evidence_hashes(root, row["evidence"], "checkpoint verification")
-            if not budget["passed"] or budget["seconds"] != capsule.database_object_budget_seconds:
-                raise rollout.RolloutError("whole-rollout completion requires complete in-budget object coverage")
+            # ASHARIF 2026-11-22: completion needs every step and checkpoint verified and a measured object time; being
+            # over the planning budget or incompletely covered is reported (budgetWarning), not refused.
+            if not isinstance(elapsed, (int, float)) or budget["seconds"] != capsule.database_object_budget_seconds:
+                raise rollout.RolloutError("whole-rollout completion requires a measured object time for the capsule's budget")
             if report_paths is None:
                 raise rollout.RolloutError("whole-rollout completion has no final report destination")
             if release_tag and environment == "prod":
@@ -813,17 +829,9 @@ def _run_capsule_rollout(
         for index, item in enumerate(plan):
             step = item["step"]
             step_report = report["steps"][index]
-            if step["type"] in {"feature-migrate", "migrate"} and object_seconds >= capsule.database_object_budget_seconds:
-                report["objectPhaseSeconds"] = round(object_seconds, 3)
-                report["objectBudget"] = _capsule_object_budget(
-                    capsule, object_seconds, included_checkpoints, excluded_object_steps,
-                    included_migration_steps, migration_step_count,
-                )
-                report["error"] = "database-object budget reached; stopped before the next feature or migration checkpoint"
-                report["databaseState"] = "verified" if (included_checkpoints or included_migration_steps) else "not-started"
-                rollout._finish_report(report, started, "failed", 2)
-                break
-
+            # ASHARIF 2026-11-22: the object budget never stops a rollout. Stopping between checkpoints leaves the target
+            # half released with no way to resume the same capsule, which is worse than a long run. Time is measured and
+            # reported (budgetWarning) so the next release can be split from rehearsal measurements.
             capsule = reload_selected_capsule()
             step_started = time.perf_counter()
             step_report["status"] = "running"
@@ -990,11 +998,6 @@ def _run_capsule_rollout(
                 step_report["status"] = "succeeded"
                 receipt_path = rollout._write_receipt(root, environment, manifest, item, step_report)
                 step_report["receiptPath"] = relative_to_root(receipt_path, root).as_posix()
-                if step["type"] in {"feature-migrate", "migrate"} and object_seconds > capsule.database_object_budget_seconds:
-                    report["error"] = "database-object budget exceeded after a verified feature or migration checkpoint"
-                    report["databaseState"] = "verified"
-                    rollout._finish_report(report, started, "failed", 2)
-                    break
             except Exception as error:
                 step_report["status"] = "failed"
                 step_report["error"] = str(error)
@@ -1028,12 +1031,8 @@ def _run_capsule_rollout(
                 capsule, object_seconds, included_checkpoints, excluded_object_steps,
                 included_migration_steps, migration_step_count,
             )
-            if object_seconds > capsule.database_object_budget_seconds:
-                report["error"] = "database-object budget exceeded after verified work"
-                report["databaseState"] = "verified"
-                rollout._finish_report(report, started, "failed", 2)
-            else:
-                rollout._finish_report(report, started, "success", 0)
+            report["budgetWarning"] = _budget_warning(report["objectBudget"])
+            rollout._finish_report(report, started, "success", 0)
         rollout._write_reports(report, report_paths)
         finish_local_run(verified=report["status"] == "success")
         rollout._announce_report_paths(report_paths, root)
