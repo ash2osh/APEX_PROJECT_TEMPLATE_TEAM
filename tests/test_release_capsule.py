@@ -927,12 +927,18 @@ class EngineDigestCoverageTests(unittest.TestCase):
         # release-plan and DEV apply; a capsule prepare or rollout never runs them.
         "scripts/feature_convert.py", "scripts/feature_doctor.py", "scripts/release_plan.py",
         "scripts/migration_plan.py", "scripts/feature_dev.py", "scripts/feature_dev_views.py",
+        # 26.2: publish_app.sh (run by deploy.sh) uses these only for a DEV publish (application locks, --file
+        # partial publish) and the mirror and APEXlang upgrade helpers they reach; a staging or production deploy
+        # never runs them. The 26.1 template has none of them.
+        "scripts/application_lock.py", "scripts/application_lock.sql", "scripts/partial_publish.py",
+        "scripts/partial_publish.sql", "scripts/check_mirror_source.py", "scripts/replace_mirror.sh",
+        "scripts/upgrade_apexlang.py",
     })
     # Only references that are used as paths count; a file name inside a message (for example
     # "run scripts/team.sh reconcile-migration") does not make that file part of the rollout.
     _PY_PATH = re.compile(r"""(?:with_name\(\s*|/\s*|["']scripts/)["']?([A-Za-z0-9_]+\.(?:sql|sh|py))["']""")
     _SQL_INCLUDE = re.compile(r"""(?m)^\s*@@?"?(?:[^"\s]*/)?([A-Za-z0-9_]+\.sql)""")
-    _SH_PATH = re.compile(r"""\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/([A-Za-z0-9_]+\.(?:sql|sh|py))""")
+    _SH_PATH = re.compile(r"""\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/(?:scripts/)?([A-Za-z0-9_]+\.(?:sql|sh|py))""")
 
     def setUp(self) -> None:
         import sys
@@ -968,7 +974,10 @@ class EngineDigestCoverageTests(unittest.TestCase):
         text = (self.root / relative).read_text(encoding="utf-8", errors="replace")
         pattern = {".py": self._PY_PATH, ".sql": self._SQL_INCLUDE, ".sh": self._SH_PATH}[Path(relative).suffix]
         found: set[str] = set()
-        for name in pattern.findall(text):
+        names = list(pattern.findall(text))
+        if Path(relative).suffix == ".py" and re.search(r"""with_suffix\(\s*["']\.sql["']\s*\)""", text):
+            names.append(f"{Path(relative).stem}.sql")  # Path(__file__).with_suffix(".sql")
+        for name in names:
             candidate = f"scripts/{name}"
             if candidate != relative and (self.root / candidate).is_file() and not name.startswith("test_"):
                 found.add(candidate)

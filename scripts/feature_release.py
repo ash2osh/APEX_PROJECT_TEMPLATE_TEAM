@@ -621,8 +621,14 @@ def _source_guards(
     }
     for guard in result:
         unit_type = guard["unit"]["type"]
-        if unit_type in {"TYPE BODY", "PACKAGE BODY"} and (unit_type[:-5], guard["unit"]["name"]) in replaced_specs and guard["noOp"] is True:
+        if unit_type in {"TYPE BODY", "PACKAGE BODY"} and (unit_type[:-5], guard["unit"]["name"]) in replaced_specs:
             guard["noOp"] = False
+            if checkpoint_number > 1 and guard["targetExists"]:
+                # Re-created now, so like any re-created unit its prior validity is not part of the guard.
+                guard["valid"] = None
+                for query in guard["preconditions"]:
+                    if query["id"].startswith("validity-"):
+                        query["sql"] = re.sub(r"STATUS = '(?:VALID|INVALID)'", "STATUS IN ('VALID', 'INVALID')", query["sql"])
     return result
 
 
@@ -1887,7 +1893,10 @@ def _apply_checkpoint_session(
         )
         applied_drivers.append((staged_relative, settings_prologue, settings_prologue_sha256))
 
-    before_payload, after_payload = _revalidation_lines(sorted({item.schema for item in capsule.checkpoints}))
+    before_payload, after_payload = _revalidation_lines(
+        sorted({item.schema for item in capsule.checkpoints}),
+        [tuple(str(part) for part in item.unit) for item in checkpoint.inputs if item.unit is not None],
+    )
     result = _run_apply_session(
         checkpoint, target, expected_identity, preconditions, run_dir, source_guards, applied_drivers,
         before_run=lambda: _validated_capsule(root, capsule),
@@ -2055,13 +2064,16 @@ def _tolerated_by_earlier(guards: Sequence[Mapping], checkpoint: int, schema: st
 _REVALIDATED_TYPES = ("FUNCTION", "PACKAGE", "PACKAGE BODY", "PROCEDURE", "TRIGGER", "TYPE", "TYPE BODY", "VIEW")
 
 
-def _revalidation_lines(owners: Sequence[str]) -> tuple[list[str], list[str]]:
+def _revalidation_lines(
+    owners: Sequence[str], own_units: Sequence[tuple[str, str, str]] = (),
+) -> tuple[list[str], list[str]]:
     """(before payload, after payload) driver lines that recompile what a checkpoint newly invalidated.
 
     DDL invalidates the objects that read the changed object, directly or through others, in any schema.
     Oracle would recompile them on next use; later checkpoints and the structural-dependent postconditions need
     them VALID now. Before the payload the session records the INVALID objects of the release's schemas; after it,
-    it recompiles (DBMS_UTILITY.VALIDATE, twice for chains) the ones that were not INVALID before. A failure to
+    it recompiles (DBMS_UTILITY.VALIDATE, twice for chains) the ones that were not INVALID before, and the
+    checkpoint's own units (owner, type, name) whatever they were before, because it re-created them. A failure to
     compile is not raised here: the object stays INVALID and a postcondition reports it, unless a later checkpoint
     of the capsule re-creates it (tolerated_dependents).
     """
@@ -2069,6 +2081,13 @@ def _revalidation_lines(owners: Sequence[str]) -> tuple[list[str], list[str]]:
         return [], []
     owner_list = ", ".join(_sql_literal(owner) for owner in owners)
     type_list = ", ".join(_sql_literal(object_type) for object_type in _REVALIDATED_TYPES)
+    own_condition = ""
+    if own_units:
+        triples = ", ".join(
+            f"({_sql_literal(owner)}, {_sql_literal(object_type)}, {_sql_literal(name)})"
+            for owner, object_type, name in sorted(set(own_units))
+        )
+        own_condition = f"\n           OR (o.owner, o.object_type, o.object_name) IN ({triples})"
     before = [
         "VARIABLE team_invalid_before CLOB",
         "BEGIN",
@@ -2084,9 +2103,9 @@ def _revalidation_lines(owners: Sequence[str]) -> tuple[list[str], list[str]]:
         "      SELECT o.object_id FROM all_objects o",
         f"       WHERE o.owner IN ({owner_list}) AND o.status = 'INVALID'",
         f"         AND o.object_type IN ({type_list})",
-        "         AND o.object_id NOT IN (",
+        "         AND (o.object_id NOT IN (",
         "           SELECT j.object_id FROM JSON_TABLE(NVL(:team_invalid_before, '[]'), '$[*]'",
-        "             COLUMNS (object_id NUMBER PATH '$')) j)",
+        f"             COLUMNS (object_id NUMBER PATH '$')) j){own_condition})",
         "    ) LOOP",
         "      BEGIN",
         "        DBMS_UTILITY.VALIDATE(r.object_id);",
@@ -2108,6 +2127,15 @@ def _revalidation_row_key(section: str, row: Mapping) -> tuple[str, str]:
     if section == "triggers":
         return ("TRIGGER", str(row.get("name", "")))
     return (_unit_family(row.get("type")), str(row.get("name", "")))
+
+
+def _revalidation_exact_key(section: str, row: Mapping) -> tuple[str, str]:
+    """(exact object type, name): pairs a fresh row with the prepared row of the same object, never spec with body."""
+    if section == "views":
+        return ("VIEW", str(row.get("name", "")))
+    if section == "triggers":
+        return ("TRIGGER", str(row.get("name", "")))
+    return (str(row.get("type", "")).upper(), str(row.get("name", "")))
 
 
 def _revalidation_view(
@@ -2138,9 +2166,9 @@ def _revalidation_view(
                 side[section] = [row for row in side[section] if _revalidation_row_key(section, row) not in earlier_units]
     flipped: set[tuple[str, str]] = set()
     for section, status_field in (("stored-code", "status"), ("views", "status"), ("triggers", "object_status")):
-        guard_rows = {_revalidation_row_key(section, row): row for row in guard.get(section, ())}
+        guard_rows = {_revalidation_exact_key(section, row): row for row in guard.get(section, ())}
         for row in fresh.get(section, ()):
-            key = _revalidation_row_key(section, row)
+            key = _revalidation_exact_key(section, row)
             prepared = guard_rows.get(key)
             if (
                 prepared is not None
@@ -2151,11 +2179,11 @@ def _revalidation_view(
                 row[status_field] = prepared[status_field]
                 flipped.add(key)
     if flipped and "invalid-objects" in fresh:
-        prepared_invalid = {_revalidation_row_key("invalid-objects", row) for row in guard.get("invalid-objects", ())}
+        prepared_invalid = {_revalidation_exact_key("invalid-objects", row) for row in guard.get("invalid-objects", ())}
         fresh["invalid-objects"] = [
             row for row in fresh["invalid-objects"]
-            if _revalidation_row_key("invalid-objects", row) in prepared_invalid
-            or _revalidation_row_key("invalid-objects", row) not in flipped
+            if _revalidation_exact_key("invalid-objects", row) in prepared_invalid
+            or _revalidation_exact_key("invalid-objects", row) not in flipped
         ]
     return fresh, guard
 
@@ -2393,32 +2421,36 @@ def _execute_checkpoint_under_lease(
                 2, "verified", report["objectSeconds"], report["sessionCount"],
                 tuple(evidence), str(error),
             )
-        report["databaseState"] = "unknown" if attempt_id is not None else "not-started"
         report["error"] = str(error)
         if report["preconditions"] is None and preconditions:
             report["preconditions"] = _in_session_preconditions(run_dir, preconditions, required=False)
         report["objectSeconds"] = round(time.perf_counter() - started, 3)
         report["sessionCount"] += apply_sessions
-        report["objectBudget"] = {
-            "seconds": capsule.database_object_budget_seconds,
-            "coverageComplete": False,
-            "includedCheckpoints": [checkpoint] if attempt_id is not None else [],
-            "excludedObjectSteps": [],
-        }
         log_path = run_dir / "sqlcl-output.log"
         if attempt_id is not None and not log_path.exists():
             log_path.write_text("", encoding="utf-8")
-        _write_checkpoint_report(run_dir, report)
-        evidence = _runtime_evidence(root, report, run_dir)
+        # An attempt whose apply log proves no payload ran (for example a precondition refused inside the apply
+        # session) closes as not-started, and the checkpoint reports the same state: an "unknown" checkpoint would
+        # make the rollout run unknown and lock the target although nothing was written.
+        attempt_state = "not-started" if attempt_id is None else "unknown"
+        not_started_evidence = None
         if attempt_id is not None:
-            attempt_state = "unknown"
             try:
-                log_output = log_path.read_text(encoding="utf-8")
-                if migration_attempts.not_started_reason(log_output) is not None:
+                if migration_attempts.not_started_reason(log_path.read_text(encoding="utf-8")) is not None:
                     attempt_state = "not-started"
-                    evidence = [relative_to_root(log_path.resolve(strict=True), root).as_posix()]
+                    not_started_evidence = [relative_to_root(log_path.resolve(strict=True), root).as_posix()]
             except (OSError, UnicodeError):
                 pass
+        report["databaseState"] = attempt_state
+        report["objectBudget"] = {
+            "seconds": capsule.database_object_budget_seconds,
+            "coverageComplete": False,
+            "includedCheckpoints": [checkpoint] if attempt_state == "unknown" else [],
+            "excludedObjectSteps": [],
+        }
+        _write_checkpoint_report(run_dir, report)
+        evidence = not_started_evidence or _runtime_evidence(root, report, run_dir)
+        if attempt_id is not None:
             release_state.finish_attempt(
                 root, attempt_id, state=attempt_state, evidence=evidence,
                 metrics={

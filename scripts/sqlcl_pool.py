@@ -210,6 +210,48 @@ def driver_defines(text: str) -> set[str]:
     return {match.group(1) or match.group(2) for match in _DEFINE_NAME.finditer(text)}
 
 
+_INCLUDE = re.compile(r'(?im)^\s*(@@?|STA(?:RT)?\s+)\s*(?:"([^"]+)"|(\S+))(.*)$')
+MAX_SCANNED_SCRIPTS = 500
+
+
+def script_defines(driver_path: Path, run_dir: Path) -> set[str]:
+    """Substitution variables a driver and the scripts it includes define, to UNDEFINE before the next script.
+
+    Follows @ (relative to run_dir, the session's directory), @@ and START (relative to the including script),
+    adding .sql when the name has no extension. Arguments passed to an include define its positional variables
+    1..n. Missing or unreadable scripts are skipped; at most MAX_SCANNED_SCRIPTS files are read.
+    """
+    names: set[str] = set()
+    seen: set[Path] = set()
+    pending = [Path(driver_path)]
+    while pending and len(seen) < MAX_SCANNED_SCRIPTS:
+        path = pending.pop()
+        try:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            text = resolved.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        names |= driver_defines(text)
+        for match in _INCLUDE.finditer(text):
+            marker, quoted, bare, rest = match.groups()
+            target = quoted or bare
+            if not target or target.startswith("&"):
+                continue
+            arguments = rest.split()
+            names.update(str(position) for position in range(1, len(arguments) + 1))
+            candidate = Path(target)
+            if not candidate.suffix:
+                candidate = candidate.with_suffix(".sql")
+            if not candidate.is_absolute():
+                base = resolved.parent if marker == "@@" else Path(run_dir)
+                candidate = base / candidate
+            pending.append(candidate)
+    return names
+
+
 class SqlclProcess:
     """One long-lived SQLcl reading segments from slot FIFOs (POSIX)."""
 
@@ -525,12 +567,11 @@ class SessionPool:
                     else:
                         replace = False
                         reset_seconds = round(time.monotonic() - started, 3)
-                        text = driver_path.read_text(encoding="utf-8", errors="replace")
                         segment = f'cd "{run_dir.as_posix()}"\n@"{driver_path.as_posix()}"'
                         process.scripts += 1
                         self.scripts += 1
                         slot = process.next_slot
-                        process.defines |= driver_defines(text)
+                        process.defines |= script_defines(driver_path, run_dir)
                         returncode, output = process.run_segment(
                             segment, timeout_seconds=max(1.0, timeout_seconds - (time.monotonic() - started)),
                             output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,

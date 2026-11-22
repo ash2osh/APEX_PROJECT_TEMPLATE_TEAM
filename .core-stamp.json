@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "a54260f86759f21e530c74fa14b1e40724b7be64",
+  "coreCommit": "613be0e8c39cb8e2a94ad04d3b142025f8cf69ff",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -229,12 +229,12 @@
     },
     {
       "path": "scripts/feature_preflight.py",
-      "sha256": "cf025ab7d4d688b6299c1d0fdc633b19828fe1c4321bbad7315750db3af85e24",
+      "sha256": "09f96dde343437238624fa1a9d834b1e455348b6816ad63cefb094b268b2fa41",
       "executable": false
     },
     {
       "path": "scripts/feature_release.py",
-      "sha256": "c184dcd7444a3b823ffbc97f61ddfcf27e678072e75d3f50cc74ea80555d0b9b",
+      "sha256": "69835d36a4d31e901270d9c38f68b87fe2bb50194a3a305df18e0a34762dd705",
       "executable": false
     },
     {
@@ -274,7 +274,7 @@
     },
     {
       "path": "scripts/migrate.py",
-      "sha256": "732ee339940de3cdcb3fc49b05a597a3daabeb2acb6dc53243e72856a5f8a00c",
+      "sha256": "1109a8b0a017a2a43d7c75342551095e96b6861e822435f1d7f24fb0bb411d1b",
       "executable": false
     },
     {
@@ -449,7 +449,7 @@
     },
     {
       "path": "scripts/sqlcl_pool.py",
-      "sha256": "199301dd6fd5a927b6b132680f4a7b2549e30c91bbddb523b592b5435e01c9ec",
+      "sha256": "bf25ba89318024e480206539105bed8b4357a097709e1d7dc082325981b3bceb",
       "executable": false
     },
     {
@@ -999,17 +999,17 @@
     },
     {
       "path": "tests/test_feature_preflight.py",
-      "sha256": "7e50774aca0d5030b1e71578a9684f682e5ab0aee9f7c332bbe31540d3c74bdf",
+      "sha256": "678fd0593aba99415c0e8d3abee8f328e22bde495393c6762d6f26063cf252aa",
       "executable": false
     },
     {
       "path": "tests/test_feature_prepare.py",
-      "sha256": "e577168f540793622f259a6a5aaddb36f299f5e65ad4327eafb8b2ff8a0ac12f",
+      "sha256": "909d68cd5dd39c64940bbb28df8d0f374dcfde1c5f44a7271168476459664700",
       "executable": false
     },
     {
       "path": "tests/test_feature_runtime.py",
-      "sha256": "df9f94ff33ca4bb22484f04886b000df4b01dd5c61b983c106a17456fc3a9a6a",
+      "sha256": "ede1f4e90db9559cd4f3408ee9a8ee08e039cd49d62f2b8deaf7fcb90a527283",
       "executable": false
     },
     {
@@ -1169,7 +1169,7 @@
     },
     {
       "path": "tests/test_release_capsule.py",
-      "sha256": "de36548b33827617ac9e0a7a9596ee6913e3424ab3c33986c9e95ba77044b0c3",
+      "sha256": "5b2020c72e8f88d7c54518de9cae577c9ac8134dd32845e206ac08c8805a2be7",
       "executable": false
     },
     {
@@ -1224,7 +1224,7 @@
     },
     {
       "path": "tests/test_sqlcl_pool.py",
-      "sha256": "554867001beb063c42955e68f64de72397c56d2430b7bbf6f296eaa3133be790",
+      "sha256": "923a1eb1578fcaad3bc9271bc69757eab1db96c68faa0e6c86308df6ec656ca0",
       "executable": false
     },
     {

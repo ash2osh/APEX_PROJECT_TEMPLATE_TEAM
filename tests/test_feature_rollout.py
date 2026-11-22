@@ -725,6 +725,39 @@ class FeatureRolloutTests(unittest.TestCase):
         report = json.loads((self.root / "scratch" / "run-binding-report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["localRunId"], run_id)
 
+    def test_a_checkpoint_that_did_not_start_keeps_the_earlier_verified_state(self) -> None:
+        # Checkpoint 2 refuses a precondition in its apply session and writes nothing. The run keeps checkpoint 1's
+        # verified state, leaves checkpoint 2 out of the budget coverage, and does not lock the target.
+        from scripts import feature_release, release_state
+
+        self._enter(self._patches())
+        not_started = SimpleNamespace(
+            exit_code=2, database_state="not-started", object_seconds=1.5,
+            session_count=1, evidence_paths=(), message="precondition refused before payload",
+        )
+        calls = []
+
+        def fake_checkpoint(*args, **kwargs):
+            calls.append(args[3])
+            if len(calls) == 1:
+                return self._fake_checkpoint_result(args, kwargs, object_seconds=1.0)
+            return not_started
+
+        with patch.object(feature_release, "execute_checkpoint", side_effect=fake_checkpoint):
+            status = rollout.run_rollout(
+                self.manifest_path, "staging", repo_root=self.root, capsule_path=self.capsule_path,
+                report_path=self.root / "scratch" / "not-started-report", confirm=lambda _prompt: True,
+            )
+
+        self.assertEqual(status, 2)
+        self.assertEqual([1, 2], calls)
+        report = json.loads((self.root / "scratch" / "not-started-report.json").read_text(encoding="utf-8"))
+        self.assertEqual("verified", report["databaseState"])
+        self.assertEqual([1], report["objectBudget"]["includedCheckpoints"])
+        run = next(row for row in release_state._load_index(self.root)["rollouts"] if row["runId"] == report["localRunId"])
+        self.assertEqual("failed", run["state"])
+        self.assertFalse(release_state._run_blocks_target(run))
+
     def test_staging_and_production_run_feature_data_and_ords_phases_on_prepared_targets(self) -> None:
         from scripts import feature_release, release_state
 

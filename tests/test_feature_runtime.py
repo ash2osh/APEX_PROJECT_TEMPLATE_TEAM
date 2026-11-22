@@ -779,6 +779,11 @@ class FeatureRuntimeTests(unittest.TestCase):
         attempt = release_state._load_index(self.root)["attempts"][-1]
         self.assertEqual("not-started", attempt["state"])
         self.assertEqual("preconditions-refused-before-payload", attempt["metrics"]["noWriteClassification"])
+        # The checkpoint reports the same state, so the rollout run does not record "unknown" and lock the target.
+        self.assertEqual("not-started", result.database_state)
+        report = json.loads(next((self.root / "scratch").rglob("checkpoint-report.json")).read_text(encoding="utf-8"))
+        self.assertEqual("not-started", report["databaseState"])
+        self.assertEqual([], report["objectBudget"]["includedCheckpoints"])
 
     def test_wrong_postcondition_session_identity_leaves_unknown_attempt(self) -> None:
         from scripts import feature_release

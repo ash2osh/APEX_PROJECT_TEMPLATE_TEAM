@@ -912,6 +912,22 @@ class MigrateCliTests(unittest.TestCase):
         before_apply = fake.calls[: next(index for index, call in enumerate(fake.calls) if call[0] == "apply")]
         self.assertEqual(1, sum(1 for call in before_apply if call[0] == "snapshot"))
 
+    def test_folder_one_preflight_reused_in_a_confirmed_staging_rollout_step(self):
+        # The rollout confirmed before taking the writer lease and passes rollout_confirmed_by; its confirm callback
+        # returns at once. No person was prompted, so the step reuses the initial preflight (S6) on staging too.
+        folder = self.add_folder("2026-09-28_reuse-staging-r001", {"001-create.sql": "CREATE TABLE REUSE_S (ID NUMBER);\n"})
+        target = self.target("staging")
+        fake = FakeDatabase(target)
+        scope = {"dbUniqueName": "STAGINGDB_UNIQUE", "containerId": "3", "schema": target.schema, "edition": "ORA$BASE"}
+        with target_writer_lease(self.root, scope, {"purpose": "rollout"}) as lease, contextlib.redirect_stdout(io.StringIO()):
+            status, fake = self.apply(
+                self.load(folder.name), target, fake=fake, writer_lease=lease,
+                expected_db_unique_name="STAGINGDB_UNIQUE", rollout_confirmed_by="terminal",
+            )
+        self.assertEqual(status, 0)
+        before_apply = fake.calls[: next(index for index, call in enumerate(fake.calls) if call[0] == "apply")]
+        self.assertEqual(1, sum(1 for call in before_apply if call[0] == "snapshot"))
+
     def test_folder_one_preflight_repeated_without_writer_lease(self):
         folder = self.add_folder("2026-09-28_fresh-preflight-r001", {"001-create.sql": "CREATE TABLE FRESH_T (ID NUMBER);\n"})
         status, fake = self.apply(self.load(folder.name), self.target(), fake=FakeDatabase(self.target()))

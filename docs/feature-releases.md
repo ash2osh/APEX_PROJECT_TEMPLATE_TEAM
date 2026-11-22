@@ -361,7 +361,8 @@ A checkpoint's DDL can invalidate stored units that read the changed object, dir
 object and in another schema, for example a package body that selects from a view over an altered table. Before
 its payload, each checkpoint's apply session records the INVALID objects of the release's schemas; after it, the
 session recompiles (`DBMS_UTILITY.VALIDATE`) the views and stored units that were not INVALID before, as Oracle
-would on next use. Objects that were already INVALID are left alone. The `structural-dependent-*` postconditions
+would on next use, and the checkpoint's own units, which it re-created. Other objects that were already INVALID
+are left alone. The `structural-dependent-*` postconditions
 then require the direct dependents VALID. From the second checkpoint on, the validity of a unit the checkpoint
 re-creates is not compared with the prepared plan, because an earlier checkpoint may have invalidated it and
 `CREATE OR REPLACE` replaces it anyway; its unit validity postcondition still requires it VALID afterwards.

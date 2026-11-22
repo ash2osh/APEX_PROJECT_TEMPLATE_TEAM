@@ -312,6 +312,59 @@ class FeaturePreflightTests(unittest.TestCase):
         ):
             feature_preflight.prepare_checkpoint(checkpoint, self._dependent_state(invalid=True), ())
 
+    def test_already_invalid_dependent_of_an_indexed_table_refuses_before_the_write(self) -> None:
+        # The index's dependent check covers dependents of the table, so prepare refuses up front.
+        state = _state(
+            tables=("T",), columns=(("T", "ID"),),
+            invalid=({"name": "PKG", "type": "PACKAGE BODY", "status": "INVALID"},),
+        )
+        state["structural"]["feature-dependencies"] = [{
+            "name": "PKG", "type": "PACKAGE BODY", "referenced_name": "T", "referenced_owner": "APP_CODE",
+        }]
+        with self.assertRaisesRegex(feature_preflight.StructuralPreflightError, "PACKAGE BODY PKG is already invalid"):
+            feature_preflight.prepare_checkpoint(_checkpoint("CREATE INDEX APP_CODE.IX_T ON APP_CODE.T (ID);\n"), state, ())
+
+    def test_already_invalid_dependent_recreated_by_the_same_checkpoint_does_not_refuse(self) -> None:
+        source = b"CREATE OR REPLACE PACKAGE BODY APP_CODE.PKG AS\n  PROCEDURE RUN IS BEGIN NULL; END;\nEND PKG;\n/\n"
+        body = FeatureInput(
+            "features/demo/APP_CODE/packages/pkg.pkb.sql", source, hashlib.sha256(source).hexdigest(),
+            ("APP_CODE", "PACKAGE BODY", "PKG"), "stored-source",
+        )
+        base = _checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n")
+        checkpoint = FeatureCheckpoint("APP_CODE", (*base.inputs, body), (), base.postconditions, ())
+        plan = feature_preflight.prepare_checkpoint(checkpoint, self._dependent_state(invalid=True), ())
+        self.assertEqual((), plan.tolerated_dependents)
+
+    def test_every_earlier_checkpoint_that_changed_a_table_is_a_prior_effect(self) -> None:
+        # Checkpoint 1 creates T and an index on it, checkpoint 2 adds a column; checkpoint 3 depends on T and must
+        # strip both earlier checkpoints' effects at revalidation, not only the last one that touched T.
+        state = _state()
+        first = _checkpoint("CREATE TABLE APP_CODE.T (ID NUMBER);\n", "CREATE INDEX APP_CODE.IX_T ON APP_CODE.T (ID);\n")
+        second = _checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n")
+        third = _checkpoint("COMMENT ON TABLE APP_CODE.T IS 'demo';\n")
+        earlier = []
+        for number, checkpoint in enumerate((first, second), 1):
+            plan = feature_preflight.prepare_checkpoint(checkpoint, state, tuple(earlier))
+            earlier.append({"checkpoint": number, "schema": "APP_CODE", "effects": plan, "effectsSha256": plan.effects_sha256})
+
+        plan = feature_preflight.prepare_checkpoint(third, state, tuple(earlier))
+
+        self.assertEqual((1, 2), plan.prior_checkpoints)
+        self.assertEqual({"CREATE_TABLE", "CREATE_INDEX", "ALTER_ADD_COLUMN"}, {row["kind"] for row in plan.prior_effects})
+        fresh = {
+            "tables": [{"name": "T"}], "columns": [{"table_name": "T", "name": "ID"}, {"table_name": "T", "name": "NEW_ID"}],
+            "indexes": [{"name": "IX_T", "table_name": "T"}],
+        }
+        stripped = feature_preflight.strip_prior_effects(fresh, plan.prior_effects)
+        self.assertEqual([], stripped["tables"])
+        self.assertEqual([], stripped["indexes"])
+
+    def test_a_private_synonym_effect_does_not_strip_a_public_synonym_of_the_same_name(self) -> None:
+        effects = [{"name": "FOO", "kind": "CREATE_SYNONYM", "table": "", "checkpoint": 1, "owner": "APP_CODE"}]
+        fresh = {"synonyms": [{"owner": "APP_CODE", "name": "FOO"}, {"owner": "PUBLIC", "name": "FOO"}]}
+        stripped = feature_preflight.strip_prior_effects(fresh, effects)
+        self.assertEqual([{"owner": "PUBLIC", "name": "FOO"}], stripped["synonyms"])
+
     def test_malformed_tolerated_dependents_are_refused(self) -> None:
         checkpoint = _checkpoint("ALTER TABLE APP_CODE.T ADD (NEW_ID NUMBER);\n")
         state = self._dependent_state()

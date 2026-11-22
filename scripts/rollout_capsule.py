@@ -850,8 +850,13 @@ def _run_capsule_rollout(
                     step_report["checkpointVerificationId"] = getattr(checkpoint_result, "verification_id", None)
                     report["checkpointSqlclSessions"][str(checkpoint_number)] = checkpoint_result.session_count
                     object_seconds += checkpoint_result.object_seconds
-                    included_checkpoints.append(checkpoint_number)
-                    report["databaseState"] = checkpoint_result.database_state
+                    if checkpoint_result.database_state == "not-started":
+                        # Nothing was written (for example a precondition refused in the apply session): keep the
+                        # state the earlier steps left, and leave this checkpoint out of the budget's coverage.
+                        report["databaseState"] = database_state_before
+                    else:
+                        included_checkpoints.append(checkpoint_number)
+                        report["databaseState"] = checkpoint_result.database_state
                 else:
                     rollout._snapshot(manifest, plan, f"before step {item['number']}", environment)
                     expected_identity = None

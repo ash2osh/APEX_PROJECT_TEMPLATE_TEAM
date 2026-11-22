@@ -1632,6 +1632,34 @@ class FeaturePrepareTests(unittest.TestCase):
         self.assertIn("STATUS = 'VALID'", validity["sql"])
         self.assertTrue(first[0]["valid"])
 
+    def test_an_unchanged_body_recreated_for_its_specification_is_not_guarded_on_validity_later(self) -> None:
+        # The body's text is current, but its specification changes in this checkpoint, so it is re-created. From
+        # checkpoint 2 an earlier checkpoint may have invalidated it; its prepared validity must not refuse.
+        from scripts import feature_release
+        from scripts.migration_manifest import QueryCheck
+
+        body = self._dispatch_body_item()
+        checkpoint = FeatureCheckpoint(
+            "APP_CODE", (self.item, body), (), (QueryCheck("after-package", "SELECT 1 FROM dual", 1),), (("APP_CODE", "DISPATCH"),),
+        )
+        body_lines = list(feature_release._stored_source(body)[0]["lines"])
+
+        def guards(valid: bool, number: int) -> list[dict]:
+            state = self._state(environment="stage", lines=["PACKAGE DISPATCH AS\n", "  PROCEDURE OLD;\n", "END DISPATCH;\n"])
+            state["sourceUnits"]["PACKAGE BODY:DISPATCH"] = {"lines": body_lines, "settings": dict(SETTINGS), "valid": valid}
+            return feature_release._source_guards(checkpoint, state, number)
+
+        later = [guards(valid, 2) for valid in (True, False)]
+        self.assertEqual(feature_release._canonical_bytes(later[0]), feature_release._canonical_bytes(later[1]))
+        body_guard = next(guard for guard in later[0] if guard["unit"]["type"] == "PACKAGE BODY")
+        self.assertFalse(body_guard["noOp"])
+        self.assertIsNone(body_guard["valid"])
+        (validity,) = [query for query in body_guard["preconditions"] if query["id"].startswith("validity-")]
+        self.assertIn("STATUS IN ('VALID', 'INVALID')", validity["sql"])
+        first = next(guard for guard in guards(True, 1) if guard["unit"]["type"] == "PACKAGE BODY")
+        self.assertFalse(first["noOp"])
+        self.assertTrue(first["valid"])
+
     def test_an_unchanged_specification_is_allowed_while_its_body_is_on_the_target(self) -> None:
         # The no-op comparison of the same identical, valid unit (see test_only_identical_valid_stored_unit_is_marked_noop).
         exact_lines = ["PACKAGE" + " " * 10 + "DISPATCH AS\n", "  PROCEDURE RUN;\n", "END DISPATCH;\n"]
@@ -1753,6 +1781,23 @@ class RevalidationViewTests(unittest.TestCase):
         ]}
         self.assertTrue(self._compare(fresh, guard, earlier, checkpoint=3))
 
+    def test_specification_flip_is_compared_with_its_own_row_not_its_body(self) -> None:
+        # Spec and body share a family; the comparison must still pair each row with the same object type.
+        guard = {"stored-code": [self._code("PKG", object_type="PACKAGE", source_hash="spec"), self._code("PKG", source_hash="body")],
+                 "invalid-objects": []}
+        fresh = {
+            "stored-code": [self._code("PKG", status="INVALID", object_type="PACKAGE", source_hash="spec"), self._code("PKG", source_hash="body")],
+            "invalid-objects": [{"type": "PACKAGE", "name": "PKG", "status": "INVALID"}],
+        }
+        self.assertTrue(self._compare(fresh, guard))
+        drifted = {
+            "stored-code": [self._code("PKG", object_type="PACKAGE", source_hash="spec"), self._code("PKG", status="INVALID", source_hash="body")],
+            "invalid-objects": [
+                {"type": "PACKAGE BODY", "name": "PKG", "status": "INVALID"}, {"type": "PACKAGE", "name": "PKG", "status": "INVALID"},
+            ],
+        }
+        self.assertFalse(self._compare(drifted, guard))
+
     def test_real_drift_still_refuses(self) -> None:
         guard = {"stored-code": [self._code("BYSTANDER")]}
         changed_source = {"stored-code": [self._code("BYSTANDER", source_hash="someone-else")]}
@@ -1815,6 +1860,9 @@ class DependentRevalidationTests(unittest.TestCase):
         self.assertNotIn("'INDEX'", after_text)
         self.assertEqual(["/", "PROMPT FEATURE_DEPENDENTS_REVALIDATED"], after[-2:])
         self.assertEqual(([], []), feature_release._revalidation_lines([]))
+        self.assertNotIn("o.owner, o.object_type, o.object_name", after_text)
+        _before, own = feature_release._revalidation_lines(["APP_CODE"], [("APP_CODE", "PACKAGE BODY", "PKG")])
+        self.assertIn("OR (o.owner, o.object_type, o.object_name) IN (('APP_CODE', 'PACKAGE BODY', 'PKG'))", "\n".join(own))
 
     def test_revalidation_runs_after_the_payload_and_before_the_compile_guard(self) -> None:
         from scripts import feature_release
