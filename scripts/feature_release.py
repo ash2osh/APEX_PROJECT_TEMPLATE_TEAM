@@ -336,10 +336,49 @@ def _without_trigger_state_clause(lines: list[str]) -> list[str]:
     lives only in ALL_TRIGGERS.STATUS. Only the header, before the trigger body, is changed.
     """
     text = "".join(lines)
-    body = _TRIGGER_BODY_START.search(text)
+    # Find the body start and the state clause in text whose comments and string literals are blanked out (same
+    # length), so a BEGIN in a header comment or a 'DISABLE ' in a WHEN string is not taken for either.
+    masked = _mask_comments_and_strings(text)
+    body = _TRIGGER_BODY_START.search(masked)
     header_end = body.start() if body is not None else len(text)
-    header = _TRIGGER_STATE_CLAUSE.sub("", text[:header_end])
-    return (header + text[header_end:]).splitlines(keepends=True)
+    removed = [match.span() for match in _TRIGGER_STATE_CLAUSE.finditer(masked, 0, header_end)]
+    kept, cursor = [], 0
+    for start, end in removed:
+        kept.append(text[cursor:start])
+        cursor = end
+    kept.append(text[cursor:])
+    return "".join(kept).splitlines(keepends=True)
+
+
+def _mask_comments_and_strings(text: str) -> str:
+    """text with -- and /* */ comments and '...' literals replaced by spaces; newlines and length are kept."""
+    out = list(text)
+    index, length = 0, len(text)
+    while index < length:
+        if text.startswith("--", index):
+            end = text.find("\n", index)
+            end = length if end < 0 else end
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            end = length if end < 0 else end + 2
+        elif text[index] == "'":
+            end = index + 1
+            while end < length:
+                if text[end] == "'" and text.startswith("''", end):
+                    end += 2
+                elif text[end] == "'":
+                    end += 1
+                    break
+                else:
+                    end += 1
+        else:
+            index += 1
+            continue
+        for position in range(index, end):
+            if out[position] != "\n":
+                out[position] = " "
+        index = end
+    return "".join(out)
 
 
 def _stored_source(item: FeatureInput) -> tuple[dict, dict[str, str]]:

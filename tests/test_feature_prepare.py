@@ -1714,6 +1714,26 @@ class TriggerStateClauseTests(unittest.TestCase):
         self.assertEqual("COMPOUND TRIGGER\n", lines[2])
         self.assertNotIn("DISABLE\n", lines)
 
+    def test_keywords_in_header_comments_and_strings_do_not_move_the_header_end(self) -> None:
+        # A BEGIN inside a header comment must not end the header early, and a 'DISABLE ' inside a WHEN string or a
+        # comment is text, not the trigger's state clause. Expected lines are ALL_SOURCE for this trigger (23ai, live).
+        lines = self._lines(
+            "CREATE OR REPLACE TRIGGER APP_CODE.TRG_MASKED\n"
+            "-- BEGIN: set by the release, DISABLE later if needed\n"
+            "BEFORE UPDATE ON APP_CODE.T\n"
+            "FOR EACH ROW\n"
+            "DISABLE\n"
+            "WHEN (NEW.MODE = 'DISABLE ')\n"
+            "BEGIN NULL; END;\n/\n", "TRG_MASKED",
+        )
+        self.assertEqual(
+            [
+                "TRIGGER APP_CODE.TRG_MASKED\n", "-- BEGIN: set by the release, DISABLE later if needed\n",
+                "BEFORE UPDATE ON APP_CODE.T\n", "FOR EACH ROW\n", "WHEN (NEW.MODE = 'DISABLE ')\n", "BEGIN NULL; END;\n",
+            ],
+            lines,
+        )
+
     def test_trigger_body_disable_word_is_kept(self) -> None:
         lines = self._lines(
             "CREATE OR REPLACE TRIGGER APP_CODE.TRG_BODY\nBEFORE INSERT ON APP_CODE.T\nFOR EACH ROW\n"
