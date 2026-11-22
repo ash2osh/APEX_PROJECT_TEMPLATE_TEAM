@@ -950,14 +950,34 @@ def prepare_checkpoint(
         for field in ("columns", "grantees", "privileges", "constraint", "constraint_type"):
             if field in row:
                 effect[field] = row[field]
+        if effect["kind"] == "CREATE_SYNONYM":
+            effect["owner"] = str(row.get("owner") or checkpoint.schema).upper()
         prior_effects.append(effect)
-    prior_provider = {
-        str(row.get("name", "")): row["_checkpoint"]
-        for row in prior_ops_with_checkpoint if isinstance(row.get("name"), str)
-    }
+    # Every earlier checkpoint that created or changed a name, not only the last: a table created in one checkpoint
+    # and altered or indexed in the next must have both effects stripped when a later checkpoint revalidates it.
+    prior_provider: dict[str, set[int]] = {}
+    prior_touched: dict[str, set[int]] = {}
+    for row in prior_ops_with_checkpoint:
+        if not isinstance(row.get("name"), str):
+            continue
+        prior_provider.setdefault(row["name"], set()).add(row["_checkpoint"])
+        prior_touched.setdefault(row["name"], set()).add(row["_checkpoint"])
+        if isinstance(row.get("table"), str) and row["table"]:
+            prior_touched.setdefault(row["table"], set()).add(row["_checkpoint"])
+        # A selected capture of a table also returns the synonyms that point to it and the views that read it.
+        if row.get("kind") == "CREATE_SYNONYM" and isinstance(row.get("target_name"), str) and row["target_name"]:
+            prior_touched.setdefault(row["target_name"], set()).add(row["_checkpoint"])
+        if row.get("kind") == "CREATE_VIEW":
+            for dependency in row.get("dependencies", ()):
+                if (
+                    isinstance(dependency, (list, tuple)) and len(dependency) == 2
+                    and str(dependency[0]).upper() == checkpoint.schema.upper() and isinstance(dependency[1], str)
+                ):
+                    prior_touched.setdefault(dependency[1], set()).add(row["_checkpoint"])
     preconditions: list[QueryCheck] = []
     postconditions: list[QueryCheck] = []
     references = set(dependent_references(operations))
+    own_units = {(str(item.unit[1]).upper(), str(item.unit[2])) for item in checkpoint.inputs if item.unit is not None}
     tolerated = tuple(sorted({
         (str(row["type"]).upper(), str(row["name"]))
         for row in structural["feature-dependencies"]
@@ -976,10 +996,7 @@ def prepare_checkpoint(
         if str(row.get("referenced_owner", "")).upper() == checkpoint.schema.upper():
             dependent_name, dependent_type = row.get("name"), row.get("type")
             if isinstance(dependent_name, str) and isinstance(dependent_type, str):
-                if any(
-                    op.get("name", "") == referenced_name
-                    for op in operations if isinstance(op.get("name"), str)
-                ) and any(
+                if referenced_name in references and (dependent_type.upper(), dependent_name) not in own_units and any(
                     item.get("name", "") == dependent_name
                     and item.get("type", "").upper() == dependent_type.upper()
                     for item in structural["invalid-objects"]
@@ -1161,7 +1178,7 @@ def prepare_checkpoint(
                 if str(owner).upper() == checkpoint.schema.upper()
             )
     prior_checkpoints = tuple(sorted({
-        prior_provider[name] for name in required_prior_names if name in prior_provider
+        number for name in required_prior_names if name in prior_touched for number in prior_touched[name]
     }))
     prior_effects = [row for row in prior_effects if row["checkpoint"] in prior_checkpoints]
     # A dependent created in a prior checkpoint must still be present in this
@@ -1278,7 +1295,7 @@ def validate_plan_record(record: Mapping, checkpoint: FeatureCheckpoint, structu
     effects = record.get("priorEffects")
     if not isinstance(effects, list) or any(
         not isinstance(row, Mapping)
-        or set(row) - {"name", "kind", "table", "checkpoint", "columns", "grantees", "privileges", "constraint", "constraint_type"}
+        or set(row) - {"name", "kind", "table", "checkpoint", "columns", "grantees", "privileges", "constraint", "constraint_type", "owner"}
         or not {"name", "kind", "table", "checkpoint"}.issubset(row)
         or not isinstance(row.get("name"), str) or not isinstance(row.get("kind"), str)
         or not isinstance(row.get("table"), str) or type(row.get("checkpoint")) is not int
@@ -1287,6 +1304,7 @@ def validate_plan_record(record: Mapping, checkpoint: FeatureCheckpoint, structu
         or ("grantees" in row and (not isinstance(row["grantees"], (list, tuple)) or any(not isinstance(value, str) for value in row["grantees"])))
         or ("privileges" in row and not isinstance(row["privileges"], str))
         or any(field in row and row[field] is not None and not isinstance(row[field], str) for field in ("constraint", "constraint_type"))
+        or ("owner" in row and not isinstance(row["owner"], str))
         for row in effects
     ):
         raise StructuralPreflightError("structural plan prior effects are malformed")
@@ -1384,10 +1402,21 @@ def strip_prior_effects(structural: Mapping, prior_effects: Sequence[Mapping]) -
         result["indexes"] = [row for row in result["indexes"] if row.get("name") not in implicit]
     for section, kind, name_key in (
         ("views", "CREATE_VIEW", "name"), ("sequences", "CREATE_SEQUENCE", "name"),
-        ("indexes", "CREATE_INDEX", "name"), ("synonyms", "CREATE_SYNONYM", "name"),
+        ("indexes", "CREATE_INDEX", "name"),
     ):
         if section in result:
             result[section] = [row for row in result[section] if row.get(name_key) not in created_by_kind[kind]]
+    if "synonyms" in result:
+        # A synonym effect removes only the synonym of the owner it created; a PUBLIC synonym of the same name stays.
+        created_synonyms = {
+            (str(row.get("owner", "")).upper(), str(row.get("name", "")))
+            for row in created if row.get("kind") == "CREATE_SYNONYM"
+        }
+        result["synonyms"] = [
+            row for row in result["synonyms"]
+            if (str(row.get("owner", "")).upper(), str(row.get("name", ""))) not in created_synonyms
+            and not (("", str(row.get("name", ""))) in created_synonyms and str(row.get("owner", "")).upper() != "PUBLIC")
+        ]
     if "invalid-objects" in result:
         result["invalid-objects"] = [row for row in result["invalid-objects"] if row.get("name") not in created_names]
     if "feature-dependencies" in result:

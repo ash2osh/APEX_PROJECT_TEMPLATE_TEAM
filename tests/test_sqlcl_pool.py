@@ -302,6 +302,21 @@ class ResetBlockTests(unittest.TestCase):
         with self.assertRaises(sqlcl_pool.PoolUnavailable):
             sqlcl_pool.reset_block(baseline, Path("/tmp/base.sql"), set())
 
+    def test_script_defines_follow_included_scripts_and_positional_arguments(self) -> None:
+        # Variables defined in @/@@ scripts, and the positional values an include passes, outlive the driver in a
+        # reused session; the reset must undefine them too.
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            (run_dir / "inc").mkdir()
+            (run_dir / "driver.sql").write_text('@@inc/a.sql X Y\n@"b.sql"\nPROMPT done\n', encoding="utf-8")
+            (run_dir / "inc" / "a.sql").write_text("DEFINE alpha = 1\n@@nested\n", encoding="utf-8")
+            (run_dir / "inc" / "nested.sql").write_text("DEF gamma=2\n@@a.sql\n", encoding="utf-8")
+            (run_dir / "b.sql").write_text("SELECT '&&beta' FROM dual;\n@missing.sql\n", encoding="utf-8")
+            self.assertEqual(
+                {"1", "2", "alpha", "gamma", "beta"},
+                sqlcl_pool.script_defines(run_dir / "driver.sql", run_dir),
+            )
+
     def test_driver_defines_finds_define_and_double_ampersand(self) -> None:
         self.assertEqual({"lifecycle_user_hex", "page"}, sqlcl_pool.driver_defines(
             "DEFINE lifecycle_user_hex = 41\nSELECT &&page FROM dual;\n-- &single is not defined\n"

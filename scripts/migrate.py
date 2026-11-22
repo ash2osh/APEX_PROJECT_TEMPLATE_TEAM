@@ -1031,7 +1031,9 @@ def apply_batch(
                 run_manifest["confirmedBy"] = terminal_confirm.confirmed_by(yes, confirm_target)
                 print(terminal_confirm.confirmed_line(yes, confirm_target))
             else:
-                prompted = True
+                # A capsule rollout confirmed before it took the writer lease and passes rollout_confirmed_by; its
+                # confirm callback returns at once, so no person was waited on (S6 may reuse the initial preflight).
+                prompted = rollout_confirmed_by is None
                 prompt = f"Migrating to {target.environment.upper()}. Proceed? [y/N]"
                 try:
                     approved = bool(confirm(prompt))

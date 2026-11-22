@@ -29,7 +29,8 @@ PL/SQL call (one round trip) does the following:
 - clears package state (`DBMS_SESSION.RESET_PACKAGE`).
 
 SQLcl's own `SET` options come back from a `STORE SET` baseline, and the column, break and compute settings
-are cleared. Variables a script defined are undefined.
+are cleared. Variables a script defined are undefined, including those defined in the scripts it runs with `@`, `@@` or
+`START`, and the positional variables (`&1`, `&2`, ...) an include was given.
 
 If any part of the reset fails, the process ends and the next script gets a new one. A script that fails
 still ends its SQLcl process through `WHENEVER SQLERROR EXIT`, exactly as before. A script whose time
