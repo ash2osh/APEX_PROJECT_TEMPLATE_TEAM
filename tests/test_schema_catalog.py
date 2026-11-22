@@ -174,9 +174,9 @@ class SchemaCatalogTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(CatalogError) as caught:
-                schema_catalog.capture_snapshot_with_retries(
+                schema_catalog.capture_inventory_snapshot_with_retries(
                     target(), (("CUSTOMERS", "TABLE"),), Path(temporary),
-                    retries=2, _runner=capture,
+                    retries=2, _runner=capture, separate_inventory=True,
                 )
 
         self.assertEqual(capture.inventory_captures, 3)
@@ -184,6 +184,67 @@ class SchemaCatalogTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "LIVE_PREFLIGHT_UNAVAILABLE")
         self.assertIn(expected_before, str(caught.exception))
         self.assertIn(expected_after, str(caught.exception))
+
+    def test_identity_phase_sql_has_no_inventory_queries(self) -> None:
+        # S7: the identity phase skips the dictionary probes and the owner inventory; inventory and snapshot keep them.
+        sql = (Path(__file__).resolve().parents[1] / "scripts" / "schema_catalog.sql").read_text(encoding="utf-8")
+        probes = sql[sql.index("IF c_phase <> 'identity' THEN"):sql.index("l_identity.put('session_user'")]
+        self.assertIn("FROM all_triggers", probes)
+        self.assertIn("ELSIF c_phase = 'snapshot' THEN\n    add_dependency_catalogs();", sql)
+        self.assertIn("SELECT COUNT(*) INTO l_found FROM all_users WHERE username = c_target_schema;", sql)
+
+    def test_capture_identity_reads_one_identity_payload(self) -> None:
+        payload = fixture_payload("owner-inventory.json")
+        identity_payload = {key: value for key, value in payload.items() if key != "objects"}
+        identity_payload["phase"] = "identity"
+        drivers: list[str] = []
+
+        def capture(selected_target, driver_path, run_dir, **_kwargs):
+            drivers.append(driver_path.read_text(encoding="utf-8"))
+            return SqlclResult(0, framed(identity_payload, phase="identity"), run_dir)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            identity = schema_catalog.capture_identity(target(), Path(temporary), _runner=capture)
+        self.assertEqual(payload["identity"]["db_unique_name"], identity["db_unique_name"])
+        self.assertIn("schema_catalog.sql identity ", drivers[0])
+
+    def test_snapshot_with_static_keys_launches_one_session(self) -> None:
+        # S5: the keys are known, so no separate inventory session runs; the snapshot session records the
+        # owner inventory itself, and a change during that session is still retried and then refused.
+        inventory_payload = fixture_payload("owner-inventory.json")
+        snapshot_payload = fixture_payload("owner-snapshot.json")
+        snapshot_payload["before"] = [dict(row) for row in inventory_payload["objects"]]
+        snapshot_payload["after"] = [dict(row) for row in inventory_payload["objects"]]
+        calls: list[str] = []
+
+        def capture(selected_target, driver_path, run_dir, **_kwargs):
+            driver = driver_path.read_text(encoding="utf-8")
+            calls.append("inventory" if "schema_catalog.sql inventory " in driver else "snapshot")
+            return SqlclResult(0, framed(snapshot_payload), run_dir)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            inventory, snapshot = schema_catalog.capture_inventory_snapshot_with_retries(
+                target(), (("CUSTOMERS", "TABLE"),), Path(temporary), retries=2, _runner=capture,
+            )
+        self.assertEqual(["snapshot"], calls)
+        self.assertEqual(snapshot.inventory, inventory.objects)
+        self.assertTrue(inventory.coverage.get("ownerComplete"))
+
+        changing = dict(snapshot_payload, after=snapshot_payload["before"] + [
+            {"owner": "APP_DEV", "name": "CONCURRENT_TABLE", "type": "TABLE", "status": "VALID"},
+        ])
+        calls.clear()
+
+        def changing_capture(selected_target, driver_path, run_dir, **_kwargs):
+            calls.append("snapshot")
+            return SqlclResult(0, framed(changing), run_dir)
+
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(CatalogError) as caught:
+            schema_catalog.capture_inventory_snapshot_with_retries(
+                target(), (("CUSTOMERS", "TABLE"),), Path(temporary), retries=2, _runner=changing_capture,
+            )
+        self.assertEqual(3, len(calls))
+        self.assertEqual(caught.exception.code, "LIVE_PREFLIGHT_UNAVAILABLE")
 
     def test_service_aliases_do_not_change_database_scope_identity(self) -> None:
         first = fixture_payload("owner-inventory.json")["identity"]

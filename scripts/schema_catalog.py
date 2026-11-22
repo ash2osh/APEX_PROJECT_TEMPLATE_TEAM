@@ -40,8 +40,8 @@ CAPTURE_CATALOGS = {
     "ALL_TAB_IDENTITY_COLS", "ALL_SEQUENCES", "ALL_CONSTRAINTS", "ALL_CONS_COLUMNS", "ALL_INDEXES",
     "ALL_IND_COLUMNS", "ALL_TRIGGERS", "SYNONYMS", "OBJECT_GRANTS",
 }
-FRAME_RE = re.compile(r"^CATALOG_PAYLOAD_(BEGIN|END):(inventory|snapshot|compare-env)$")
-VERIFIED_RE = re.compile(r"^CATALOG_VERIFIED:(inventory|snapshot|compare-env)$")
+FRAME_RE = re.compile(r"^CATALOG_PAYLOAD_(BEGIN|END):(identity|inventory|snapshot|compare-env)$")
+VERIFIED_RE = re.compile(r"^CATALOG_VERIFIED:(identity|inventory|snapshot|compare-env)$")
 HEX_SCHEMA_RE = re.compile(r"[A-Z][A-Z0-9_$#]{0,127}\Z", re.ASCII)
 
 
@@ -391,7 +391,7 @@ def decode_catalog_payload(
         raise CatalogError("catalog payload schema version is unsupported")
 
     phase = payload.get("phase")
-    if type(phase) is not str or phase not in {"inventory", "snapshot", "compare-env"}:
+    if type(phase) is not str or phase not in {"identity", "inventory", "snapshot", "compare-env"}:
         raise CatalogError("catalog payload phase is unsupported")
 
     for field_name in ("objects", "before", "after"):
@@ -484,7 +484,7 @@ def parse_framed_catalog_payloads(
     parse_float: Callable[[str], Any] | None = None,
 ) -> list[dict]:
     """Decode verified, compressed SQLcl payload frames for a catalog phase."""
-    if phase not in {"inventory", "snapshot", "compare-env"}:
+    if phase not in {"identity", "inventory", "snapshot", "compare-env"}:
         raise CatalogError("catalog payload phase is unsupported")
     return _payload_frames(output, phase, parse_float=parse_float)
 
@@ -771,6 +771,21 @@ def capture_inventory(target: Target, run_dir: Path, *, _runner: Runner = run_sq
     return parse_inventory(result.output, target)
 
 
+def capture_identity(target: Target, run_dir: Path, *, _runner: Runner = run_sqlcl) -> dict:
+    """The session identity of the target, without an object inventory (S7).
+
+    A rollout reads only the identity fields of each step's target; the inventory phase also lists every
+    owner object and probes twelve dictionary views, which is real work on a large schema.
+    """
+    private_dir = _private_run_dir(run_dir)
+    driver = _catalog_driver(private_dir, "identity", target)
+    result = _runner(target, driver, private_dir, phase="inventory")
+    payloads = _payload_frames(result.output, "identity")
+    if len(payloads) != 1:
+        raise CatalogError("identity capture must contain exactly one complete payload")
+    return _target_identity(payloads[0].get("identity"), target)
+
+
 def capture_snapshot(
     target: Target,
     inventory: SchemaInventory,
@@ -808,10 +823,37 @@ def capture_inventory_snapshot_with_retries(
     _runner: Runner = run_sqlcl,
     _capture_inventory: Callable | None = None,
     _capture_snapshot: Callable | None = None,
+    separate_inventory: bool = False,
 ) -> tuple[SchemaInventory, SchemaSnapshot]:
-    """Retry a complete inventory/definition pair after object-set churn only."""
+    """Retry a complete inventory/definition pair after object-set churn only.
+
+    The keys are known before the capture, so by default no separate inventory session runs: the snapshot
+    session records the complete owner inventory before and after the definitions, and fails if they differ
+    (S5). ``separate_inventory=True`` keeps the earlier two-session form.
+    """
     if type(retries) is not int or retries < 0:
         raise CatalogError("preflight inventory retry count must be a non-negative integer")
+    if not separate_inventory:
+        snapshot_only = _capture_snapshot or (
+            lambda selected_target, inventory, selected_keys, directory:
+                capture_snapshot(selected_target, inventory, selected_keys, directory, _runner=_runner)
+        )
+        for attempt in range(retries + 1):
+            try:
+                snapshot = snapshot_only(target, None, keys, run_dir)
+            except InventoryChangedError as error:
+                if attempt < retries:
+                    continue
+                raise InventoryRetriesExhaustedError(
+                    f"{error}; inventory remained inconsistent after {attempt + 1} capture attempt(s); "
+                    f"inventory fingerprints: first={error.before_fingerprint}, second={error.after_fingerprint}",
+                    error.partial,
+                ) from error
+            inventory = SchemaInventory(
+                snapshot.identity, snapshot.inventory, snapshot.coverage, snapshot.started_at, snapshot.completed_at,
+            )
+            return inventory, snapshot
+        raise CatalogError("preflight inventory capture did not produce a stable snapshot")
     inventory_capture = _capture_inventory or (
         lambda selected_target, directory: capture_inventory(selected_target, directory, _runner=_runner)
     )

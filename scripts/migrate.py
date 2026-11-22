@@ -992,6 +992,7 @@ def apply_batch(
             }
             for item in frozen
         ]
+        prompted = False
         initial_inventory, initial_snapshot, initial_checks, initial_preflight = _preflight_snapshot(
             migrations, target, run_dir / "initial", capture_inventory_fn, capture_snapshot_fn, run_checks_fn,
         )
@@ -1030,6 +1031,7 @@ def apply_batch(
                 run_manifest["confirmedBy"] = terminal_confirm.confirmed_by(yes, confirm_target)
                 print(terminal_confirm.confirmed_line(yes, confirm_target))
             else:
+                prompted = True
                 prompt = f"Migrating to {target.environment.upper()}. Proceed? [y/N]"
                 try:
                     approved = bool(confirm(prompt))
@@ -1066,11 +1068,19 @@ def apply_batch(
                 original = item.original
                 staged = item.staged
                 # Every folder boundary gets a fresh identity, complete inventory,
-                # generated catalog preflight, and its explicit preconditions.
-                current_inventory, current_snapshot, current_checks, current_preflight = _preflight_snapshot(
-                    (original,), target, run_dir / f"boundary-{folder_index:03d}",
-                    capture_inventory_fn, capture_snapshot_fn, run_checks_fn,
-                )
+                # generated catalog preflight, and its explicit preconditions. One exception (S6): a one-folder
+                # step of a capsule rollout that already held the writer lease during the initial preflight and
+                # was confirmed without a prompt reuses that preflight; it covered exactly this folder moments ago
+                # and no other template writer can have run since.
+                if folder_index == 1 and len(frozen) == 1 and writer_lease is not None and not prompted:
+                    current_inventory, current_snapshot, current_checks, current_preflight = (
+                        initial_inventory, initial_snapshot, initial_checks, initial_preflight,
+                    )
+                else:
+                    current_inventory, current_snapshot, current_checks, current_preflight = _preflight_snapshot(
+                        (original,), target, run_dir / f"boundary-{folder_index:03d}",
+                        capture_inventory_fn, capture_snapshot_fn, run_checks_fn,
+                    )
                 current_identity = _identity_for_receipt(current_inventory, target)
                 _assert_same_target(initial_target_identity, current_identity)
                 _assert_check_identity(initial_target_identity, current_checks)

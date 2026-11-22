@@ -493,8 +493,8 @@ class MigrationChecksTests(unittest.TestCase):
         )
         snapshot_payload = json.loads((Path(__file__).parent / "fixtures" / "schema_catalog" / "view-synonyms.json").read_text(encoding="utf-8"))
         changing_payload = dict(snapshot_payload)
-        changing_payload["before"] = [{"owner": "APP", "name": "CONCURRENT_TABLE", "type": "TABLE"}]
-        changing_payload["after"] = list(changing_payload["before"])
+        # The owner inventory changes during the first snapshot session (before != after), so it is retried (S5).
+        changing_payload["after"] = list(changing_payload["before"]) + [{"owner": "APP", "name": "CONCURRENT_TABLE", "type": "TABLE"}]
         snapshot_outputs = iter((changing_payload, snapshot_payload))
         calls = {"inventory": 0, "snapshot": 0}
 
@@ -517,7 +517,7 @@ class MigrationChecksTests(unittest.TestCase):
             lambda *_args, **_kwargs: self.passing_checks(),
         )
 
-        self.assertEqual(calls, {"inventory": 2, "snapshot": 2})
+        self.assertEqual(calls, {"inventory": 0, "snapshot": 2})
         self.assertTrue(checks.passed)
         self.assertEqual(report.exit_code, 0, report.to_dict())
         self.assertTrue(snapshot.synonyms)
