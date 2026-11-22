@@ -491,7 +491,20 @@ def _same_settings(left: Mapping[str, object], right: Mapping[str, object]) -> b
     return {key: text(value) for key, value in left.items()} == {key: text(value) for key, value in right.items()}
 
 
-def _source_guards(checkpoint: FeatureCheckpoint, state: Mapping, checkpoint_number: int) -> list[dict]:
+def _source_guards(
+    checkpoint: FeatureCheckpoint,
+    state: Mapping,
+    checkpoint_number: int,
+    *,
+    tolerated: frozenset[tuple[str, str]] = frozenset(),
+) -> list[dict]:
+    """Prepared guards for each stored unit of one checkpoint.
+
+    tolerated are units an earlier checkpoint of the same capsule may leave INVALID because they cannot compile until
+    this checkpoint re-creates them; they are always re-created, never a no-op. From the second checkpoint on, the
+    validity of a unit this checkpoint re-creates is not part of the guard: an earlier checkpoint's DDL may have
+    invalidated it, directly or through another object, and CREATE OR REPLACE replaces it either way.
+    """
     actual_units = state["sourceUnits"]
     result: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -518,6 +531,7 @@ def _source_guards(checkpoint: FeatureCheckpoint, state: Mapping, checkpoint_num
             apply_settings = before_settings
 
         expected_valid = True
+        unguarded = False
         if actual is None:
             preconditions = [{
                 "id": f"source-absent-{checkpoint_number:03d}-{len(result) + 1:03d}",
@@ -541,19 +555,25 @@ def _source_guards(checkpoint: FeatureCheckpoint, state: Mapping, checkpoint_num
             preconditions.append(
                 _guard_query(baseline._exact_settings_check(before_settings, name, object_type, checkpoint.schema))
             )
-            validity = 1 if actual.get("valid") is True else 0
+            unguarded = key in tolerated or (checkpoint_number > 1 and not _is_no_op(
+                actual, expected_lines, setting_overrides, apply_settings, before_settings,
+            ))
+            if unguarded:
+                status_condition = "STATUS IN ('VALID', 'INVALID')"
+            else:
+                status_condition = f"STATUS = '{'VALID' if actual.get('valid') is True else 'INVALID'}'"
             preconditions.append({
                 "id": f"validity-{checkpoint_number:03d}-{len(result) + 1:03d}",
                 "sql": (
                     "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_OBJECTS "
                     f"WHERE OWNER = '{checkpoint.schema}' AND OBJECT_NAME = {_sql_literal(name)} "
-                    f"AND OBJECT_TYPE = {_sql_literal(object_type)} AND STATUS = '{'VALID' if validity else 'INVALID'}') "
+                    f"AND OBJECT_TYPE = {_sql_literal(object_type)} AND {status_condition}) "
                     "THEN 1 ELSE 0 END FROM DUAL"
                 ),
                 "expected": 1,
             })
             before_lines = list(actual["lines"])
-            expected_valid = actual.get("valid") is True
+            expected_valid = actual.get("valid") is True and key not in tolerated
 
         expected_matches = _same_stored_source(before_lines, expected_lines)
         settings_match = not setting_overrides or (
@@ -587,7 +607,7 @@ def _source_guards(checkpoint: FeatureCheckpoint, state: Mapping, checkpoint_num
             "applySettings": apply_settings,
             "settingsPrologue": settings_prologue,
             "settingsPrologueSha256": settings_prologue_sha256,
-            "valid": expected_valid if actual is not None else None,
+            "valid": None if actual is None or unguarded else expected_valid,
             "noOp": no_op,
             "preconditions": preconditions,
             "sourceVerification": source_checks,
@@ -604,6 +624,13 @@ def _source_guards(checkpoint: FeatureCheckpoint, state: Mapping, checkpoint_num
         if unit_type in {"TYPE BODY", "PACKAGE BODY"} and (unit_type[:-5], guard["unit"]["name"]) in replaced_specs and guard["noOp"] is True:
             guard["noOp"] = False
     return result
+
+
+def _is_no_op(actual, expected_lines, setting_overrides, apply_settings, before_settings) -> bool:
+    """Whether a present unit already has the expected source and settings, regardless of validity."""
+    return _same_stored_source(list(actual["lines"]), expected_lines) and (
+        not setting_overrides or (before_settings is not None and _same_settings(apply_settings, before_settings))
+    )
 
 
 def _sql_literal(value: str) -> str:
@@ -1267,6 +1294,7 @@ def prepare_target(
     review_specs: list[dict] = []
     shared_identity: dict[tuple[str, str], dict] = {}
     earlier_effects_by_schema: dict[str, list[dict]] = {}
+    tolerated_by_schema: dict[str, set[tuple[str, str]]] = {}
     day = datetime.now(timezone.utc).date().isoformat()
 
     checkpoint_steps = (number for number, step in enumerate(steps, start=1) if step["type"] == "feature-migrate")
@@ -1281,10 +1309,12 @@ def prepare_target(
         except FeatureReleaseError:
             raise
         try:
+            tolerated_earlier = frozenset(tolerated_by_schema.get(checkpoint.schema, ()))
             structural_plan = feature_preflight.prepare_checkpoint(
                 checkpoint,
                 state,
                 earlier_effects_by_schema.get(checkpoint.schema, ()),
+                later_units=_later_capsule_units(capsule, checkpoint_number, checkpoint.schema),
             )
         except feature_preflight.StructuralPreflightError as error:
             raise FeatureReleaseError(f"selected structural preflight refused checkpoint {checkpoint_number}: {error}") from error
@@ -1296,7 +1326,7 @@ def prepare_target(
         shared_identity[scope_key] = identity
         state = dict(state, identity=identity, environment=environment)
         _check_preceding_migration_sources(capsule, steps[:step_number - 1], targets, checkpoint, state)
-        source_guards = _source_guards(checkpoint, state, checkpoint_number)
+        source_guards = _source_guards(checkpoint, state, checkpoint_number, tolerated=tolerated_earlier)
         _refuse_disabled_triggers(checkpoint, state, source_guards, environment)
         _refuse_body_outside_release(checkpoint, state, source_guards, environment)
         selected_review_specs = _review_specs(root, checkpoint, state, capsule.payload_digest)
@@ -1328,6 +1358,7 @@ def prepare_target(
         })
         if target_record["observed"] != identity:
             raise FeatureReleaseError(f"multiple checkpoints for {checkpoint.schema} observed different target identities")
+        tolerated_by_schema.setdefault(checkpoint.schema, set()).update(structural_plan.tolerated_dependents)
         earlier_effects_by_schema.setdefault(checkpoint.schema, []).append({
             "checkpoint": checkpoint_number,
             "schema": checkpoint.schema,
@@ -1530,7 +1561,15 @@ def load_target_plan(repo_root: Path, capsule: release_capsule.ReleaseCapsule, e
     if len(loaded.checkpoint_guards) != len(capsule.checkpoints):
         raise FeatureReleaseError("target plan does not contain one guard per capsule checkpoint")
     for checkpoint_number, checkpoint in enumerate(capsule.checkpoints, start=1):
-        _checkpoint_guard(loaded, checkpoint_number, checkpoint)
+        guard = _checkpoint_guard(loaded, checkpoint_number, checkpoint)
+        structural_plan = guard.get("structuralPlan") if isinstance(guard, Mapping) else None
+        tolerated = {
+            tuple(pair) for pair in (structural_plan.get("toleratedDependents", ()) if isinstance(structural_plan, Mapping) else ())
+        }
+        if not tolerated <= _later_capsule_units(capsule, checkpoint_number, checkpoint.schema):
+            raise FeatureReleaseError(
+                f"target plan checkpoint {checkpoint_number} tolerates an invalid dependent that no later checkpoint re-creates"
+            )
     return loaded
 
 
@@ -1848,9 +1887,12 @@ def _apply_checkpoint_session(
         )
         applied_drivers.append((staged_relative, settings_prologue, settings_prologue_sha256))
 
+    before_payload, after_payload = _revalidation_lines(sorted({item.schema for item in capsule.checkpoints}))
     result = _run_apply_session(
         checkpoint, target, expected_identity, preconditions, run_dir, source_guards, applied_drivers,
         before_run=lambda: _validated_capsule(root, capsule),
+        before_payload=before_payload,
+        after_payload=after_payload,
     )
     if applied_drivers:
         _validated_capsule(root, capsule)
@@ -1868,6 +1910,8 @@ def _run_apply_session(
     *,
     before_run,
     exact_before: Sequence[str] = (),
+    before_payload: Sequence[str] = (),
+    after_payload: Sequence[str] = (),
 ) -> tuple[dict[str, str], int]:
     if not applied_drivers:
         return {}, 0
@@ -1895,6 +1939,7 @@ def _run_apply_session(
             target, preconditions, "preconditions", fail_on_false=True,
         ).splitlines())
     lines.extend(exact_before)
+    lines.extend(before_payload)
     for staged_relative, settings_prologue, _settings_prologue_sha256 in applied_drivers:
         if settings_prologue is not None:
             lines.extend(settings_prologue.rstrip("\n").splitlines())
@@ -1904,6 +1949,7 @@ def _run_apply_session(
         "SET DEFINE OFF",
         "WHENEVER SQLERROR EXIT FAILURE ROLLBACK",
         "WHENEVER OSERROR EXIT FAILURE ROLLBACK",
+        *after_payload,
         *migrate._compile_guard_lines(_compile_units_for_apply(checkpoint, source_guards)),
         "PROMPT MIGRATION_APPLY_COMPLETED",
         "PROMPT FEATURE_CHECKPOINT_APPLY_COMPLETED",
@@ -1977,6 +2023,83 @@ def _earlier_capsule_units(
             if item.unit is not None:
                 units.add((_unit_family(item.unit[1]), str(item.unit[2])))
     return frozenset(units)
+
+
+def _later_capsule_units(
+    capsule: release_capsule.ReleaseCapsule, checkpoint: int, schema: str,
+) -> frozenset[tuple[str, str]]:
+    """Exact (object type, name) of units that later checkpoints of the same schema in this capsule re-create."""
+    return frozenset(
+        (str(item.unit[1]), str(item.unit[2]))
+        for later in capsule.checkpoints[checkpoint:]
+        if later.schema == schema
+        for item in later.inputs
+        if item.unit is not None
+    )
+
+
+def _tolerated_by_earlier(guards: Sequence[Mapping], checkpoint: int, schema: str) -> frozenset[tuple[str, str]]:
+    """Units that earlier checkpoints of the same schema recorded as allowed to stay invalid until re-created."""
+    units: set[tuple[str, str]] = set()
+    for guard in guards:
+        if not isinstance(guard, Mapping) or guard.get("schema") != schema:
+            continue
+        number = guard.get("checkpoint")
+        plan = guard.get("structuralPlan")
+        if type(number) is not int or number >= checkpoint or not isinstance(plan, Mapping):
+            continue
+        units.update((str(pair[0]), str(pair[1])) for pair in plan.get("toleratedDependents", ()))
+    return frozenset(units)
+
+
+_REVALIDATED_TYPES = ("FUNCTION", "PACKAGE", "PACKAGE BODY", "PROCEDURE", "TRIGGER", "TYPE", "TYPE BODY", "VIEW")
+
+
+def _revalidation_lines(owners: Sequence[str]) -> tuple[list[str], list[str]]:
+    """(before payload, after payload) driver lines that recompile what a checkpoint newly invalidated.
+
+    DDL invalidates the objects that read the changed object, directly or through others, in any schema.
+    Oracle would recompile them on next use; later checkpoints and the structural-dependent postconditions need
+    them VALID now. Before the payload the session records the INVALID objects of the release's schemas; after it,
+    it recompiles (DBMS_UTILITY.VALIDATE, twice for chains) the ones that were not INVALID before. A failure to
+    compile is not raised here: the object stays INVALID and a postcondition reports it, unless a later checkpoint
+    of the capsule re-creates it (tolerated_dependents).
+    """
+    if not owners:
+        return [], []
+    owner_list = ", ".join(_sql_literal(owner) for owner in owners)
+    type_list = ", ".join(_sql_literal(object_type) for object_type in _REVALIDATED_TYPES)
+    before = [
+        "VARIABLE team_invalid_before CLOB",
+        "BEGIN",
+        "  SELECT JSON_ARRAYAGG(o.object_id RETURNING CLOB) INTO :team_invalid_before",
+        f"    FROM all_objects o WHERE o.owner IN ({owner_list}) AND o.status = 'INVALID';",
+        "END;",
+        "/",
+    ]
+    after = [
+        "BEGIN",
+        "  FOR pass IN 1 .. 2 LOOP",
+        "    FOR r IN (",
+        "      SELECT o.object_id FROM all_objects o",
+        f"       WHERE o.owner IN ({owner_list}) AND o.status = 'INVALID'",
+        f"         AND o.object_type IN ({type_list})",
+        "         AND o.object_id NOT IN (",
+        "           SELECT j.object_id FROM JSON_TABLE(NVL(:team_invalid_before, '[]'), '$[*]'",
+        "             COLUMNS (object_id NUMBER PATH '$')) j)",
+        "    ) LOOP",
+        "      BEGIN",
+        "        DBMS_UTILITY.VALIDATE(r.object_id);",
+        "      EXCEPTION",
+        "        WHEN OTHERS THEN NULL;",
+        "      END;",
+        "    END LOOP;",
+        "  END LOOP;",
+        "END;",
+        "/",
+        "PROMPT FEATURE_DEPENDENTS_REVALIDATED",
+    ]
+    return before, after
 
 
 def _revalidation_row_key(section: str, row: Mapping) -> tuple[str, str]:
@@ -2117,7 +2240,10 @@ def _execute_checkpoint_under_lease(
     if _sha256(_canonical_bytes(fresh_view)) != _sha256(_canonical_bytes(guard_view)):
         raise FeatureReleaseError("live selected target metadata changed after preparation")
     fresh_state = dict(fresh, identity=observed_identity, environment=plan.environment)
-    fresh_source_guards = _source_guards(selected, fresh_state, checkpoint)
+    fresh_source_guards = _source_guards(
+        selected, fresh_state, checkpoint,
+        tolerated=_tolerated_by_earlier(plan.checkpoint_guards, checkpoint, selected.schema),
+    )
     if _canonical_bytes(fresh_source_guards) != _canonical_bytes(guard["sourceGuards"]):
         raise FeatureReleaseError("live selected stored source or compiler metadata changed after preparation")
     if plan.recovery_attempt is not None and checkpoint == plan.recovery_binding.get("checkpoint", checkpoint):
