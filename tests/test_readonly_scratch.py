@@ -104,10 +104,13 @@ class PreflightScratchTests(unittest.TestCase):
 
     def run_preflight(self, *, inventory_fn=None, checks=None):
         observed = inventory("APP_DEV")
+        inventory_capture = inventory_fn or (lambda target, run_dir: observed)
         stdout, stderr = io.StringIO(), io.StringIO()
+        # The snapshot session records its own owner inventory, so the fake reads it when none is passed (S5).
         with mock.patch.dict(os.environ, VALUES), \
-                mock.patch("scripts.schema_catalog.capture_inventory", inventory_fn or (lambda target, run_dir: observed)), \
-                mock.patch("scripts.schema_catalog.capture_snapshot", lambda target, found, keys, run_dir: snapshot_of(found, keys)), \
+                mock.patch("scripts.schema_catalog.capture_inventory", inventory_capture), \
+                mock.patch("scripts.schema_catalog.capture_snapshot", lambda target, found, keys, run_dir: snapshot_of(
+                    found if found is not None else inventory_capture(target, run_dir), keys)), \
                 mock.patch.object(migration_checks, "run_checks", lambda *args, **kwargs: checks or CheckReport(True, True, (), (), {"complete": True})), \
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = migration_checks.main(["migrations/2026-09-27_create-orders-r001", "--env", "dev", "--repo-root", str(self.root)])

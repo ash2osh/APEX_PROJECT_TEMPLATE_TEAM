@@ -728,21 +728,57 @@ class FeatureRuntimeTests(unittest.TestCase):
         index = json.loads((self.root / "releases/.local-state.json").read_text(encoding="utf-8"))
         self.assertNotEqual(index["attempts"][-1]["state"], "verified")
 
-    def test_wrong_precondition_session_identity_refuses_before_creating_attempt(self) -> None:
-        from scripts import feature_release, release_state
+    def test_write_checkpoint_runs_preconditions_only_in_apply_session(self) -> None:
+        # S3: the apply session already evaluates the preconditions before any payload (fail_on_false), so a write
+        # checkpoint no longer opens a separate precondition session; only the postconditions run separately.
+        from scripts import feature_release
 
         plan = self._prepared()
-        wrong = dict(IDENTITY, db_unique_name="OTHER_UNIQUE")
+        drivers: list[str] = []
         with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
              patch.object(feature_release, "load_target_plan", return_value=plan), \
              patch.object(feature_release, "capture_selected_state", return_value=self.state), \
-             patch.object(feature_release.migration_checks, "run_checks", return_value=self._check_report(wrong)), \
-             patch.object(feature_release.sqlcl_session, "run_sqlcl") as apply:
-            with self.assertRaisesRegex(feature_release.FeatureReleaseError, "precondition.*identity"):
-                feature_release.execute_checkpoint(self.root, self.capsule, plan, 1, run_id=self._start_run(self.capsule, plan), environ=self._environ())
+             patch.object(feature_release.migration_checks, "run_checks", side_effect=[self._check_report()]) as checks, \
+             patch.object(feature_release.sqlcl_session, "run_sqlcl",
+                          side_effect=self._fake_runner(inspect=lambda driver, _run: drivers.append(driver.read_text(encoding="utf-8")))):
+            result = feature_release.execute_checkpoint(self.root, self.capsule, plan, 1, run_id=self._start_run(self.capsule, plan), environ=self._environ())
 
-        apply.assert_not_called()
-        self.assertEqual(release_state._load_index(self.root)["checkpointVerifications"], [])
+        self.assertEqual(result.exit_code, 0, result.message)
+        self.assertEqual(["postconditions"], [call.kwargs["phase"] for call in checks.call_args_list])
+        report = json.loads(next((self.root / "scratch").rglob("checkpoint-report.json")).read_text(encoding="utf-8"))
+        self.assertIsNotNone(report["preconditions"])
+        self.assertEqual(0.0, report["preconditionSeconds"])
+
+    def test_in_session_precondition_failure_before_payload_is_not_started(self) -> None:
+        # The refusal is proved by the apply log: identity verified, the precondition failure marker and ORA-20985,
+        # and no payload marker. The attempt closes as not-started, so the target is not left locked.
+        from scripts import feature_release, release_state
+        from scripts.sqlcl_session import SqlclError
+
+        plan = self._prepared()
+        refused = "\n".join((
+            "MIGRATION_IDENTITY_BEGIN", json.dumps(IDENTITY, sort_keys=True), "MIGRATION_IDENTITY_END",
+            "MIGRATION_IDENTITY_VERIFIED", "CHECK_REHEARSAL_FAILED:preconditions",
+            "ORA-20985: Migration rehearsal precondition failed", "",
+        ))
+
+        def runner(target, driver, run_dir, **_kwargs):
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "sqlcl-output.log").write_text(refused, encoding="utf-8")
+            raise SqlclError("SQLcl exited with status 1", run_dir, refused)
+
+        with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
+             patch.object(feature_release, "load_target_plan", return_value=plan), \
+             patch.object(feature_release, "capture_selected_state", return_value=self.state), \
+             patch.object(feature_release.migration_checks, "run_checks") as checks, \
+             patch.object(feature_release.sqlcl_session, "run_sqlcl", side_effect=runner):
+            result = feature_release.execute_checkpoint(self.root, self.capsule, plan, 1, run_id=self._start_run(self.capsule, plan), environ=self._environ())
+
+        self.assertNotEqual(result.exit_code, 0)
+        checks.assert_not_called()
+        attempt = release_state._load_index(self.root)["attempts"][-1]
+        self.assertEqual("not-started", attempt["state"])
+        self.assertEqual("preconditions-refused-before-payload", attempt["metrics"]["noWriteClassification"])
 
     def test_wrong_postcondition_session_identity_leaves_unknown_attempt(self) -> None:
         from scripts import feature_release
@@ -752,7 +788,7 @@ class FeatureRuntimeTests(unittest.TestCase):
         with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
              patch.object(feature_release, "load_target_plan", return_value=plan), \
              patch.object(feature_release, "capture_selected_state", return_value=self.state), \
-             patch.object(feature_release.migration_checks, "run_checks", side_effect=[self._check_report(), self._check_report(wrong)]), \
+             patch.object(feature_release.migration_checks, "run_checks", side_effect=[self._check_report(wrong)]), \
              patch.object(feature_release.sqlcl_session, "run_sqlcl", side_effect=self._fake_runner()):
             result = feature_release.execute_checkpoint(self.root, self.capsule, plan, 1, run_id=self._start_run(self.capsule, plan), environ=self._environ())
 
@@ -886,7 +922,7 @@ class FeatureRuntimeTests(unittest.TestCase):
         with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
              patch.object(feature_release, "load_target_plan", return_value=plan), \
              patch.object(feature_release, "capture_selected_state", return_value=self.state), \
-             patch.object(feature_release.migration_checks, "run_checks", side_effect=[self._check_report(), failed]), \
+             patch.object(feature_release.migration_checks, "run_checks", side_effect=[failed]), \
              patch.object(feature_release.sqlcl_session, "run_sqlcl", side_effect=self._fake_runner()):
             result = feature_release.execute_checkpoint(self.root, self.capsule, plan, 1, run_id=self._start_run(self.capsule, plan), environ=self._environ())
 

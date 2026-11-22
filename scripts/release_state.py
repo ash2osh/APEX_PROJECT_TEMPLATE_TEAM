@@ -79,7 +79,7 @@ STEP_OUTCOME_STATES = {"verified", "failed", "unknown", "not-started"}
 MIGRATION_PROVENANCE_FIELDS = {"schema1Sha256", "retainedPath", "migratedAt"}
 NO_WRITE_REASONS = {
     "connection-failed-before-payload", "sqlcl-start-failed",
-    "identity-guard-refused", "migration-identity-guard-refused",
+    "identity-guard-refused", "migration-identity-guard-refused", "preconditions-refused-before-payload",
 }
 REPORT_FIELDS = {
     "schemaVersion", "environment", "status", "databaseState", "payloadDigest",

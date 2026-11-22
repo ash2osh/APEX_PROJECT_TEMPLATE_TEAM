@@ -87,6 +87,8 @@ class FakeDatabase:
 
     def capture_snapshot(self, target, inventory, keys, _run_dir):
         self.calls.append(("snapshot", target.environment, tuple(keys)))
+        if inventory is None:  # the snapshot session records its own owner inventory (S5)
+            inventory = self._inventory()
         definitions = {}
         for name, object_type in keys:
             details = self.objects.get((name, object_type))
@@ -269,7 +271,8 @@ class MigrateCliTests(unittest.TestCase):
         }}
 
         def changing_snapshot(_target, inventory, _keys, _run_dir):
-            raise InventoryChangedError("owner inventory changed", inventory, after)
+            # The snapshot session itself saw the owner inventory change (no separate inventory session, S5).
+            raise InventoryChangedError("owner inventory changed", inventory if inventory is not None else fake._inventory(), after)
 
         stderr = io.StringIO()
         with patch.dict(os.environ, {"MIGRATION_PREFLIGHT_INVENTORY_RETRIES": "0"}), contextlib.redirect_stderr(stderr):
@@ -895,6 +898,27 @@ class MigrateCliTests(unittest.TestCase):
         with target_writer_lease(self.root, scope, {"purpose": "next writer"}):
             pass
 
+    def test_folder_one_preflight_reused_under_writer_lease_without_prompt(self):
+        # S6: a one-folder capsule step that already holds the writer lease, confirmed without a prompt, reuses
+        # the initial preflight at its apply boundary instead of repeating snapshot and preconditions.
+        folder = self.add_folder("2026-09-28_reuse-preflight-r001", {"001-create.sql": "CREATE TABLE REUSE_T (ID NUMBER);\n"})
+        migrations = self.load(folder.name)
+        target = self.target()
+        fake = FakeDatabase(target)
+        scope = {"dbUniqueName": "DEVDB_UNIQUE", "containerId": "3", "schema": target.schema, "edition": "ORA$BASE"}
+        with target_writer_lease(self.root, scope, {"purpose": "rollout"}) as lease:
+            status, fake = self.apply(migrations, target, fake=fake, writer_lease=lease)
+        self.assertEqual(status, 0)
+        before_apply = fake.calls[: next(index for index, call in enumerate(fake.calls) if call[0] == "apply")]
+        self.assertEqual(1, sum(1 for call in before_apply if call[0] == "snapshot"))
+
+    def test_folder_one_preflight_repeated_without_writer_lease(self):
+        folder = self.add_folder("2026-09-28_fresh-preflight-r001", {"001-create.sql": "CREATE TABLE FRESH_T (ID NUMBER);\n"})
+        status, fake = self.apply(self.load(folder.name), self.target(), fake=FakeDatabase(self.target()))
+        self.assertEqual(status, 0)
+        before_apply = fake.calls[: next(index for index, call in enumerate(fake.calls) if call[0] == "apply")]
+        self.assertEqual(2, sum(1 for call in before_apply if call[0] == "snapshot"))
+
     def test_migration_reuses_only_an_active_rollout_lease_for_its_observed_target(self):
         folder = self.add_folder("2026-09-28_create-once-r001", {"001-create.sql": "CREATE TABLE ONCE_T (ID NUMBER);\n"})
         migrations = self.load(folder.name)
@@ -1161,6 +1185,7 @@ class MigrateCliTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         fake.capture_inventory = interrupted
+        fake.capture_snapshot = interrupted  # the first live read is the snapshot session (S5)
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             result, _ = self.apply(self.load(folder.name), fake=fake)

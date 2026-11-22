@@ -72,6 +72,13 @@ def not_started_reason(output: str) -> str | None:
         and re.search(r"(?m)^ORA-20987\b", output)
     ):
         return "identity-guard-refused"
+    if (
+        "MIGRATION_IDENTITY_VERIFIED" in lines
+        and "CHECK_REHEARSAL_FAILED:preconditions" in lines
+        and re.search(r"(?m)^ORA-20985\b", output)
+    ):
+        # The apply session evaluates the checkpoint's preconditions before any payload and refused (S3).
+        return "preconditions-refused-before-payload"
     if "MIGRATION_IDENTITY_VERIFIED" not in lines and IDENTITY_GUARD_ERRORS.search(output):
         return "migration-identity-guard-refused"
     if NOT_STARTED_CONNECTION_ERRORS.search(output) or re.search(r"(?m)^SP2-0640\b", output):

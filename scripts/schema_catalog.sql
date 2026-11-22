@@ -583,6 +583,9 @@ BEGIN
     l_path := 'PARTIAL_ALL_OBJECTS';
   END IF;
 
+  -- ASHARIF 2026-11-22: the identity phase reads only the session identity and target visibility (S7); the
+  -- catalog probes below establish inventory and snapshot coverage only.
+  IF c_phase <> 'identity' THEN
   l_catalogs.append('ALL_OBJECTS');
   SELECT COUNT(*) INTO l_found FROM all_tables WHERE owner = c_target_schema;
   l_catalogs.append('ALL_TABLES');
@@ -606,6 +609,7 @@ BEGIN
   l_catalogs.append('ALL_IND_COLUMNS');
   SELECT COUNT(*) INTO l_found FROM all_triggers WHERE owner = c_target_schema;
   l_catalogs.append('ALL_TRIGGERS');
+  END IF;
 
   l_identity.put('session_user', SYS_CONTEXT('USERENV', 'SESSION_USER'));
   l_identity.put('current_schema', SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'));
@@ -619,7 +623,7 @@ BEGIN
 
   IF c_phase = 'inventory' THEN
     add_inventory(l_objects);
-  ELSE
+  ELSIF c_phase = 'snapshot' THEN
     add_dependency_catalogs();
     l_catalogs.append('SYNONYMS');
     l_catalogs.append('OBJECT_GRANTS');
@@ -653,7 +657,7 @@ BEGIN
   l_payload.put('completed_at', l_completed_at);
   IF c_phase = 'inventory' THEN
     l_payload.put('objects', l_objects);
-  ELSE
+  ELSIF c_phase = 'snapshot' THEN
     l_payload.put('before', l_before);
     l_payload.put('after', l_after);
     l_payload.put('definitions', l_definitions);

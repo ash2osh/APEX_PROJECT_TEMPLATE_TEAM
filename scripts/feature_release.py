@@ -2134,11 +2134,25 @@ def _execute_checkpoint_under_lease(
     preparation_seconds = round(time.perf_counter() - capture_started, 3)
     source_guards = _checkpoint_source_guard_map(guard)
     preconditions, postconditions = _checkpoint_runtime_checks(selected, guard)
-    pre_started = time.perf_counter()
-    pre_report = migration_checks.run_checks(
-        target, preconditions, run_dir / "preconditions", phase="preconditions", jobs=1,
+    write_required = any(
+        item.category != "stored-source"
+        or item.unit is None
+        or source_guards.get(item.unit[1:]) is None
+        or source_guards[item.unit[1:]].get("noOp") is not True
+        for item in selected.inputs
     )
-    pre_sessions = _runtime_check_identity(pre_report, expected_identity, "precondition")
+    pre_started = time.perf_counter()
+    if write_required:
+        # The apply session evaluates the same preconditions before any payload (fail_on_false), so a separate
+        # session would only repeat them (S3). A refusal there is classified "preconditions-refused-before-payload"
+        # and closes the attempt as not-started; its report is read back from the apply log below.
+        pre_report = None
+        pre_sessions = 0
+    else:
+        pre_report = migration_checks.run_checks(
+            target, preconditions, run_dir / "preconditions", phase="preconditions", jobs=1,
+        )
+        pre_sessions = _runtime_check_identity(pre_report, expected_identity, "precondition")
     pre_seconds = round(time.perf_counter() - pre_started, 3)
 
     try:
@@ -2148,13 +2162,6 @@ def _execute_checkpoint_under_lease(
     except release_state.ReleaseStateError as error:
         raise FeatureReleaseError(f"checkpoint refused by durable occupancy state: {error}") from error
 
-    write_required = any(
-        item.category != "stored-source"
-        or item.unit is None
-        or source_guards.get(item.unit[1:]) is None
-        or source_guards[item.unit[1:]].get("noOp") is not True
-        for item in selected.inputs
-    )
     attempt_id = None
     if write_required:
         _validated_capsule(root, capsule)
@@ -2185,7 +2192,7 @@ def _execute_checkpoint_under_lease(
             if isinstance(source_guard, Mapping) and source_guard.get("noOp") is not True
         ],
         "error": None,
-        "preconditions": pre_report.to_dict(),
+        "preconditions": pre_report.to_dict() if pre_report is not None else None,
         "postconditions": None,
     }
     apply_sessions = 0
@@ -2199,6 +2206,7 @@ def _execute_checkpoint_under_lease(
             )
             report["applySeconds"] = round(time.perf_counter() - apply_started, 3)
             apply_sessions = 1
+            report["preconditions"] = _in_session_preconditions(run_dir, preconditions)
         post_started = time.perf_counter()
         post_report = migration_checks.run_checks(
             target, postconditions, run_dir / "postconditions", phase="postconditions", jobs=1,
@@ -2261,6 +2269,8 @@ def _execute_checkpoint_under_lease(
             )
         report["databaseState"] = "unknown" if attempt_id is not None else "not-started"
         report["error"] = str(error)
+        if report["preconditions"] is None and preconditions:
+            report["preconditions"] = _in_session_preconditions(run_dir, preconditions, required=False)
         report["objectSeconds"] = round(time.perf_counter() - started, 3)
         report["sessionCount"] += apply_sessions
         report["objectBudget"] = {
@@ -2296,6 +2306,25 @@ def _execute_checkpoint_under_lease(
                 },
             )
         return CheckpointResult(2, report["databaseState"], report["objectSeconds"], report["sessionCount"], tuple(evidence), str(error))
+
+
+def _in_session_preconditions(run_dir: Path, preconditions: Sequence, *, required: bool = True) -> dict | None:
+    """The precondition report the apply session printed (same markers as a separate check session)."""
+    if not preconditions:  # the same empty report a separate session returns for no checks
+        return migration_checks.CheckReport(True, True, (), (), {
+            "phase": "preconditions", "complete": True, "count": 0, "sessions": 0,
+            "outputAvailable": True, "failedCheckIds": [],
+        }).to_dict()
+    # A completed apply already proves the preconditions passed: the session raises ORA-20985 before any payload
+    # when one fails (fail_on_false). The parsed result is report detail, not the gate.
+    try:
+        output = (run_dir / "sqlcl-output.log").read_text(encoding="utf-8", errors="replace")
+        report = migration_checks._parse_check_output(output, preconditions, "preconditions")
+    except (OSError, ValueError):
+        report = None
+    if report is not None and report.complete:
+        return report.to_dict()
+    return {"phase": "preconditions", "inSession": True, "passedBeforePayload": True} if required else None
 
 
 def execute_checkpoint(
