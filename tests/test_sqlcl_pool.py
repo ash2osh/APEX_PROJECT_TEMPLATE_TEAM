@@ -282,6 +282,14 @@ class ResetBlockTests(unittest.TestCase):
         self.assertIn("UNDEFINE X", lines)
         self.assertEqual(f"PROMPT {sqlcl_pool.RESET_OK_MARKER}", lines[-1])
 
+    def test_server_output_is_off_before_the_client_settings_are_replayed(self) -> None:
+        # With SERVEROUTPUT on, SQLcl fetches server output after every database call, so each SET line of the
+        # replay that touches the database costs a second round trip (about 9 s per reset on a remote database).
+        baseline = sqlcl_pool.SessionBaseline("ASHERIF", "ORA$BASE", {}, None)
+        lines = sqlcl_pool.reset_block(baseline, Path("/tmp/base.sql"), set()).splitlines()
+        self.assertLess(lines.index("SET SERVEROUTPUT OFF"), lines.index('@"/tmp/base.sql"'))
+        self.assertGreater(lines.index("SET SERVEROUTPUT OFF"), lines.index("/"))
+
     def test_reset_replays_sqlcl_ddl_settings_instead_of_defaults(self) -> None:
         # A one-shot SQLcl replays its own DDL settings on connect, and compare-env reads view DDL with them,
         # so a reused session must get the same transforms back, not DBMS_METADATA's defaults.

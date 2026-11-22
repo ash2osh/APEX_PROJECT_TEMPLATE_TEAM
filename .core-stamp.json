@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "b22e4dc1a65fc7e8aa428fb5c5e19298a5e47775",
+  "coreCommit": "8955a49f7c46f537daba85b357c6d0fc371e795e",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -234,7 +234,7 @@
     },
     {
       "path": "scripts/feature_release.py",
-      "sha256": "69835d36a4d31e901270d9c38f68b87fe2bb50194a3a305df18e0a34762dd705",
+      "sha256": "ff6b6f955e2cd5f65cef2807f4d605055374ac8df855e30b499de6ad5e6e2c46",
       "executable": false
     },
     {
@@ -449,7 +449,7 @@
     },
     {
       "path": "scripts/sqlcl_pool.py",
-      "sha256": "bf25ba89318024e480206539105bed8b4357a097709e1d7dc082325981b3bceb",
+      "sha256": "5628a24d75e2b2a68c768326b31186500d27627bedc148873ed3cae2e3c08819",
       "executable": false
     },
     {
@@ -1004,7 +1004,7 @@
     },
     {
       "path": "tests/test_feature_prepare.py",
-      "sha256": "909d68cd5dd39c64940bbb28df8d0f374dcfde1c5f44a7271168476459664700",
+      "sha256": "ffec17241ab5217964341aa67632cb0db2e4bd4c40ce418a6521299009f21201",
       "executable": false
     },
     {
@@ -1224,7 +1224,7 @@
     },
     {
       "path": "tests/test_sqlcl_pool.py",
-      "sha256": "923a1eb1578fcaad3bc9271bc69757eab1db96c68faa0e6c86308df6ec656ca0",
+      "sha256": "c3f5ea10ff6f312f14869ea786729c89e81c2b6ff21b7799cefcb55842e660df",
       "executable": false
     },
     {

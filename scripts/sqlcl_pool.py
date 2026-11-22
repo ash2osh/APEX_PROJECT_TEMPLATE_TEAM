@@ -189,6 +189,10 @@ def reset_block(baseline: SessionBaseline, baseline_settings: Path, defines: set
                 statements.append(_alter_session(name, baseline.compiler[name]))
     statements.append("  DBMS_SESSION.RESET_PACKAGE;")
     lines.extend(("BEGIN", *statements, "END;", "/"))
+    # The replay sets SERVEROUTPUT back to its baseline anyway; switching it off first matters for speed: while it is
+    # on, SQLcl fetches server output after every database call, doubling the round trips of the replay (live,
+    # 2026-11-22: about 9 s per reset against a remote database, 1.2 s with it off).
+    lines.append("SET SERVEROUTPUT OFF")
     lines.append(f'@"{baseline_settings.as_posix()}"')
     lines.extend(("CLEAR COLUMNS", "CLEAR BREAKS", "CLEAR COMPUTES"))
     lines.extend(f"UNDEFINE {name}" for name in sorted(defines))
