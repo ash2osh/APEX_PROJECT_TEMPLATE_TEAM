@@ -677,6 +677,8 @@ if [ "$app_environment" = dev ]; then
   import_attempted=false
   python3 "$REPO_ROOT/scripts/verify_publish_state.py" "${verify_args[@]}" "${stability_args[@]}" --record-baseline
 fi
+# Staging and production have no application lock block above; the import is verified here too (B3).
+import_attempted=false
 import_unverified=false
 printf 'Published APEX App %s to %s (%s / %s).\n' \
   "$app_id" "$target_label" "$workspace_name" "$parsing_schema"

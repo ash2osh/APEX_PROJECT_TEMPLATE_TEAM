@@ -89,7 +89,7 @@ own Git configuration. Windows itself is checked only in CI (`windows-offline`).
 
 ## Shared core files
 
-About 200 files under `scripts/`, `tools/` and `tests/` are identical in the 26.1 and 26.2 templates. Their single
+About 260 files under `scripts/`, `tools/` and `tests/` are identical in the 26.1 and 26.2 templates. Their single
 source is the [APEX_TEMPLATE_CORE](https://github.com/ash2osh/APEX_TEMPLATE_CORE) repository; `.core-stamp.json`
 lists each one with its SHA-256 and the core commit it came from. Do not edit them here:
 

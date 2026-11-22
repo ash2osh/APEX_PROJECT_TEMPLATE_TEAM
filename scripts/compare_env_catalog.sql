@@ -1079,18 +1079,16 @@ DECLARE
     line_count_value PLS_INTEGER;
     hash_sum_value NUMBER;
     l_scope_all PLS_INTEGER;
-    l_fetched PLS_INTEGER;
   BEGIN
     IF NOT selected('stored-code') THEN RETURN; END IF;
     l_rows := JSON_ARRAY_T();
     l_pages := JSON_ARRAY_T();
-    l_offset := 0;
     l_total := 0;
+    l_page_count := 0;
     l_scope_all := CASE WHEN DBMS_LOB.GETLENGTH(c_scope_prefixes_json) <= 2 AND DBMS_LOB.GETLENGTH(c_scope_names_json) <= 2 THEN 1 ELSE 0 END;
-    LOOP
-      l_page_count := 0;
-      l_fetched := 0;
-      FOR code_row IN (
+    -- ASHARIF 2026-11-22: one cursor; a page is closed after every 500 emitted rows (units without visible
+    -- source are skipped), so a skipped unit can no longer leave a short page before the final one (B1).
+    FOR code_row IN (
         -- ASHARIF 2026-11-21: the wanted names are found first, then joined; a per-row scope test over every source line took 40 s per capture.
         WITH sp AS (SELECT /*+ MATERIALIZE */ UPPER(x.prefix) prefix
                       FROM JSON_TABLE(c_scope_prefixes_json, '$[*]' COLUMNS (prefix VARCHAR2(128) PATH '$')) x),
@@ -1119,9 +1117,7 @@ DECLARE
            AND o.object_type IN ('FUNCTION','PROCEDURE','PACKAGE','PACKAGE BODY','TYPE','TYPE BODY')
            AND o.object_name IN (SELECT wanted.name FROM wanted)
          ORDER BY o.object_type, o.object_name
-         OFFSET l_offset ROWS FETCH NEXT c_page_size ROWS ONLY
       ) LOOP
-        l_fetched := l_fetched + 1;
         fingerprint_source(code_row.name, code_row.type, line_count_value, hash_sum_value);
         -- Only units whose source the session can read are listed, as when this list was read from ALL_SOURCE.
         IF line_count_value > 0 THEN
@@ -1137,12 +1133,13 @@ DECLARE
           l_rows.append(l_page);
           l_page_count := l_page_count + 1;
           l_total := l_total + 1;
+          IF l_page_count = c_page_size THEN
+            l_pages.append(l_page_count);
+            l_page_count := 0;
+          END IF;
         END IF;
       END LOOP;
-      l_pages.append(l_page_count);
-      EXIT WHEN l_fetched < c_page_size;
-      l_offset := l_offset + c_page_size;
-    END LOOP;
+    l_pages.append(l_page_count);
     l_sections.put('stored-code', l_rows);
     l_page := JSON_OBJECT_T();
     l_page.put('complete', TRUE);
@@ -1322,18 +1319,41 @@ BEGIN
     -- The grantee test uses CURRENT_SCHEMA rather than a second :scope bind. The driver sets
     -- CURRENT_SCHEMA to the target schema before this runs, and a repeated bind would break
     -- the positional USING list (ORA-01008).
-    add_query_section('feature-synonym-access', q'~
-      SCOPE_WITH
-      SELECT JSON_OBJECT('owner' VALUE p.table_schema, 'object_name' VALUE p.table_name,
-        'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
-        FROM all_synonyms s
-        JOIN all_tab_privs p ON p.table_schema = s.table_owner AND p.table_name = s.table_name
-       WHERE (s.owner = :scope OR s.owner = 'PUBLIC')
-         AND SCOPE_MATCH(s.synonym_name)
-         AND p.grantee IN (SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'), 'PUBLIC')
-         AND p.privilege = 'SELECT'
-       ORDER BY p.table_schema, p.table_name, p.grantee, p.privilege
-       OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+    -- ASHARIF 2026-11-22: like add_object_grants, a login acting as the schema reads DBA_TAB_PRIVS, because
+    -- ALL_TAB_PRIVS hides a grant whose grantor, grantee and owner are all other users; ORA-00942 leaves it unavailable.
+    IF NOT c_dba_mode AND SYS_CONTEXT('USERENV', 'SESSION_USER') = c_schema THEN
+      add_query_section('feature-synonym-access', q'~
+        SCOPE_WITH
+        SELECT JSON_OBJECT('owner' VALUE p.table_schema, 'object_name' VALUE p.table_name,
+          'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
+          FROM all_synonyms s
+          JOIN all_tab_privs p ON p.table_schema = s.table_owner AND p.table_name = s.table_name
+         WHERE (s.owner = :scope OR s.owner = 'PUBLIC')
+           AND SCOPE_MATCH(s.synonym_name)
+           AND p.grantee IN (SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'), 'PUBLIC')
+           AND p.privilege = 'SELECT'
+         ORDER BY p.table_schema, p.table_name, p.grantee, p.privilege
+         OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+    ELSE
+      BEGIN
+        add_query_section('feature-synonym-access', q'~
+          SCOPE_WITH
+          SELECT JSON_OBJECT('owner' VALUE p.owner, 'object_name' VALUE p.table_name,
+            'grantee' VALUE p.grantee, 'privilege' VALUE p.privilege, 'grantable' VALUE p.grantable RETURNING CLOB) row_json
+            FROM all_synonyms s
+            JOIN dba_tab_privs p ON p.owner = s.table_owner AND p.table_name = s.table_name
+           WHERE (s.owner = :scope OR s.owner = 'PUBLIC')
+             AND SCOPE_MATCH(s.synonym_name)
+             AND p.grantee IN (SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'), 'PUBLIC')
+             AND p.privilege = 'SELECT'
+           ORDER BY p.owner, p.table_name, p.grantee, p.privilege
+           OFFSET :page_offset ROWS FETCH NEXT :page_size ROWS ONLY~');
+      EXCEPTION
+        WHEN OTHERS THEN
+          IF SQLCODE != -942 THEN RAISE; END IF;
+          add_unavailable('feature-synonym-access', 'synonym grant visibility requires owner session, DBA capture or SELECT on DBA_TAB_PRIVS');
+      END;
+    END IF;
 
     add_baseline_views;
     add_baseline_data;

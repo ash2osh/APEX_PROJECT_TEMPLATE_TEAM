@@ -112,10 +112,14 @@ cannot read a required view also leaves a blocker and retains SQLcl evidence
 under `scratch/`.
 
 Without a DBA alias, an owner login captures object grants from
-`ALL_TAB_PRIVS`. If the session login differs from the selected schema, the
-object-grant section is marked incomplete because `ALL_TAB_PRIVS` may not show
-all grants on that schema's objects. A configured DBA alias supplies the
-complete section; if that capture also fails, the comparison remains blocked.
+`ALL_TAB_PRIVS`. A login that acts as the selected schema reads `DBA_TAB_PRIVS`
+instead, because `ALL_TAB_PRIVS` hides grants whose grantor, grantee and owner
+are all other users; that login needs `SELECT` on `DBA_TAB_PRIVS` (for example
+through `SELECT_CATALOG_ROLE`). The feature synonym-access section follows the
+same rule. When that view cannot be read, both sections are marked
+unavailable, and a feature prepare refuses with that reason. A configured DBA
+alias supplies the complete sections; if that capture also fails, the
+comparison remains blocked.
 
 ## DBA script output
 

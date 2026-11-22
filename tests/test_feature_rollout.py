@@ -180,6 +180,14 @@ class FeatureRolloutTests(unittest.TestCase):
         for number, step in enumerate(actual_steps, start=1):
             if step["type"] == "migrate":
                 target_plan.targets[f"step:{number}"] = self._migration_binding(target_plan, step["folders"][0])
+            elif step["type"] == "app-deploy":
+                # Prepare records the observed identity of an application target (X1).
+                target_plan.targets[f"app:{step['appId']}"] = {
+                    "workspace": "WS", "schema": "APP_CODE", "connection": f"{environment}-conn",
+                    "expectedUser": "APP_CODE", "descriptorPath": f"apps/APP_CODE/{step['appId']}/deployments/{environment}.json",
+                    "descriptorSha256": "0" * 64,
+                    "observed": dict(target_plan.targets["schema:APP_CODE"]["observed"]),
+                }
         return (
             patch.object(release_capsule, "load_capsule", return_value=self.capsule),
             patch.object(release_capsule, "_read_capsule_json", return_value=(self.capsule_document, b"capsule")),
@@ -1068,6 +1076,36 @@ class FeatureRolloutTests(unittest.TestCase):
         self.assertEqual(app_receipt["schemaVersion"], 1)
         self.assertNotIn("targetBinding", app_receipt)
         self.assertNotIn("observedIdentity", app_receipt)
+
+    def test_confirm_target_rollout_accepts_capsule_with_app_step(self) -> None:
+        from scripts import feature_release
+
+        self.capsule = ReleaseCapsule(
+            self.capsule.root, self.capsule.manifest_sha256, self.capsule.payload_digest,
+            self.capsule.engine_digest, self.capsule.source_commit, (self.checkpoints[0],),
+            self.capsule.input_hashes[:2], 120,
+        )
+        self.steps = [self.steps[0], {"type": "app-deploy", "appId": 100}]
+        self._enter(self._patches(steps=self.steps))
+        observed = self._observed_identity("staging")
+
+        def fake_checkpoint(*args, **kwargs):
+            return self._fake_checkpoint_result(args, kwargs, object_seconds=1.0, session_count=2,
+                                                message="database state verified")
+
+        with patch.object(rollout, "_observe_target_identity", return_value=observed), \
+             patch.object(feature_release, "execute_checkpoint", side_effect=fake_checkpoint), \
+             patch.object(rollout, "_report_outputs_do_not_overlap"), \
+             patch.object(rollout, "_snapshot"), \
+             patch.object(rollout, "execute_step", return_value=rollout.StepResult(0, (), "app imported")) as app, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            status = rollout.run_rollout(
+                self.manifest_path, "staging", repo_root=self.root, capsule_path=self.capsule_path,
+                confirm_target=observed["db_unique_name"], report_path=self.root / "scratch" / "app-confirm-report",
+            )
+
+        self.assertEqual(status, 0)
+        app.assert_called_once()
 
     def _observed_identity(self, environment: str = "staging") -> dict:
         return self._target_plan(environment, 1, "1" * 64).targets["schema:APP_CODE"]["observed"]

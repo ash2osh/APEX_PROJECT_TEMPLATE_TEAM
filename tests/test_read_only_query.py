@@ -56,6 +56,13 @@ def configured_values() -> dict[str, str]:
 
 
 class ReadOnlyQueryGateTests(unittest.TestCase):
+    def test_db_unique_name_sys_context_is_allowed(self) -> None:
+        # E5: AGENTS.md prescribes exactly this query to read the name for --confirm-target.
+        validate_query("SELECT SYS_CONTEXT('USERENV','DB_UNIQUE_NAME') FROM DUAL")
+        validate_query("SELECT SYS_CONTEXT('USERENV', 'CON_NAME') FROM DUAL")
+        with self.assertRaisesRegex(QueryError, "approved USERENV"):
+            validate_query("SELECT SYS_CONTEXT('USERENV','IP_ADDRESS') FROM DUAL")
+
     def test_literal_markers_quotes_quoted_identifiers_and_comments_are_data(self) -> None:
         sql = (
             'SELECT "Order Id", N\'-- ; / @ & BEGIN UPDATE SELECT\' AS n, '

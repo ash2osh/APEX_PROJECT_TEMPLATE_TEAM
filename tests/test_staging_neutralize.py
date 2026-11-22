@@ -158,6 +158,18 @@ class StagingNeutralizeTests(unittest.TestCase):
             self.assertIsNone(re.search(r"APEX_\d{6}", text))
         self.assertIn("SELECT schema INTO v_apex FROM dba_registry WHERE comp_id = 'APEX'", sql)
 
+    def test_neutralize_sql_refuses_production_looking_observed_name(self) -> None:
+        # B4: the in-database guard checks the observed names, not only the alias, before anything is disabled.
+        sql = module.apply_script(("APP_STAGE",), CONFIRM)
+        guard = sql.index("Refusing: the observed database name looks like production")
+        for attribute in ("DB_UNIQUE_NAME", "DB_NAME", "SERVICE_NAME"):
+            with self.subTest(attribute=attribute):
+                self.assertIn(f"REGEXP_LIKE(REGEXP_REPLACE(NVL(SYS_CONTEXT('USERENV', '{attribute}'), ' ')", sql)
+        self.assertIn("(pre|non)[-_.]?(prod|prd)", sql)
+        for call in ("DBMS_SCHEDULER.DISABLE", "APEX_AUTOMATION.DISABLE", "REMOVE_HOST_ACE"):
+            with self.subTest(call=call):
+                self.assertLess(guard, sql.index(call))
+
     def test_capture_and_check_scripts_never_change_anything(self) -> None:
         sql = module.inventory_script(("APP_STAGE",))
         for call in ("DISABLE(", "ENABLE(", "REMOVE_HOST_ACE", "APPEND_HOST_ACE", "COMMIT"):

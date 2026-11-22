@@ -1503,8 +1503,6 @@ def preflight(migrations: Sequence[Migration], snapshot: SchemaSnapshot, checks:
                 conflicts.append({"code": "MISSING_INDEX_COLUMNS", "name": name, "table": table_name, "columns": missing_columns, **location})
                 continue
             staged_indexes.add(name)
-        elif kind == "CREATE_VIEW":
-            pass
         if kind == "CREATE_VIEW":
             for dependency_owner, dependency_name in operation.get("dependencies", ()):
                 if dependency_owner != owner:

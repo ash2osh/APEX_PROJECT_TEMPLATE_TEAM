@@ -33,6 +33,7 @@ WORKFLOW_ENGINE_FILES = (
     "scripts/feature_ddl_forms.py",
     "scripts/feature_manifest.py",
     "scripts/feature_sources.py",
+    "scripts/feature_compare.py",
     "scripts/feature_preflight.py",
     "scripts/release_ownership.py",
     "scripts/release_capsule.py",
@@ -69,9 +70,13 @@ ENGINE_HELPER_FILES = (
     "scripts/migration_runtime.py",
     "scripts/sqlcl_version.py",
     "scripts/sqlcl_session.py",
+    "scripts/sqlcl_session.sh",
     "scripts/windows_job.py",
     "scripts/sqlcl_transport.py",
     "scripts/path_utils.py",
+    "scripts/database_support.py",
+    "scripts/template_release.py",
+    "scripts/local_config.py",
     "scripts/terminal_confirm.py",
     "scripts/directory_install.py",
     "scripts/deployment_descriptor.py",
@@ -93,6 +98,7 @@ ENGINE_HELPER_FILES = (
     "scripts/sqlcl_safe.sh",
     "scripts/check_db_target.sh",
     "scripts/lookup_app_schema.sql",
+    "scripts/verify_db_access.sql",
     "scripts/application_lifecycle.py",
     "scripts/application_lifecycle.sql",
     "scripts/check_builder_drift.py",
@@ -104,6 +110,9 @@ ENGINE_HELPER_FILES = (
     "scripts/normalize_apx.sh",
     "scripts/verify_publish_state.py",
 )
+# A template lists its own extra runtime files here (one repository-relative path per line, "#" comments);
+# they and the list itself join the engine digest after the shared lists above.
+ENGINE_EXTRA_FILES_LIST = "scripts/engine_extra_files.txt"
 SETTING_PREFIX_RE = re.compile(r"(?is)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+")
 
 
@@ -147,7 +156,7 @@ def _root_path(repo_root: Path) -> Path:
 def _engine_file_list(repo_root: Path) -> tuple[str, ...]:
     """Return the complete ordered release runtime and trusted-template set."""
     root = Path(repo_root)
-    ordered = (*WORKFLOW_ENGINE_FILES, *ENGINE_HELPER_FILES)
+    ordered = (*WORKFLOW_ENGINE_FILES, *ENGINE_HELPER_FILES, *_extra_engine_files(root))
     present: list[str] = []
     for relative in ordered:
         candidate = root / relative
@@ -156,6 +165,28 @@ def _engine_file_list(repo_root: Path) -> tuple[str, ...]:
         _assert_ordinary_path(root, relative)
         present.append(relative)
     return tuple(present)
+
+
+def _extra_engine_files(root: Path) -> tuple[str, ...]:
+    """The template's own extra engine files, preceded by the list file itself; none when it is absent."""
+    list_path = root / ENGINE_EXTRA_FILES_LIST
+    if not list_path.exists() and not list_path.is_symlink():
+        return ()
+    _assert_ordinary_path(root, ENGINE_EXTRA_FILES_LIST)
+    try:
+        text = list_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ReleaseCapsuleError(f"engine extra file list is unreadable: {error}") from error
+    extras: list[str] = []
+    for line in text.splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        relative = _safe_relative(entry, "engine extra file")
+        if relative in WORKFLOW_ENGINE_FILES or relative in ENGINE_HELPER_FILES or relative in extras:
+            raise ReleaseCapsuleError(f"engine extra file is listed twice: {relative}")
+        extras.append(relative)
+    return (ENGINE_EXTRA_FILES_LIST, *extras)
 
 
 def _engine_digest_for_files(repo_root: Path, files: Sequence[str]) -> str:

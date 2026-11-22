@@ -367,8 +367,9 @@ Feature capture reads one stored unit per capture: a package or type (specificat
 and body), or one trigger, procedure or function. Add supported views to
 their own feature files. Destructive DDL (`DROP`, `RENAME`, `TRUNCATE`) and
 anything the feature DDL forms refuse stay in dated migrations.
-Guarded DEV apply from feature files is planned. Until then, qualify selected
-source through the [current DEV workflow](feature-releases.md#scope-and-current-dev-workflow).
+Apply feature files to DEV with the guarded `feature apply --prepare` and
+`feature apply --execute-plan` route described in
+[feature releases](feature-releases.md#scope-and-current-dev-workflow).
 
 ## Starting a code migration from DEV
 

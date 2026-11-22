@@ -1507,6 +1507,21 @@ class PublishAppCliTests(unittest.TestCase):
             self.assertIn("Confirmed by --yes and --confirm-target PRODDB_UNIQUE; the interactive prompt was skipped.", output)
             self.assertTrue(sql_log.exists())
 
+    def test_staging_and_production_success_leave_no_unverified_import_evidence(self) -> None:
+        # B3: the import flag was cleared only in the DEV lock block, so every verified staging or production
+        # publish warned "unverified import diagnostics retained" and left its scratch/apex-publish-* folder.
+        for environment, extra in (("staging", ("-y",)), ("prod", ("-y", "--confirm-target", "PRODDB_UNIQUE"))):
+            with self.subTest(environment=environment), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                runner, sql_log, env = self.make_promotion_fixture(root, environment)
+                result = self.run_promotion(runner, env, root, "--env", environment, *extra)
+                stderr = result.stderr.decode("utf-8", "replace")
+
+                self.assertEqual(result.returncode, 0, stderr)
+                self.assertTrue(sql_log.exists())
+                self.assertNotIn("unverified import diagnostics retained", stderr)
+                self.assertEqual([], sorted(str(path) for path in root.rglob("apex-publish*") if path.is_dir()))
+
     def test_confirm_target_mismatch_imports_nothing_on_production(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

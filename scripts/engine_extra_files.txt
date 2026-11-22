@@ -1,0 +1,14 @@
+# Runtime files of this template that the shared release_capsule.py lists do not name.
+# They join the capsule engine digest, so staging and production cannot run different
+# deployment code under one capsule. One repository-relative path per line.
+scripts/apex_compatibility.py
+scripts/no_application_lock.sql
+scripts/verify_apex_release.sql
+scripts/verify_deployment_state.sql
+scripts/apexlang_diff.py
+scripts/apexlang_normalization.py
+scripts/source_evidence.py
+scripts/source_provenance.py
+scripts/page_lock_state.sql
+scripts/record_export_state.py
+scripts/rehearsal_metrics.py

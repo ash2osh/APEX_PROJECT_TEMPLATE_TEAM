@@ -248,6 +248,24 @@ class FeaturePrepareTests(unittest.TestCase):
         self.assertFalse(state["coverage"]["ownerComplete"])
         self.assertTrue(state["coverage"]["selectedScopeComplete"])
 
+    def test_acting_as_without_dba_tab_privs_refuses_grant_checkpoint(self) -> None:
+        # B2 / Review Focus 5: when an acting-as login cannot read DBA_TAB_PRIVS, the capture marks the grant
+        # sections unavailable; prepare refuses with the reason instead of a generic incomplete-capture error.
+        from scripts import feature_release
+
+        for section in ("object-grants", "feature-synonym-access"):
+            catalog = {
+                "identity": IDENTITY_FIELDS,
+                "coverage": {"sections": {name: {"complete": True} for name in feature_release.SELECTED_SECTIONS}},
+                "sections": {section_name: [] for section_name in feature_release.STRUCTURAL_SECTIONS},
+                "unavailable": {section: "visibility requires owner session, DBA capture or SELECT on DBA_TAB_PRIVS"},
+            }
+            with self.subTest(section=section), \
+                 patch.object(feature_release.compare_schema, "capture_environment_catalog", return_value=catalog), \
+                 self.assertRaisesRegex(feature_release.FeatureReleaseError,
+                                        f"cannot read {section}.*grant checks need SELECT on DBA_TAB_PRIVS"):
+                feature_release.capture_selected_state(self._target("staging"), self.checkpoint, self.root / f"scratch/{section}")
+
     def test_selected_trigger_validity_uses_database_object_status(self) -> None:
         # ASHARIF 2026-10-28: validity comes from ALL_OBJECTS status, independently of trigger enablement.
         from scripts import feature_release
@@ -673,7 +691,11 @@ class FeaturePrepareTests(unittest.TestCase):
         def capture_state(target, _checkpoint, _run_dir):
             return staging_states.pop(0) if target.environment == "staging" else production_state
 
+        def observe_app_target(target, _run_dir):
+            return dict(IDENTITY_FIELDS, db_name=target.environment.upper(), db_unique_name=f"{target.environment.upper()}_UNIQUE")
+
         with patch.object(feature_release.release_capsule, "load_capsule", return_value=self.capsule), \
+             patch.object(feature_release.rollout, "_observe_target_identity", side_effect=observe_app_target), \
              patch.object(feature_release, "capture_selected_state", side_effect=capture_state):
             staging = feature_release.prepare_target(self.root, self.capsule, "staging", environ=self._environment("staging"))
             changed_before_state = feature_release.prepare_target(self.root, self.capsule, "staging", environ=self._environment("staging"))
@@ -688,6 +710,23 @@ class FeaturePrepareTests(unittest.TestCase):
         self.assertNotEqual(staging.plan_digest, changed_descriptor.plan_digest)
         self.assertIn("app:100", staging.targets)
         self.assertNotEqual(staging.targets["app:100"]["descriptorSha256"], changed_descriptor.targets["app:100"]["descriptorSha256"])
+        # X1: the application target records the identity it was prepared against, so --confirm-target and
+        # production can confirm it like any other prepared target.
+        self.assertEqual(staging.targets["app:100"]["observed"]["db_unique_name"], "STAGING_UNIQUE")
+        self.assertEqual(production.targets["app:100"]["observed"]["db_unique_name"], "PROD_UNIQUE")
+        reloaded = feature_release.load_target_plan(self.root, self.capsule, "staging")
+        self.assertEqual(reloaded.targets["app:100"]["observed"], changed_descriptor.targets["app:100"]["observed"])
+
+        plan_path = self.root / "scratch" / "feature-release-plans" / "staging" / f"{self.capsule.payload_digest}.json"
+        document = json.loads(plan_path.read_text(encoding="utf-8"))
+        del document["targets"]["app:100"]["observed"]
+        document.pop("planDigest")
+        digest_document = {key: value for key, value in document.items() if key != "reviewPaths"}
+        document["planDigest"] = feature_release._sha256(feature_release._canonical_bytes(digest_document))
+        plan_path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with patch.object(feature_release, "_validate_review_artifacts"), \
+             self.assertRaisesRegex(feature_release.FeatureReleaseError, "application 100 prepared target identity is incomplete"):
+            feature_release.load_target_plan(self.root, self.capsule, "staging")
 
     def test_auxiliary_target_bindings_use_independent_environment_profiles(self) -> None:
         from scripts import feature_release
@@ -1565,6 +1604,130 @@ class FeaturePrepareTests(unittest.TestCase):
         plan = self._prepare(self.checkpoint, state)
 
         self.assertTrue(plan.checkpoint_guards[0]["sourceGuards"][0]["noOp"])
+
+
+class TriggerStateClauseTests(unittest.TestCase):
+    """E7: expected trigger source equals ALL_SOURCE, which drops the header's ENABLE/DISABLE clause.
+
+    The expected lines are the DBA_SOURCE text read live on 23ai (2026-11-22) for the same three triggers.
+    """
+
+    @staticmethod
+    def _lines(sql: str, name: str) -> list[str]:
+        from scripts import feature_release
+
+        raw = sql.encode("utf-8")
+        item = FeatureInput(
+            f"features/probe/APP_CODE/triggers/{name.lower()}.sql", raw, hashlib.sha256(raw).hexdigest(),
+            ("APP_CODE", "TRIGGER", name), "stored-source",
+        )
+        return feature_release._stored_source(item)[0]["lines"]
+
+    def test_trigger_header_enable_line_matches_all_source(self) -> None:
+        lines = self._lines(
+            "CREATE OR REPLACE TRIGGER APP_CODE.TRG_STANDALONE\nBEFORE INSERT ON APP_CODE.T\nFOR EACH ROW\nENABLE\n"
+            "BEGIN NULL; END;\n/\n", "TRG_STANDALONE",
+        )
+        self.assertEqual(
+            ["TRIGGER APP_CODE.TRG_STANDALONE\n", "BEFORE INSERT ON APP_CODE.T\n", "FOR EACH ROW\n", "BEGIN NULL; END;\n"],
+            lines,
+        )
+
+    def test_inline_disable_joins_the_next_line_as_all_source_does(self) -> None:
+        lines = self._lines(
+            "CREATE OR REPLACE TRIGGER APP_CODE.TRG_INLINE BEFORE INSERT ON APP_CODE.T FOR EACH ROW DISABLE\n"
+            "BEGIN NULL; END;\n/\n", "TRG_INLINE",
+        )
+        self.assertEqual(["TRIGGER APP_CODE.TRG_INLINE BEFORE INSERT ON APP_CODE.T FOR EACH ROW BEGIN NULL; END;\n"], lines)
+
+    def test_compound_trigger_disable_line_is_dropped(self) -> None:
+        lines = self._lines(
+            "CREATE OR REPLACE TRIGGER APP_CODE.TRG_COMPOUND\nFOR INSERT ON APP_CODE.T\nDISABLE\nCOMPOUND TRIGGER\n"
+            "  BEFORE STATEMENT IS BEGIN NULL; END BEFORE STATEMENT;\nEND TRG_COMPOUND;\n/\n", "TRG_COMPOUND",
+        )
+        self.assertEqual("COMPOUND TRIGGER\n", lines[2])
+        self.assertNotIn("DISABLE\n", lines)
+
+    def test_trigger_body_disable_word_is_kept(self) -> None:
+        lines = self._lines(
+            "CREATE OR REPLACE TRIGGER APP_CODE.TRG_BODY\nBEFORE INSERT ON APP_CODE.T\nFOR EACH ROW\n"
+            "BEGIN\n  -- DISABLE the flag, then ENABLE it\n  :NEW.ENABLE_FLAG := 'N';\nEND;\n/\n", "TRG_BODY",
+        )
+        self.assertIn("  -- DISABLE the flag, then ENABLE it\n", lines)
+        self.assertIn("  :NEW.ENABLE_FLAG := 'N';\n", lines)
+        self.assertEqual(7, len(lines))
+
+
+class RevalidationViewTests(unittest.TestCase):
+    """E4/E6: a later checkpoint's revalidation ignores only this capsule's own earlier effects."""
+
+    @staticmethod
+    def _code(name: str, status: str = "VALID", source_hash: str = "h1", object_type: str = "PACKAGE BODY") -> dict:
+        return {"type": object_type, "name": name, "status": status, "line_count": 10, "source_hash": source_hash}
+
+    @staticmethod
+    def _capsule(*checkpoints):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(checkpoints=tuple(
+            SimpleNamespace(schema=schema, inputs=tuple(SimpleNamespace(unit=unit) for unit in units))
+            for schema, units in checkpoints
+        ))
+
+    def _compare(self, fresh: dict, guard: dict, earlier=frozenset(), checkpoint: int = 2) -> bool:
+        from scripts import feature_release
+
+        fresh_view, guard_view = feature_release._revalidation_view(fresh, guard, earlier, checkpoint)
+        return feature_release._canonical_bytes(fresh_view) == feature_release._canonical_bytes(guard_view)
+
+    def test_status_flip_from_earlier_ddl_does_not_refuse_next_checkpoint(self) -> None:
+        guard = {"stored-code": [self._code("DEPENDENT")], "invalid-objects": []}
+        fresh = {
+            "stored-code": [self._code("DEPENDENT", status="INVALID")],
+            "invalid-objects": [{"type": "PACKAGE BODY", "name": "DEPENDENT", "status": "INVALID"}],
+        }
+        self.assertTrue(self._compare(fresh, guard))
+
+    def test_view_and_trigger_validity_flips_are_tolerated(self) -> None:
+        guard = {
+            "views": [{"name": "V1", "status": "VALID", "line_count": 3, "source_hash": "v"}],
+            "triggers": [{"name": "T1", "table_name": "T", "status": "ENABLED", "object_status": "VALID", "source_hash": "t"}],
+        }
+        fresh = {
+            "views": [{"name": "V1", "status": "INVALID", "line_count": 3, "source_hash": "v"}],
+            "triggers": [{"name": "T1", "table_name": "T", "status": "ENABLED", "object_status": "INVALID", "source_hash": "t"}],
+        }
+        self.assertTrue(self._compare(fresh, guard))
+
+    def test_unit_rewritten_by_earlier_checkpoint_is_excluded_from_revalidation(self) -> None:
+        from scripts import feature_release
+
+        capsule = self._capsule(
+            ("APP_CODE", [("APP_CODE", "PACKAGE", "WRITTEN")]),
+            ("APP_DATA", [("APP_DATA", "PACKAGE", "OTHER_SCHEMA")]),
+            ("APP_CODE", [("APP_CODE", "PACKAGE", "CURRENT")]),
+        )
+        earlier = feature_release._earlier_capsule_units(capsule, 3, "APP_CODE")
+        self.assertEqual(earlier, frozenset({("PACKAGE", "WRITTEN")}))
+        guard = {"stored-code": [self._code("WRITTEN", object_type="PACKAGE"), self._code("WRITTEN")]}
+        fresh = {"stored-code": [
+            self._code("WRITTEN", source_hash="new", object_type="PACKAGE"), self._code("WRITTEN", source_hash="new"),
+        ]}
+        self.assertTrue(self._compare(fresh, guard, earlier, checkpoint=3))
+
+    def test_real_drift_still_refuses(self) -> None:
+        guard = {"stored-code": [self._code("BYSTANDER")]}
+        changed_source = {"stored-code": [self._code("BYSTANDER", source_hash="someone-else")]}
+        self.assertFalse(self._compare(changed_source, guard, frozenset({("PACKAGE", "WRITTEN")})))
+        changed_and_invalid = {"stored-code": [self._code("BYSTANDER", status="INVALID", source_hash="someone-else")]}
+        self.assertFalse(self._compare(changed_and_invalid, guard))
+        newly_valid = {"stored-code": [self._code("BYSTANDER")]}
+        self.assertFalse(self._compare(newly_valid, {"stored-code": [self._code("BYSTANDER", status="INVALID")]}))
+
+    def test_status_flip_on_first_checkpoint_still_refuses(self) -> None:
+        guard = {"stored-code": [self._code("DEPENDENT")]}
+        fresh = {"stored-code": [self._code("DEPENDENT", status="INVALID")]}
+        self.assertFalse(self._compare(fresh, guard, checkpoint=1))
 
 
 if __name__ == "__main__":

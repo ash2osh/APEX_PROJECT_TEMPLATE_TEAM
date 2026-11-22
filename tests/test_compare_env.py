@@ -838,6 +838,33 @@ class EnvironmentComparisonTests(unittest.TestCase):
         self.assertIn("add_unavailable('object-grants',", acting_as)
         self.assertLess(acting_as.index("FROM dba_tab_privs"), acting_as.index("add_unavailable('object-grants',"))
 
+    def test_feature_synonym_access_uses_dba_tab_privs_when_acting_as(self) -> None:
+        # B2: like add_object_grants, the synonym-access section must see a grant on another schema's table when
+        # the login acts as the schema; ALL_TAB_PRIVS hides it there. Owner sessions keep ALL_TAB_PRIVS.
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        start = sql.index("IF NOT c_dba_mode AND SYS_CONTEXT('USERENV', 'SESSION_USER') = c_schema THEN")
+        block = sql[start:sql.index("END IF;", sql.index("add_unavailable('feature-synonym-access',", start))]
+        owner_branch, other_branch = block.split("ELSE\n", 1)
+        self.assertIn("JOIN all_tab_privs p ON p.table_schema = s.table_owner", owner_branch)
+        self.assertIn("JOIN dba_tab_privs p ON p.owner = s.table_owner", other_branch)
+        self.assertNotIn("all_tab_privs", other_branch)
+        self.assertIn("IF SQLCODE != -942 THEN RAISE; END IF;", other_branch)
+        self.assertEqual(1, sql.count("add_query_section('feature-synonym-access', q'~\n") - sql.count("JOIN dba_tab_privs p ON p.owner = s.table_owner"))
+
+    def test_stored_code_pages_count_emitted_rows(self) -> None:
+        # B1: units without visible source are skipped, so pages must close on emitted rows; counting cursor rows
+        # left a short page before the final one, which _validate_page_counts refuses on large schemas.
+        sql = (ROOT / "scripts" / "compare_env_catalog.sql").read_text(encoding="utf-8")
+        start = sql.index("PROCEDURE add_stored_code IS")
+        body = sql[start:sql.index("\n  END;", start)]
+        self.assertNotIn("l_fetched", body)
+        self.assertNotIn("OFFSET l_offset ROWS", body)
+        emitted = body.index("l_page_count := l_page_count + 1;")
+        close = body.index("IF l_page_count = c_page_size THEN", emitted)
+        self.assertLess(close, body.index("END IF;\n        END IF;", emitted) + 1)
+        self.assertTrue(body.rstrip().endswith("l_coverage_sections.put('stored-code', l_page);"))
+        self.assertIn("    l_pages.append(l_page_count);\n    l_sections.put('stored-code', l_rows);", body)
+
     def test_stored_code_and_views_find_wanted_names_first(self) -> None:
         # A per-row scope test over every ALL_SOURCE line took 43 s for one package, and over
         # every view 11 s. Both procedures now find the wanted names first and join them back.
