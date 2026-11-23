@@ -10,6 +10,11 @@ fi
 # A present .env is still loaded the way the real run loads it, so PROD_* and STAGING_*
 # reach the frozen-target planning. Without a .env the dry run runs as before.
 for rollout_argument in "$@"; do
+  case "$rollout_argument" in
+    --retry-release-tag|--retry-release-tag=*)
+      exec python3 "$(dirname "${BASH_SOURCE[0]}")/rollout.py" "$@"
+      ;;
+  esac
   if [ "$rollout_argument" = "--dry-run" ]; then
     REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"

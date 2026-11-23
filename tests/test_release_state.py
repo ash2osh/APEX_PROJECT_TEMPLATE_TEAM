@@ -729,6 +729,34 @@ class ReleaseStateTests(unittest.TestCase):
         run = next(row for row in self.index()["rollouts"] if row["runId"] == run_id)
         self.assertIn(state.target_scope_from_identity(self.MIGRATION_IDENTITY), run["targetScopes"])
 
+    def test_start_rollout_includes_every_prepared_application_target_scope(self) -> None:
+        state = self.state_module()
+        capsule = self.make_capsule()
+        capsule.root.mkdir(parents=True, exist_ok=True)
+        (capsule.root / "capsule.json").write_text(json.dumps({"payloadDefinition": {"steps": [
+            {"type": "feature-migrate", "schema": "APP_CODE", "inputs": []},
+            {"type": "feature-migrate", "schema": "APP_CODE", "inputs": []},
+            {"type": "app-deploy", "appId": 100},
+        ]}}, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        app_identity = dict(
+            IDENTITY, db_unique_name="APP_STAGE_UNIQUE", container_id="4", container_name="APP_STAGE_PDB",
+            current_schema="APP_PARSING",
+        )
+        plan = self.make_plan()
+        plan.targets["app:100"] = {
+            "workspace": "TEAM", "schema": "APP_PARSING", "connection": "stage-app-alias",
+            "expectedUser": "APP_CODE", "descriptorPath": "apps/APP_CODE/100/deployments/staging.json",
+            "descriptorSha256": "c" * 64, "observed": app_identity,
+        }
+        run_id = self.start_rollout(capsule, plan)
+        run = next(row for row in self.index()["rollouts"] if row["runId"] == run_id)
+        app_scope = state.target_scope_from_identity(app_identity)
+        self.assertIn(app_scope, run["targetScopes"])
+
+        plan.targets.pop("app:100")
+        with self.assertRaisesRegex(state.ReleaseStateError, "every application deployment"):
+            self.start_rollout(capsule, plan)
+
     def test_auxiliary_target_scope_refuses_a_migrate_binding_that_is_not_the_frozen_one(self) -> None:
         state = self.state_module()
         step = {"type": "migrate", "folders": [self.MIGRATION_FOLDER]}

@@ -180,8 +180,10 @@ owner-only commands retain their owner-login checks. See
   tag, which a successful production rollout creates); review it before freezing.
   Make a staging copy of production inert with `staging-neutralize` before any
   rehearsal write there; its `--apply` follows the same target-name rule as `migrate`.
-  After restoring staging, archive this checkout's release state for it with `rehearsal-reset --env staging`
-  (`--apply` follows the same target-name rule).
+  Before restoring staging, use `rehearsal-reset --env staging --begin-restore` with an operation ID to invalidate
+  the previous staging proof in the shared registry. After the restore, use `rehearsal-reset --env staging --apply`
+  with the same operation ID to archive local evidence and activate a fresh proof generation. Both state changes
+  follow the staging target-name and acknowledgment rules.
   See [docs/feature-releases.md](docs/feature-releases.md).
 - **Dated migrations for one-time changes:** Use them for schema changes,
   backfills, seed data, data fixes, and ordered transitions that require an

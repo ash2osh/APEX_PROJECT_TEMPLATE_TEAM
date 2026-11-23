@@ -179,6 +179,7 @@ def run(
     *,
     input_text: str = "",
     timeout: float | None = None,
+    deadline: float | None = None,
     output_limit_bytes: int | None = None,
     cancel_event: threading.Event | None = None,
     **popen_options: Any,
@@ -197,6 +198,7 @@ def run(
             command,
             input_text=input_text,
             timeout=timeout,
+            deadline=deadline,
             output_limit_bytes=output_limit_bytes,
             cancel_event=cancel_event,
             console_cancel_event=control_event.event,
@@ -211,16 +213,23 @@ def _run_with_control_event(
     *,
     input_text: str,
     timeout: float | None,
+    deadline: float | None,
     output_limit_bytes: int | None,
     cancel_event: threading.Event | None,
     console_cancel_event: threading.Event,
     **popen_options: Any,
 ) -> subprocess.CompletedProcess:
+    deadline = (time.monotonic() + timeout if timeout is not None else None) if deadline is None else deadline
+    if cancel_event is not None and cancel_event.is_set():
+        raise Cancelled("")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise subprocess.TimeoutExpired(command, timeout)
     if output_limit_bytes is not None:
         return _run_bounded(
             command,
             input_text=input_text,
             timeout=timeout,
+            deadline=deadline,
             output_limit_bytes=output_limit_bytes,
             cancel_event=cancel_event,
             console_cancel_event=console_cancel_event,
@@ -231,7 +240,6 @@ def _run_with_control_event(
     except OSError:
         job = None
     process = subprocess.Popen(command, stdin=subprocess.PIPE, **popen_options)
-    deadline = None if timeout is None else time.monotonic() + timeout
     try:
         if job is not None:
             try:
@@ -270,13 +278,18 @@ def _run_bounded(
     *,
     input_text: str,
     timeout: float | None,
+    deadline: float | None = None,
     output_limit_bytes: int,
     cancel_event: threading.Event | None = None,
     console_cancel_event: threading.Event | None = None,
     **popen_options: Any,
 ) -> subprocess.CompletedProcess:
     """Capture a fixed byte budget and terminate the Windows job as soon as it overflows."""
-    deadline = None if timeout is None else time.monotonic() + timeout
+    deadline = (time.monotonic() + timeout if timeout is not None else None) if deadline is None else deadline
+    if cancel_event is not None and cancel_event.is_set():
+        raise Cancelled("")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise subprocess.TimeoutExpired(command, timeout)
     text_mode = bool(popen_options.pop("text", False))
     encoding = popen_options.pop("encoding", None) or "utf-8"
     errors = popen_options.pop("errors", None) or "replace"
@@ -296,6 +309,12 @@ def _run_bounded(
                 job.close()
                 job = None
         assert process.stdin is not None and process.stdout is not None
+        if cancel_event is not None and cancel_event.is_set():
+            _terminate_tree(process, job)
+            raise Cancelled("")
+        if deadline is not None and time.monotonic() >= deadline:
+            _terminate_tree(process, job)
+            raise subprocess.TimeoutExpired(command, timeout)
         process.stdin.write(input_text.encode(encoding, errors))
         process.stdin.close()
         captured = bytearray()

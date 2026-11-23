@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from . import release_capsule
+from . import release_capsule, release_proof_generation
 from .path_utils import relative_to_root
 
 if TYPE_CHECKING:
@@ -31,16 +31,23 @@ def _completion_core_hash(report: Mapping) -> str:
 
 
 def _validate_completion_proof(capsule: ReleaseCapsule, report: Mapping, *, environment: str) -> dict:
-    proof_fields = {
+    base_proof_fields = {
         "schemaVersion", "runId", "environment", "sourceCommit", "payloadDigest", "engineDigest",
         "planDigest", "targetScopes", "state", "databaseState", "steps", "checkpointVerificationIds",
         "checkpointVerifications", "recoveryLinks", "budget", "finalReportPath", "finalReportSha256",
     }
     proof = report.get("completionProof")
-    if not isinstance(proof, Mapping) or set(proof) != proof_fields:
+    if not isinstance(proof, Mapping):
         raise release_state.ReleaseStateError("rollout completion proof is missing or malformed")
-    if type(proof["schemaVersion"]) is not int or proof["schemaVersion"] != 1:
+    schema_version = proof.get("schemaVersion")
+    if schema_version == 1 and environment == "prod":
+        proof_fields = base_proof_fields
+    elif schema_version == 2:
+        proof_fields = base_proof_fields | {"restoreGenerations"}
+    else:
         raise release_state.ReleaseStateError("rollout completion proof schemaVersion is unsupported")
+    if type(schema_version) is not int or set(proof) != proof_fields:
+        raise release_state.ReleaseStateError("rollout completion proof is missing or malformed")
     run_id = release_state._uuid(proof["runId"], "completion proof runId")
     if (
         proof["environment"] != environment or proof["state"] != "verified"
@@ -63,6 +70,21 @@ def _validate_completion_proof(capsule: ReleaseCapsule, report: Mapping, *, envi
     scope_keys = [release_state._canonical_bytes(scope) for scope in clean_scopes]
     if scope_keys != sorted(scope_keys) or len(scope_keys) != len(set(scope_keys)):
         raise release_state.ReleaseStateError("completion proof target scopes must be unique and ordered")
+
+    if schema_version == 2:
+        try:
+            proof_generations = release_proof_generation._generation_rows(proof["restoreGenerations"])
+            report_generations = release_proof_generation._generation_rows(report.get("restoreGenerations"))
+        except release_proof_generation.ReleaseProofGenerationError as error:
+            raise release_state.ReleaseStateError(f"completion proof restore generations are invalid: {error}") from error
+        if proof_generations != report_generations:
+            raise release_state.ReleaseStateError("completion proof restore generations do not match the report")
+        if environment == "staging" and not proof_generations:
+            raise release_state.ReleaseStateError("staging completion proof has no restore generations")
+        if environment == "prod" and proof_generations:
+            raise release_state.ReleaseStateError("production completion proof cannot claim staging restore generations")
+    elif environment == "staging":
+        raise release_state.ReleaseStateError("historical staging proof has no current restore generation")
 
     try:
         capsule_document = release_capsule._read_capsule_json(Path(capsule.root) / "capsule.json")[0]

@@ -728,7 +728,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
     def _apply_consolidation_with_fake_sqlcl(self, initial_body: str, expected_trace: list[str], *, capsule=None, legacy=()) -> None:
         from dataclasses import replace
 
-        from scripts import feature_release, migrate, migration_checks
+        from scripts import feature_release, migrate, migration_checks, release_proof_generation
         from scripts.db_targets import Target
         from test_feature_runtime import SETTINGS
         from test_migrate_cli import FakeDatabase
@@ -739,6 +739,10 @@ class ReleaseCapsuleTests(unittest.TestCase):
         database.objects[("DISPATCH", "PACKAGE")] = {}
         database.objects[("DISPATCH", "PACKAGE BODY")] = {}
         identity = database.identity()
+        registry = self.root / "scratch" / "proof-generations.json"
+        registry.parent.mkdir(exist_ok=True)
+        if not registry.exists():
+            release_proof_generation.initialize_baseline(registry, identity)
         state = {
             "schema": "APP_CODE", "identity": identity,
             "sourceUnits": {"PACKAGE BODY:DISPATCH": {
@@ -802,6 +806,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
         env = {
             "STAGING_MIGRATION_SCHEMA": target.schema, "STAGING_MIGRATION_EXPECTED_USER": target.expected_user,
             "STAGING_MIGRATION_SQLCL_CONNECTION": target.connection,
+            "APEX_RELEASE_PROOF_REGISTRY": str(registry),
         }
         output = StringIO()
         with patch.dict(os.environ, env), \
@@ -832,7 +837,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
         self.assertEqual((version, data), (3, 3))
 
     def test_final_body_guard_refuses_after_unmodeled_migration_replacement(self) -> None:
-        from scripts import feature_release, migration_checks
+        from scripts import feature_release, migration_checks, release_proof_generation
         from test_feature_runtime import IDENTITY, SETTINGS
 
         def body(version: int) -> str:
@@ -869,7 +874,11 @@ class ReleaseCapsuleTests(unittest.TestCase):
             "structural": {section: [] for section in feature_release.STRUCTURAL_SECTIONS},
             "coverage": {"ownerComplete": False, "selectedScopeComplete": True},
         }
+        registry = self.root / "scratch" / "proof-generations.json"
+        registry.parent.mkdir(exist_ok=True)
+        release_proof_generation.initialize_baseline(registry, IDENTITY)
         env = {
+            "APEX_RELEASE_PROOF_REGISTRY": str(registry),
             "STAGING_MIGRATION_SCHEMA": "APP_CODE", "STAGING_MIGRATION_EXPECTED_USER": "APP_CODE",
             "STAGING_MIGRATION_SQLCL_CONNECTION": "staging-conn",
         }

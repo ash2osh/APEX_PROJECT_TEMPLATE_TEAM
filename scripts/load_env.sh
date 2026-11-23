@@ -3,6 +3,11 @@
 
 project_env_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PROJECT_ENV_FILE="${1:-${PROJECT_ENV_FILE:-$project_env_repo_root/.env}}"
+# The SQLcl pool controls are the only project-file values an operator may override explicitly per process.
+project_env_inherited_pool_sessions_present=${SQLCL_PERSISTENT_SESSIONS+x}
+project_env_inherited_pool_sessions=${SQLCL_PERSISTENT_SESSIONS-}
+project_env_inherited_pool_readers_present=${SQLCL_POOL_MAX_READERS+x}
+project_env_inherited_pool_readers=${SQLCL_POOL_MAX_READERS-}
 unset PROD_SQLCL_CONNECTION PROD_EXPECTED_USER PROD_SCHEMA
 unset STAGING_SQLCL_CONNECTION STAGING_EXPECTED_USER STAGING_SCHEMA
 unset ORDS_SCHEMA ORDS_SQLCL_CONNECTION ORDS_EXPECTED_USER
@@ -191,6 +196,22 @@ while IFS= read -r project_env_line || [ -n "$project_env_line" ]; do
   export "$project_env_key=$project_env_value"
   project_env_seen_keys+=("$project_env_key")
 done < "$PROJECT_ENV_FILE"
+
+# An explicitly supplied process value wins over the project file for these two runtime controls.
+if [ "$project_env_inherited_pool_sessions_present" = x ]; then
+  export "SQLCL_PERSISTENT_SESSIONS=$project_env_inherited_pool_sessions"
+fi
+if [ "$project_env_inherited_pool_readers_present" = x ]; then
+  export "SQLCL_POOL_MAX_READERS=$project_env_inherited_pool_readers"
+fi
+if [ "${SQLCL_PERSISTENT_SESSIONS+x}" = x ] && [ "$SQLCL_PERSISTENT_SESSIONS" != 0 ] && [ "$SQLCL_PERSISTENT_SESSIONS" != 1 ]; then
+  project_env_fail "SQLCL_PERSISTENT_SESSIONS must be 1 (persistent SQLcl sessions) or 0 (one SQLcl per script)"
+  return 1 2>/dev/null || exit 1
+fi
+if [ "${SQLCL_POOL_MAX_READERS+x}" = x ] && ! [[ "$SQLCL_POOL_MAX_READERS" =~ ^[1-4]$ ]]; then
+  project_env_fail "SQLCL_POOL_MAX_READERS must be 1, 2, 3 or 4"
+  return 1 2>/dev/null || exit 1
+fi
 
 # DEV shorthand: DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER are all or none. A profile
 # with none of its own three keys takes the DEV values, and its prefixes default to '*' when absent.
@@ -682,6 +703,8 @@ unset project_env_union project_env_multi project_env_items project_env_item
 unset project_env_known project_env_union_item project_env_selected_known project_env_count_items
 unset project_env_dev_schema project_env_multi_mapping project_env_ords_present project_env_ords_schemas project_env_ords_users project_env_ords_index
 unset project_env_repo_root project_env_apex_release project_env_dev_present
+unset project_env_inherited_pool_sessions_present project_env_inherited_pool_sessions
+unset project_env_inherited_pool_readers_present project_env_inherited_pool_readers
 # project_env_fail and project_env_require_single stay defined for callers that
 # refuse an ambiguous schema; the parsing helpers do not.
 unset -f project_env_validate_unique_csv project_env_csv_shape_ok project_env_split_csv \

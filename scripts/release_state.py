@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from . import migration_attempts, release_capsule, release_ownership
+from . import migration_attempts, release_capsule, release_ownership, release_proof_generation
 from .migration_checks import complete_observed_identity
 
 if TYPE_CHECKING:
@@ -63,13 +63,16 @@ VERIFICATION_FIELDS = {
     "evidence", "objectSeconds", "sessionCount",
 }
 RECOVERY_LINK_FIELDS = {"oldAttemptId", "verificationId", "reconciliationEvidence", "linkedAt"}
+RELEASE_TAG_FIELDS = {"state", "tagName", "message", "updatedAt"}
+RELEASE_TAG_STATES = {"created", "failed", "skipped"}
+RELEASE_TAG_RE = re.compile(r"release/[0-9]{4}-[0-9]{2}-[0-9]{2}-r[0-9]{3}\Z", re.ASCII)
 ROLLOUT_FIELDS = {
     "runId", "environment", "sourceCommit", "payloadDigest", "engineDigest", "planDigest",
     "targetScopes", "state", "databaseState", "startedAt", "finishedAt", "expectedCheckpointCount",
     "expectedStepCount", "steps", "checkpointVerificationIds", "budget", "finalReportPath", "finalReportSha256",
 }
 ROLLOUT_STATES = {"running", "verified", "failed", "unknown", "not-started"}
-ROLLOUT_OPTIONAL_FIELDS = {"reconciliation"}
+ROLLOUT_OPTIONAL_FIELDS = {"reconciliation", "releaseTag"}
 RECONCILIATION_FIELDS = {"acknowledgedAt", "acknowledgment", "priorState", "priorDatabaseState"}
 RECONCILIATION_OPTIONAL_FIELDS = {"acknowledgedBy"}
 RECONCILIATION_PRIOR_STATES = {"running", "unknown", "failed"}
@@ -84,7 +87,7 @@ NO_WRITE_REASONS = {
 REPORT_FIELDS = {
     "schemaVersion", "environment", "status", "databaseState", "payloadDigest",
     "engineDigest", "sourceCommit", "targetPlanDigest", "inputHashes", "objectBudget",
-    "localRunId", "completionProof",
+    "localRunId", "restoreGenerations", "completionProof",
 }
 OBJECT_BUDGET_FIELDS = {
     "seconds", "elapsedSeconds", "coverageComplete", "withinBudget",
@@ -552,6 +555,26 @@ def _validate_reconciliation(value: object, row: Mapping) -> dict:
     return result
 
 
+def _validate_release_tag(value: object) -> dict:
+    if not isinstance(value, Mapping) or set(value) != RELEASE_TAG_FIELDS:
+        raise ReleaseStateError("rollout releaseTag record is malformed")
+    result = dict(value)
+    if not isinstance(result["state"], str) or result["state"] not in RELEASE_TAG_STATES:
+        raise ReleaseStateError("rollout releaseTag state is invalid")
+    _timestamp(result["updatedAt"], "rollout releaseTag updatedAt")
+    if result["state"] == "created":
+        if not isinstance(result["tagName"], str) or RELEASE_TAG_RE.fullmatch(result["tagName"]) is None or result["message"] is not None:
+            raise ReleaseStateError("created rollout releaseTag must have a valid tag name and no error message")
+    elif result["tagName"] is not None:
+        raise ReleaseStateError("failed or skipped rollout releaseTag cannot name a tag")
+    elif result["state"] == "failed":
+        if not isinstance(result["message"], str) or not result["message"].strip() or len(result["message"]) > 4000:
+            raise ReleaseStateError("failed rollout releaseTag must have a bounded error message")
+    elif result["message"] is not None:
+        raise ReleaseStateError("skipped rollout releaseTag cannot have an error message")
+    return result
+
+
 def _validate_rollout(row: object) -> dict:
     if not isinstance(row, Mapping) or not ROLLOUT_FIELDS <= set(row) or set(row) - ROLLOUT_FIELDS - ROLLOUT_OPTIONAL_FIELDS:
         raise ReleaseStateError("rollout record has unsupported or missing fields")
@@ -613,6 +636,8 @@ def _validate_rollout(row: object) -> dict:
             raise ReleaseStateError("verified rollout lacks complete checkpoint, step, budget, or report evidence")
     if "reconciliation" in result:
         result["reconciliation"] = _validate_reconciliation(result["reconciliation"], result)
+    if "releaseTag" in result:
+        result["releaseTag"] = _validate_release_tag(result["releaseTag"])
     return result
 
 
@@ -1834,9 +1859,39 @@ def start_rollout(repo_root: Path, capsule: ReleaseCapsule, plan) -> str:
     }
     if supplied_auxiliary != expected_auxiliary:
         raise ReleaseStateError("rollout target plan must bind every SQL, ORDS or migration step exactly once")
+    expected_apps = {
+        f"app:{step['appId']}" for step in step_definitions if step.get("type") == "app-deploy"
+    }
+    supplied_apps = {
+        key for key in getattr(plan, "targets", {})
+        if isinstance(key, str) and key.startswith("app:")
+    }
+    if supplied_apps != expected_apps:
+        raise ReleaseStateError("rollout target plan must bind every application deployment exactly once")
     for number, step in enumerate(step_definitions, start=1):
         if step.get("type") in {"sql-script", "ords-import", "migrate"}:
             scopes.append(_auxiliary_target_scope(plan, number, step))
+        elif step.get("type") == "app-deploy":
+            key = f"app:{step['appId']}"
+            target = getattr(plan, "targets", {}).get(key)
+            expected_fields = {
+                "workspace", "schema", "connection", "expectedUser", "descriptorPath", "descriptorSha256", "observed",
+            }
+            if not isinstance(target, Mapping) or set(target) != expected_fields:
+                raise ReleaseStateError(f"rollout plan is missing the prepared application identity for {key}")
+            if any(not isinstance(target.get(field), str) or not target[field].strip() for field in (
+                "workspace", "schema", "connection", "expectedUser", "descriptorPath",
+            )):
+                raise ReleaseStateError(f"rollout plan application target {key} is incomplete")
+            _relative_path(target["descriptorPath"], f"application target {key} descriptor path")
+            _digest(target["descriptorSha256"], f"application target {key} descriptor hash")
+            identity = complete_observed_identity(target["observed"])
+            if identity is None or (
+                identity["session_user"].upper() != target["expectedUser"].upper()
+                or identity["current_schema"].upper() != target["schema"].upper()
+            ):
+                raise ReleaseStateError(f"rollout plan application identity for {key} is incomplete or inconsistent")
+            scopes.append(target_scope_from_identity(identity))
     unique_scopes = {_canonical_bytes(scope): scope for scope in scopes}
     target_scopes = [unique_scopes[key] for key in sorted(unique_scopes)]
     budget_seconds = getattr(capsule, "database_object_budget_seconds", None)
@@ -1909,7 +1964,7 @@ def start_rollout(repo_root: Path, capsule: ReleaseCapsule, plan) -> str:
     return run_id
 
 
-def finish_rollout(repo_root: Path, run_id: str, *, outcome: Mapping) -> None:
+def finish_rollout(repo_root: Path, run_id: str, *, outcome: Mapping, skip_release_tag: bool = False) -> None:
     """Persist a terminal run result; verified requires complete durable evidence."""
     root = _root(repo_root)
     _uuid(run_id, "rollout runId")
@@ -1924,6 +1979,8 @@ def finish_rollout(repo_root: Path, run_id: str, *, outcome: Mapping) -> None:
         row = next((item for item in index["rollouts"] if item["runId"] == run_id), None)
         if row is None or row["state"] != "running":
             raise ReleaseStateError("rollout run is missing or already terminal")
+        if skip_release_tag and (state != "verified" or row["environment"] != "prod"):
+            raise ReleaseStateError("tagging may be marked skipped only on verified production completion")
         steps = [_validate_step_outcome(item) for item in outcome["steps"]] if isinstance(outcome["steps"], list) else None
         verification_ids = outcome["checkpointVerificationIds"]
         if not isinstance(verification_ids, list):
@@ -1979,6 +2036,53 @@ def finish_rollout(repo_root: Path, run_id: str, *, outcome: Mapping) -> None:
             "finalReportPath": outcome["finalReportPath"],
             "finalReportSha256": outcome["finalReportSha256"],
         })
+        if skip_release_tag:
+            row["releaseTag"] = {
+                "state": "skipped", "tagName": None, "message": None, "updatedAt": row["finishedAt"],
+            }
+        return index
+
+    _atomic_update(root, update)
+
+
+def record_release_tag(
+    repo_root: Path,
+    run_id: str,
+    *,
+    state: str,
+    tag_name: str | None = None,
+    message: str | None = None,
+) -> None:
+    """Record tag creation separately from the immutable production completion report."""
+    root = _root(repo_root)
+    _uuid(run_id, "release-tag rollout runId")
+    if not isinstance(state, str) or state not in RELEASE_TAG_STATES:
+        raise ReleaseStateError("release-tag state must be created, failed, or skipped")
+    record = {
+        "state": state,
+        "tagName": tag_name,
+        "message": message,
+        "updatedAt": _utc_now(),
+    }
+    clean_record = _validate_release_tag(record)
+
+    def update(index: dict) -> dict:
+        row = next((item for item in index["rollouts"] if item["runId"] == run_id), None)
+        if row is None or row["environment"] != "prod" or row["state"] != "verified":
+            raise ReleaseStateError("release tag requires a durably verified production rollout")
+        previous = row.get("releaseTag")
+        if previous is not None:
+            if previous["state"] == "created":
+                if clean_record["state"] == "created" and previous["tagName"] == clean_record["tagName"]:
+                    return index
+                raise ReleaseStateError("a verified release tag record is immutable")
+            if previous["state"] == "skipped":
+                if clean_record["state"] == "skipped":
+                    return index
+                raise ReleaseStateError("release tagging was explicitly skipped for this production run")
+            if previous["state"] == clean_record["state"] and previous["message"] == clean_record["message"]:
+                return index
+        row["releaseTag"] = clean_record
         return index
 
     _atomic_update(root, update)
@@ -1988,8 +2092,15 @@ class AcknowledgmentError(ReleaseStateError):
     """The RECONCILE-RUN acknowledgment is missing or wrong; nothing was changed."""
 
 
-def validate_stage_proof(capsule: ReleaseCapsule, report: Mapping) -> None:
-    """Validate portable staging completion data for this exact frozen capsule."""
+def validate_stage_proof(
+    capsule: ReleaseCapsule,
+    report: Mapping,
+    *,
+    proof_registry_path: Path | str | None = None,
+) -> None:
+    """Validate staging completion and its current cross-checkout restore generation."""
+    if isinstance(report, Mapping) and report.get("environment") == "staging" and "restoreGenerations" not in report:
+        raise ReleaseStateError("historical staging proof has no restore generation; run a fresh staging rehearsal")
     if not isinstance(report, Mapping) or not REPORT_FIELDS.issubset(report):
         raise ReleaseStateError("stage report is missing required proof fields")
     if type(report.get("schemaVersion")) is not int or report["schemaVersion"] != 2:
@@ -2040,7 +2151,13 @@ def validate_stage_proof(capsule: ReleaseCapsule, report: Mapping) -> None:
         or included_migrations != expected_migrations
     ):
         raise ReleaseStateError("stage report object budget does not cover every capsule migration step")
-    _validate_completion_proof(capsule, report, environment="staging")
+    proof = _validate_completion_proof(capsule, report, environment="staging")
+    try:
+        release_proof_generation.assert_current_generations(
+            proof_registry_path, proof["restoreGenerations"], proof["targetScopes"],
+        )
+    except release_proof_generation.ReleaseProofGenerationError as error:
+        raise ReleaseStateError(f"staging restore-generation proof is stale or unavailable: {error}") from error
 
 
 # Imported last: release_cleanup reads release_state.<name> at call time. The moved names below are re-exported

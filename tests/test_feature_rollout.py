@@ -163,7 +163,7 @@ class FeatureRolloutTests(unittest.TestCase):
         )
 
     def _patches(self, *, environment="staging", steps=None):
-        from scripts import feature_release, release_capsule, release_state
+        from scripts import feature_release, release_capsule, release_cleanup, release_proof_generation, release_state
 
         manifest = self.manifest
         if environment == "prod":
@@ -196,6 +196,16 @@ class FeatureRolloutTests(unittest.TestCase):
             patch.object(feature_release, "load_target_plan", return_value=target_plan),
             patch.object(feature_release, "prepare_target", return_value=target_plan),
             patch.object(rollout_capsule, "_capsule_live_source_check"),
+            patch.object(
+                release_proof_generation, "capture_generations",
+                side_effect=lambda _path, scopes: [
+                    {"dbUniqueName": scope["dbUniqueName"], "containerId": scope["containerId"],
+                     "generationId": "00000000-0000-4000-8000-000000000001"}
+                    for scope in scopes
+                ],
+            ),
+            patch.object(release_proof_generation, "assert_current_generations"),
+            patch.object(release_cleanup, "_verify_local_completion"),
             patch.object(release_state, "_matching_capsules", return_value=[{
                 "path": self.capsule.root.relative_to(self.root).as_posix(),
                 "engineDigest": self.engine, "sourceCommit": self.source_commit,
@@ -654,7 +664,7 @@ class FeatureRolloutTests(unittest.TestCase):
         self._enter(self._patches(environment="prod"))
         stage_report = self.root / "scratch" / "stage-report.json"
         stage_report.parent.mkdir(parents=True, exist_ok=True)
-        stage_report.write_text("{}\n", encoding="utf-8")
+        stage_report.write_text(self._stub_stage_proof(), encoding="utf-8")
         observed = {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": "OTHER_UNIQUE"}
         stderr = io.StringIO()
         with patch.object(release_state, "validate_stage_proof"), patch.object(rollout, "_observe_target_identity", return_value=observed), \
@@ -674,7 +684,7 @@ class FeatureRolloutTests(unittest.TestCase):
         self._enter(self._patches(environment="prod"))
         stage_report = self.root / "scratch" / "stage-report.json"
         stage_report.parent.mkdir(parents=True, exist_ok=True)
-        stage_report.write_text("{}\n", encoding="utf-8")
+        stage_report.write_text(self._stub_stage_proof(), encoding="utf-8")
         observed = {field: "observed" for field in rollout.OBSERVED_IDENTITY_FIELDS} | {"db_unique_name": "DB_A"}
         result = SimpleNamespace(exit_code=2, database_state="not-started", object_seconds=0.0,
                                  session_count=0, evidence_paths=(), message="unexpected checkpoint")
@@ -890,7 +900,7 @@ class FeatureRolloutTests(unittest.TestCase):
         from scripts import release_state
         stage_report = self.root / "scratch" / "stage.json"
         stage_report.parent.mkdir(parents=True, exist_ok=True)
-        stage_report.write_text("{}\n", encoding="utf-8")
+        stage_report.write_text(self._stub_stage_proof(), encoding="utf-8")
         patches = list(self._patches(environment="prod"))
         patches.append(patch.object(release_state, "validate_stage_proof"))
         with ExitStack() as stack:
@@ -924,7 +934,7 @@ class FeatureRolloutTests(unittest.TestCase):
         from scripts import feature_release, release_state
         stage_report = self.root / "scratch" / "stage.json"
         stage_report.parent.mkdir(parents=True, exist_ok=True)
-        stage_report.write_text("{}\n", encoding="utf-8")
+        stage_report.write_text(self._stub_stage_proof(), encoding="utf-8")
         sql_path = self.root / "scripts" / "aux.sql"
         sql_path.parent.mkdir(parents=True, exist_ok=True)
         sql_path.write_text("SELECT 1 FROM dual;\n", encoding="utf-8")
@@ -1289,7 +1299,7 @@ class FeatureRolloutTests(unittest.TestCase):
 
         stage_path = self.root / "scratch" / "migration-only-staging.json"
         stage_path.parent.mkdir(parents=True, exist_ok=True)
-        stage_path.write_text('{"status":"success"}\n', encoding="utf-8")
+        stage_path.write_text(self._stub_stage_proof(), encoding="utf-8")
         status, report, _migrate = self._run_migration_release(
             self._migration_release_patches(environment="prod") + [patch.object(release_state, "validate_stage_proof")],
             migration_only=True, environment="prod", stage_report_path=stage_path, label="migration-only-prod",
@@ -1326,10 +1336,21 @@ class FeatureRolloutTests(unittest.TestCase):
         self.capsule = dataclasses.replace(self.capsule, source_commit=head)
         return head
 
+    @staticmethod
+    def _stub_stage_proof() -> str:
+        return json.dumps({"status": "success", "restoreGenerations": [], "completionProof": {"targetScopes": []}})
+
+    def _saved_tag(self, report):
+        from scripts import release_state
+
+        rows = release_state._load_index(self.root)["rollouts"]
+        run = next(row for row in rows if row["runId"] == report["localRunId"])
+        return run.get("releaseTag")
+
     def _stage_report(self) -> Path:
         stage_path = self.root / "scratch" / "release-tag-staging.json"
         stage_path.parent.mkdir(parents=True, exist_ok=True)
-        stage_path.write_text('{"status":"success"}\n', encoding="utf-8")
+        stage_path.write_text(self._stub_stage_proof(), encoding="utf-8")
         return stage_path
 
     def test_production_success_tags_the_shipped_commit_and_records_the_tag(self) -> None:
@@ -1342,7 +1363,7 @@ class FeatureRolloutTests(unittest.TestCase):
         )
         self.assertEqual(status, 0, report.get("error"))
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        tag = report["releaseTag"]
+        tag = self._saved_tag(report)["tagName"]
         self.assertEqual(tag, f"release/{today}-r001")
         self.assertNotIn("releaseTagWarning", report)
         self.assertEqual(self._git("tag", "--list", "release/*"), tag)
@@ -1364,7 +1385,7 @@ class FeatureRolloutTests(unittest.TestCase):
             migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-prod-moved",
         )
         self.assertEqual(status, 0, report.get("error"))
-        self.assertEqual(self._git("rev-parse", f"{report['releaseTag']}^{{commit}}"), shipped)
+        self.assertEqual(self._git("rev-parse", f"{self._saved_tag(report)['tagName']}^{{commit}}"), shipped)
 
     def test_a_second_production_tag_on_the_same_day_takes_the_next_number(self) -> None:
         from scripts import release_state
@@ -1377,7 +1398,7 @@ class FeatureRolloutTests(unittest.TestCase):
             migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-prod-second",
         )
         self.assertEqual(status, 0, report.get("error"))
-        self.assertEqual(report["releaseTag"], f"release/{today}-r002")
+        self.assertEqual(self._saved_tag(report)["tagName"], f"release/{today}-r002")
 
     def test_staging_success_never_creates_a_release_tag(self) -> None:
         self._git_at_capsule_commit()
@@ -1399,6 +1420,7 @@ class FeatureRolloutTests(unittest.TestCase):
             release_tag=False,
         )
         self.assertEqual(status, 0, report.get("error"))
+        self.assertEqual("skipped", self._saved_tag(report)["state"])
         self.assertNotIn("releaseTag", report)
         self.assertEqual(self._git("tag", "--list"), "")
 
@@ -1411,9 +1433,99 @@ class FeatureRolloutTests(unittest.TestCase):
             migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-prod-warned",
         )
         self.assertEqual(status, 0, report.get("error"))
-        self.assertIsNone(report["releaseTag"])
-        self.assertIn("release tag was not created", report["releaseTagWarning"])
+        self.assertIsNone(self._saved_tag(report)["tagName"])
+        self.assertIn("release tag was not created", self._saved_tag(report)["message"])
         self.assertEqual(report["status"], "success")
+
+    def test_failed_completion_leaves_no_production_tag(self) -> None:
+        from scripts import release_state
+
+        self._git_at_capsule_commit()
+        status, report, _migrate = self._run_migration_release(
+            self._migration_release_patches(environment="prod") + [
+                patch.object(release_state, "validate_stage_proof"),
+                patch.object(
+                    release_state, "_validate_completion_proof",
+                    side_effect=release_state.ReleaseStateError("injected proof refusal"),
+                ),
+            ],
+            migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-failed-proof",
+        )
+        self.assertEqual(2, status, report)
+        self.assertIn("injected proof refusal", report["error"])
+        self.assertEqual("", self._git("tag", "--list", "release/*"))
+
+    def test_staging_pause_keeps_the_reset_claim_until_the_next_checkpoint(self) -> None:
+        from scripts import feature_release, rehearsal_reset
+
+        steps = [self.steps[0], {"type": "pause", "message": "test pause"}, self.steps[1]]
+        self._enter(self._patches(steps=steps))
+        identity = self._observed_identity()
+        paused = []
+
+        def handle_pause(_prompt):
+            plan = rehearsal_reset.plan_reset(self.root, identity)
+            with self.assertRaisesRegex(rehearsal_reset.RehearsalResetError, "staging rollout or migration is active"):
+                rehearsal_reset.apply_reset(
+                    self.root, plan, identity, confirmed_by="fixture",
+                    operation_id="00000000-0000-4000-8000-000000000001",
+                )
+            paused.append(True)
+            return ""
+
+        def complete_checkpoint(*args, **kwargs):
+            return self._fake_checkpoint_result(args, kwargs, object_seconds=1.0)
+
+        with patch.object(rollout, "_snapshot"), \
+             patch.object(feature_release, "execute_checkpoint", side_effect=complete_checkpoint) as execute, \
+             patch("builtins.input", side_effect=handle_pause):
+            status = rollout.run_rollout(
+                self.manifest_path, "staging", repo_root=self.root, capsule_path=self.capsule_path,
+                report_path=self.root / "scratch" / "pause-reset", confirm=lambda _: True,
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(paused, [True])
+        self.assertEqual(execute.call_count, 2)
+
+    def test_production_rechecks_stage_generation_before_first_writer(self) -> None:
+        from scripts import release_proof_generation, release_state
+
+        status, report, migrate = self._run_migration_release(
+            self._migration_release_patches(environment="prod") + [
+                patch.object(release_state, "validate_stage_proof"),
+                patch.object(
+                    release_proof_generation, "assert_current_generations",
+                    side_effect=release_proof_generation.ReleaseProofGenerationError("restore started after preflight"),
+                ),
+            ],
+            migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="stale-stage-proof",
+        )
+
+        self.assertEqual(2, status)
+        self.assertIn("restore started after preflight", report["error"])
+        self.assertEqual("not-started", report["databaseState"])
+        migrate.assert_not_called()
+
+    def test_release_tag_retry_creates_one_tag_and_executes_no_steps(self) -> None:
+        from scripts import release_state
+
+        self._git_at_capsule_commit()
+        with patch.object(rollout_capsule, "_create_release_tag", return_value=(None, "injected tag failure")):
+            status, report, migrate = self._run_migration_release(
+                self._migration_release_patches(environment="prod") + [patch.object(release_state, "validate_stage_proof")],
+                migration_only=True, environment="prod", stage_report_path=self._stage_report(), label="tag-retry",
+            )
+        self.assertEqual(0, status, report)
+        self.assertEqual("failed", self._saved_tag(report)["state"])
+        migrate.assert_called_once()
+        evidence = self.root / report["reportFiles"]["json"]
+        saved = evidence.read_bytes()
+        with patch.object(rollout, "execute_step") as execute:
+            for _ in range(2):
+                self.assertEqual(0, rollout_capsule.retry_release_tag(self.root, self.capsule_path, report["localRunId"]))
+            execute.assert_not_called()
+        self.assertEqual([self._saved_tag(report)["tagName"]], self._git("tag", "--list", "release/*").splitlines())
+        self.assertEqual(saved, evidence.read_bytes())
 
     def test_release_tag_name_is_the_next_free_number_and_failure_is_reported_not_raised(self) -> None:
         from scripts import rollout_capsule
@@ -1430,11 +1542,11 @@ class FeatureRolloutTests(unittest.TestCase):
         not_a_repository = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, not_a_repository, ignore_errors=True)
         name, warning = rollout_capsule._create_release_tag(
-            not_a_repository, environment="prod", capsule=self.capsule, report_path="scratch/r.json", now=now,
+            not_a_repository, environment="prod", capsule=self.capsule, report_path="scratch/r.json", run_id="00000000-0000-4000-8000-000000000001", now=now,
         )
         self.assertIsNone(name)
         self.assertIn("release tag was not created", warning)
-        self.assertEqual(rollout_capsule._create_release_tag(self.root, environment="staging", capsule=self.capsule, report_path="x"), (None, None))
+        self.assertEqual(rollout_capsule._create_release_tag(self.root, environment="staging", capsule=self.capsule, report_path="x", run_id="00000000-0000-4000-8000-000000000001"), (None, None))
 
     def test_recovery_is_refused_for_a_capsule_with_no_feature_checkpoint(self) -> None:
         from scripts import feature_release
@@ -1675,7 +1787,7 @@ class FeatureRolloutTests(unittest.TestCase):
 
         stage_path = self.root / "scratch" / "staging.json"
         stage_path.parent.mkdir(parents=True, exist_ok=True)
-        stage_path.write_text('{"status":"success"}\n', encoding="utf-8")
+        stage_path.write_text(self._stub_stage_proof(), encoding="utf-8")
         patches = self._patches(environment="prod")
         self._enter(patches)
         def fake_checkpoint(*args, **kwargs):
@@ -1692,7 +1804,7 @@ class FeatureRolloutTests(unittest.TestCase):
             )
 
         self.assertEqual(status, 0)
-        validate.assert_called_once_with(self.capsule, {"status": "success"})
+        validate.assert_called_once_with(self.capsule, json.loads(self._stub_stage_proof()))
         self.assertEqual(execute.call_args.args[2].environment, "prod")
         self.assertEqual(self._patch_mocks[-1].call_args.args[3], "prod")
 

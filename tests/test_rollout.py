@@ -1294,12 +1294,13 @@ class RolloutManifestTests(unittest.TestCase):
         callback_approvals: list[bool] = []
 
         def fake_migrate_main(arguments, *, environ, repo_root, confirm, expected_input_hashes,
-                              expected_db_unique_name, rollout_confirmed_by, writer_lease):
+                              expected_db_unique_name, rollout_confirmed_by, writer_lease, staging_lease):
             self.assertEqual(arguments, [folder, "--env", "staging"])
             self.assertIs(environ, os.environ)
             self.assertEqual(relative_to_root(repo_root, self.root), Path("."))
             self.assertIsNone(expected_db_unique_name)
             self.assertIsNone(writer_lease)
+            self.assertTrue(staging_lease.holds(repo_root))
             self.assertEqual("terminal", rollout_confirmed_by)
             self.assertEqual(
                 expected_input_hashes[f"{folder}/001-create-table.sql"],

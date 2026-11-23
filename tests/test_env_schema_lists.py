@@ -52,11 +52,18 @@ def write_env(directory: Path, replacements: dict[str, str], extra: str = "") ->
     return path
 
 
-def load(env_path: Path, probe: str = PROBE, project_schema: str | None = None) -> subprocess.CompletedProcess[str]:
+def load(
+    env_path: Path, probe: str = PROBE, project_schema: str | None = None,
+    overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.pop("PROJECT_SCHEMA", None)
+    environment.pop("SQLCL_PERSISTENT_SESSIONS", None)
+    environment.pop("SQLCL_POOL_MAX_READERS", None)
     if project_schema is not None:
         environment["PROJECT_SCHEMA"] = project_schema
+    if overrides:
+        environment.update(overrides)
     return subprocess.run(
         [BASH, "-c", f'set -e; source "$1" "$2"; {probe}', "bash", str(ROOT / "scripts" / "load_env.sh"), str(env_path)],
         env=environment,
@@ -139,6 +146,27 @@ class BashEnvironmentListTests(unittest.TestCase):
         result = load(write_env(self.directory, {}))
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("false|DEMO|DEMO|docker-demo|DEMO|DEMO|docker-demo\n", result.stdout)
+
+    def test_explicit_pool_environment_overrides_project_file(self) -> None:
+        env_path = write_env(self.directory, {}, "SQLCL_PERSISTENT_SESSIONS=1\nSQLCL_POOL_MAX_READERS=2\n")
+        result = load(
+            env_path, 'printf "%s|%s\\n" "$SQLCL_PERSISTENT_SESSIONS" "$SQLCL_POOL_MAX_READERS"',
+            overrides={"SQLCL_PERSISTENT_SESSIONS": "0", "SQLCL_POOL_MAX_READERS": "4"},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("0|4\n", result.stdout)
+
+    def test_pool_settings_refuse_values_outside_the_documented_ranges(self) -> None:
+        for key, value in (("SQLCL_PERSISTENT_SESSIONS", "2"), ("SQLCL_POOL_MAX_READERS", "0")):
+            for source in ("project", "environment"):
+                with self.subTest(key=key, source=source):
+                    extra = f"{key}={value if source == 'project' else '1'}\n" if key == "SQLCL_PERSISTENT_SESSIONS" else ""
+                    if key == "SQLCL_POOL_MAX_READERS":
+                        extra = f"{key}={value if source == 'project' else '2'}\n"
+                    overrides = {key: value} if source == "environment" else None
+                    result = load(write_env(self.directory, {}, extra), "echo LOADED", overrides=overrides)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn(key, result.stderr)
 
     def test_bash_loader_does_not_echo_malformed_line_contents(self) -> None:
         secret = "DO_NOT_LEAK_THIS_ENV_VALUE"
@@ -382,13 +410,43 @@ class BashEnvironmentListTests(unittest.TestCase):
 
 @unittest.skipUnless(PWSH, "PowerShell Core is not installed")
 class PowerShellEnvironmentListTests(unittest.TestCase):
-    def run_probe(self, env_path: Path, probe: str, project_schema: str | None = None) -> subprocess.CompletedProcess[str]:
+    def run_probe(
+        self, env_path: Path, probe: str, project_schema: str | None = None,
+        overrides: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.pop("PROJECT_SCHEMA", None)
+        environment.pop("SQLCL_PERSISTENT_SESSIONS", None)
+        environment.pop("SQLCL_POOL_MAX_READERS", None)
         if project_schema is not None:
             environment["PROJECT_SCHEMA"] = project_schema
+        if overrides:
+            environment.update(overrides)
         script = f'. "{ROOT / "scripts" / "load_env.ps1"}" -EnvFile "{env_path}"; {probe}'
         return subprocess.run([PWSH, "-NoProfile", "-Command", script], env=environment, text=True, capture_output=True, check=False)
+
+    def test_explicit_pool_environment_overrides_project_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env_path = write_env(Path(temporary), {}, "SQLCL_PERSISTENT_SESSIONS=1\nSQLCL_POOL_MAX_READERS=2\n")
+            result = self.run_probe(
+                env_path, '"$($env:SQLCL_PERSISTENT_SESSIONS)|$($env:SQLCL_POOL_MAX_READERS)"',
+                overrides={"SQLCL_PERSISTENT_SESSIONS": "0", "SQLCL_POOL_MAX_READERS": "4"},
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("0|4", result.stdout.strip())
+
+    def test_pool_settings_refuse_values_outside_the_documented_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for key, value in (("SQLCL_PERSISTENT_SESSIONS", "2"), ("SQLCL_POOL_MAX_READERS", "0")):
+                for source in ("project", "environment"):
+                    with self.subTest(key=key, source=source):
+                        file_value = value if source == "project" else ("1" if key == "SQLCL_PERSISTENT_SESSIONS" else "2")
+                        env_path = write_env(directory, {}, f"{key}={file_value}\n")
+                        overrides = {key: value} if source == "environment" else None
+                        result = self.run_probe(env_path, '"LOADED"', overrides=overrides)
+                        self.assertNotEqual(0, result.returncode)
+                        self.assertIn(key, result.stderr)
 
     def test_workspace_developer_matches_bash_literal_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

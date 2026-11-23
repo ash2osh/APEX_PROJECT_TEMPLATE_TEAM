@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import errno
+import functools
 import hashlib
 import json
 import os
 import stat
+import sys
 import uuid
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
@@ -16,6 +19,12 @@ from pathlib import Path
 
 
 SCOPE_FIELDS = {"dbUniqueName", "containerId", "schema", "edition"}
+STAGING_COORDINATION_SCOPE = {
+    "dbUniqueName": "__STAGING_COORDINATION__",
+    "containerId": "__CHECKOUT__",
+    "schema": "__ALL_SCHEMAS__",
+    "edition": "__ALL_EDITIONS__",
+}
 
 
 class ReleaseOwnershipError(ValueError):
@@ -24,6 +33,63 @@ class ReleaseOwnershipError(ValueError):
 
 class TargetWriterBusy(ReleaseOwnershipError):
     """Another local process currently owns this target scope."""
+
+
+def pending_rehearsal_reset(repo_root: Path) -> tuple[Path, str] | None:
+    """Return an incomplete reset archive that staging writers must not cross."""
+    root = _root(repo_root)
+    base = root / "scratch" / "rehearsal-reset"
+    try:
+        metadata = base.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return base, f"cannot inspect rehearsal-reset archives: {error}"
+    if base.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        return base, "rehearsal-reset archive root is unsafe"
+    for marker in sorted(base.glob(".restore-*.json")):
+        if marker.is_symlink():
+            return marker, "restore intent marker is a symbolic link"
+        try:
+            document = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            return marker, f"restore intent marker cannot be read: {error}"
+        if not isinstance(document, Mapping) or document.get("state") != "complete":
+            operation_id = document.get("operationId", "unknown") if isinstance(document, Mapping) else "unknown"
+            return marker, f"staging restore operation {operation_id} is pending"
+    for archive in sorted(base.iterdir()):
+        if archive.name.startswith(".restore-"):
+            continue
+        if archive.is_symlink() or not archive.is_dir():
+            continue
+        plan = archive / "reset-plan.json"
+        legacy = archive / "reset-record.json"
+        candidate = plan if plan.exists() or plan.is_symlink() else legacy
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        if candidate.is_symlink():
+            return archive, "reset plan is a symbolic link"
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            return archive, f"reset plan cannot be read: {error}"
+        if not isinstance(document, Mapping):
+            return archive, "reset plan is malformed"
+        complete = document.get("state") == "complete" or document.get("complete") is True
+        if not complete:
+            reason = "legacy incomplete reset needs manual reconciliation" if candidate == legacy else "reset archive is incomplete"
+            return archive, reason
+    return None
+
+
+def assert_no_pending_rehearsal_reset(repo_root: Path) -> None:
+    pending = pending_rehearsal_reset(repo_root)
+    if pending is not None:
+        archive, reason = pending
+        raise ReleaseOwnershipError(
+            f"staging is blocked by pending rehearsal reset at {archive}: {reason}; "
+            "resume that exact reset or reconcile its archive before another staging operation"
+        )
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -262,4 +328,66 @@ def target_writer_lease(
 ) -> Iterator[TargetWriterLease]:
     lease = TargetWriterLease(repo_root, target_scope, execution_identity)
     with lease:
+        yield lease
+
+
+class StagingCoordinationLease(TargetWriterLease):
+    """One checkout-local claim shared by staging rollouts, migrations, and reset."""
+
+    def __init__(self, repo_root: Path, execution_identity: Mapping):
+        super().__init__(repo_root, STAGING_COORDINATION_SCOPE, execution_identity)
+        self.path = self.root / "releases" / ".staging-coordination.lock"
+
+    def holds(self, repo_root: Path) -> bool:
+        """Check that this process still holds the staging claim for this checkout."""
+        return self._fd is not None and self.root == _root(repo_root)
+
+
+_active_staging_rollout: contextvars.ContextVar[StagingCoordinationLease | None] = contextvars.ContextVar(
+    "active_staging_rollout", default=None,
+)
+
+
+def coordinate_staging_rollout(default_root: Path):
+    """Hold the checkout claim across all mutating rollout steps and pauses."""
+    def decorate(operation):
+        @functools.wraps(operation)
+        def coordinated(manifest_path, environment, **options):
+            if environment != "staging" or options.get("dry_run") or options.get("prepare_only"):
+                return operation(manifest_path, environment, **options)
+            root = Path(options.get("repo_root", default_root))
+            try:
+                with staging_coordination_lease(root, {"purpose": "staging-rollout"}) as lease:
+                    token = _active_staging_rollout.set(lease)
+                    try:
+                        return operation(manifest_path, environment, **options)
+                    finally:
+                        _active_staging_rollout.reset(token)
+            except ReleaseOwnershipError as error:
+                print(f"rollout error: staging coordination refused: {error}", file=sys.stderr)
+                return 2
+        return coordinated
+    return decorate
+
+
+def nested_staging_migration(repo_root: Path, environment: str) -> dict[str, StagingCoordinationLease]:
+    """Pass the active claim only to a migration invoked from this staging rollout."""
+    lease = _active_staging_rollout.get()
+    if environment == "staging" and lease is not None and lease.holds(repo_root):
+        return {"staging_lease": lease}
+    return {}
+
+
+@contextlib.contextmanager
+def staging_coordination_lease(
+    repo_root: Path,
+    execution_identity: Mapping,
+    *,
+    allow_pending_reset: bool = False,
+) -> Iterator[StagingCoordinationLease]:
+    """Serialize cooperating staging commands with reset and refuse interrupted archives."""
+    lease = StagingCoordinationLease(repo_root, execution_identity)
+    with lease:
+        if not allow_pending_reset:
+            assert_no_pending_rehearsal_reset(lease.root)
         yield lease

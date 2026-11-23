@@ -291,11 +291,28 @@ checked with the same loader `feature freeze` uses before it is written;
 `--output` names another file and `--force` replaces an existing one. Nothing
 changed means nothing is written. Review the manifest, commit it, then freeze.
 
-A successful production capsule rollout tags the capsule's source commit
-`release/<UTC date>-rNNN` (annotated, local, never pushed; push it with
-`git push origin <tag>`), and the next `release-plan` starts from that tag.
-`--no-release-tag` skips it. A tagging failure is reported as a warning and does
-not change the rollout's result.
+A successful, durably verified production capsule rollout tags the capsule's
+source commit `release/<UTC date>-rNNN` (annotated, local, never pushed; push
+it with `git push origin <tag>`). The tag carries its rollout run ID. Tag
+status is stored in the local rollout ledger, separately from the report bytes
+bound by the completion proof. `--no-release-tag` records that tagging was
+skipped. If tagging fails after production completion, the rollout remains
+verified and its report stays unchanged; retry only the tag with the saved
+production run and frozen capsule:
+
+```bash
+scripts/team.sh rollout --env prod --capsule <capsule-dir> --retry-release-tag <run-id>
+```
+
+The retry revalidates the saved report, receipts, checkpoint evidence and
+capsule, then finds or creates that run's tag without executing database steps.
+It refuses if a recorded tag is missing or changed, if the saved completion
+cannot be verified, or if multiple tags already name the run. Review
+`releaseTag` in `releases/.local-state.json` and the production report before
+reconciling. Before choosing a `release-plan` baseline, verify that the newest
+`release/*` tag has a saved successful production run. For an older tag with
+missing or failed evidence, pass `--since <verified-ref>` explicitly; do not
+use the tag as the baseline. `--all` remains the first-release route.
 
 New work that a feature can hold goes into feature files, so it is picked up here
 without a conversion: in a project with features, `new-migration --source` for a
@@ -418,21 +435,65 @@ migrate then refuses, for example "a running or unresolved rollout owns one of t
 receipt path is already occupied", "already has a verified staging receipt" or "a prior staging write attempt
 ... has no current verified receipt". Archive that state after every restore:
 
+The cross-checkout proof registry is an operator-managed shared file. Set
+`APEX_RELEASE_PROOF_REGISTRY` to the same absolute path in the staging and
+production operator environments. The parent directory must be a trusted
+shared filesystem with atomic replace and working OS file locks. For different
+OS accounts, provision a setgid operator-group directory with a default ACL;
+preserve the registry and lock file's group access. Do not copy or roll back
+the registry: its current generation is the independent revocation record.
+
+Before restoring, mark the target unavailable in the shared registry, then
+perform the restore and finish the archive under the same operation ID:
+
 ```bash
-scripts/team.sh rehearsal-reset --env staging                                         # read-only list
-scripts/team.sh rehearsal-reset --env staging --apply --confirm-target <db_unique_name>   # moves it; nothing is deleted
+export APEX_RELEASE_PROOF_REGISTRY=/shared/release-evidence/staging-generations.json
+scripts/team.sh rehearsal-reset --env staging --begin-restore --operation-id <uuid> --confirm-target <db_unique_name>
+# Restore the selected staging database using the approved out-of-band procedure.
+scripts/team.sh rehearsal-reset --env staging --apply --operation-id <same-uuid> --confirm-target <db_unique_name>
 ```
 
-It reads the target identity with one read-only query and selects only what belongs to that database (its
-`db_unique_name` and container): its ledger runs, attempts, checkpoint verifications and recovery links, its
-`status.staging.json` receipts, attempt events and `scratch/migration-attempt-*` folders, and every staging
-rollout receipt and run folder (those record no database). Production and DEV records stay. `--apply` moves
-the selection unchanged into `scratch/rehearsal-reset/<time>/`, with the original ledger and a
-`reset-record.json` of what moved and who confirmed it. It refuses production and a production-looking name,
-requires `--confirm-target` to equal the observed `db_unique_name`, asks `[y/N]` unless `--yes`, and holds the
-target writer lease while it moves anything, so it refuses while a rollout or migration runs there. The listing
-names any moved receipt that Git tracks (it then shows as deleted) and any capsule whose staging proof the
-reset removes; production needs a new staging run of that capsule.
+The first command reads and confirms the target identity and blocks staging
+proof while the restore is in progress. The second archives this checkout's
+records, then publishes a fresh generation. If reset or archive completion is
+interrupted, retry with the same operation ID; the registry remains blocked
+until the same archive completes. Do not start another restore operation while
+one is pending. For an already restored baseline with no registry record,
+verify it with the DBA first, then activate its first generation once:
+
+```bash
+scripts/team.sh rehearsal-reset --env staging --initialize-proof --confirm-target <db_unique_name>
+```
+
+Initialization only creates a missing DB/container record; it never replaces
+one. It establishes the starting point and does not prove that a restore took
+place. Configure the same registry path in each checkout that prepares staging
+or promotes to production. If it is missing, unreadable, or reports a restoring
+target, release proof creation and promotion fail closed.
+
+The archive command still supports a read-only listing before `--apply`:
+
+```bash
+scripts/team.sh rehearsal-reset --env staging
+```
+
+Reset reads the database and container identity from the selected staging profile.
+Use `--schema` when that profile lists multiple schemas, and `--target-profile read`
+or `--target-profile migration` when staging read and migration profiles differ.
+It archives target-matched ledger records, receipts, and run evidence. It lists
+records it cannot link to the target and refuses any archive that would split a
+mixed-target run or recovery chain. Review those records before clearing a block.
+
+A checkout-local lock protects the reset against staging rollouts, including
+manual pauses, and standalone staging migrations. Coordinate restores with
+writers in other checkouts. During a restore, the shared proof registry blocks
+new staging capsule proof and production promotion gates for that target.
+
+With `--apply`, the saved plan and original ledger go into
+`scratch/rehearsal-reset/`. Each move is verified. If a move or ledger update
+fails, retry with the same operation ID to resume the saved plan. Preserve the
+archive and reconcile if the ledger or files differ from their saved digests.
+Review `reset-record.json` for moved paths, including any tracked files.
 
 ## Execute staging and promote
 
@@ -485,13 +546,20 @@ scripts/team.sh rollout releases/current.json --env prod --capsule <capsule-dir>
 
 Production validates the staging report's payload and engine digests, shared
 source hashes, a verified outcome for every feature checkpoint and every
-`migrate` step (`includedMigrationSteps`), budget flags that agree with the
-measured time, and matching data/ORDS phase
-classifications before it asks for confirmation. It uses the staged capsule
-payload and independently revalidates the production target plan and app
-descriptors. SQL, ORDS and migration targets are observed during preparation and
-must still match before their run-bound writer lease allows a write. A changed
-capsule, target profile, migration folder, or source blocks success receipts.
+`migrate` step (`includedMigrationSteps`), the measured budget values, matching
+data/ORDS phase classifications, and the current restore generation for every
+observed staging database/container (including app and auxiliary targets)
+before it asks for confirmation. It rereads the shared generation immediately
+before the first production write. If a restore begins after preflight, the
+second check refuses before that write. The report remains readable historical
+evidence, but a generation mismatch cannot promote. Reports from the older
+completion-proof schema have no restore generation and must be replaced with a
+successful staging rehearsal of the current frozen capsule. Production also
+uses the staged capsule payload and independently revalidates the production
+target plan and app descriptors. SQL, ORDS and migration targets are observed
+during preparation and must still match before their run-bound writer lease
+allows a write. A changed capsule, target profile, migration folder, or source
+blocks success receipts.
 
 A `migrate` step in a schema-version 2 manifest is a prepared checkpoint. Prepare
 binds it to its target like a SQL or ORDS step, records the payload and check
@@ -616,9 +684,11 @@ and the elapsed time of each `migrate` step, which counts toward the same budget
 The budget is measured, never enforced: a rollout does not stop or fail when its
 object time passes the budget, because stopping between checkpoints would leave the
 target half released with no way to resume the same capsule. The report records
-`elapsedSeconds`, `withinBudget` and `coverageComplete`, and adds a `budgetWarning`
+`elapsedSeconds` rounded to milliseconds, `withinBudget` evaluated at that
+same reported precision, and `coverageComplete`; it adds a `budgetWarning`
 sentence when the time is over budget or coverage is incomplete; a completed run
-still counts as staging proof and still creates the production release tag. Use
+still counts as staging proof and can create the production release tag after
+verified completion is durably saved. Use
 those numbers from a staging or local rehearsal to split the next release into
 more capsules. Data, ORDS, preparation, and manual pauses have separate times.
 Unclassified SQL-script object work is listed as excluded, and its presence means

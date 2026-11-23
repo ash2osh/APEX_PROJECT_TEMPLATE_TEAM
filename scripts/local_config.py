@@ -15,6 +15,8 @@ Matches the validation and semantics of scripts/load_env.sh and scripts/load_env
 from __future__ import annotations
 
 import re
+import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from .template_release import is_apex_26_2
@@ -116,6 +118,16 @@ RE_DEVELOPER_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,29}$")
 RE_NONNEGATIVE_INTEGER = re.compile(r"^(?:0|[1-9][0-9]*)$")
 
 
+def validate_sqlcl_pool_settings(values: Mapping[str, object]) -> None:
+    """Validate the two optional SQLcl pool settings used by shell and Python entry points."""
+    if str(values.get("SQLCL_PERSISTENT_SESSIONS", "1")) not in ("0", "1"):
+        raise ConfigError(
+            "SQLCL_PERSISTENT_SESSIONS must be 1 (persistent SQLcl sessions) or 0 (one SQLcl per script)"
+        )
+    if str(values.get("SQLCL_POOL_MAX_READERS", "2")) not in ("1", "2", "3", "4"):
+        raise ConfigError("SQLCL_POOL_MAX_READERS must be 1, 2, 3 or 4")
+
+
 def _check_csv_shape(key: str, value: str) -> None:
     if value.startswith(",") or value.endswith(",") or ",," in value:
         raise ConfigError(f"{key} must not contain empty entries")
@@ -150,7 +162,7 @@ def _check_aligned(schema_key: str, connection_key: str, user_key: str, values: 
     _check_unique_csv(schema_key, values[schema_key])
 
 
-def read_project_env(path: Path) -> dict[str, str]:
+def read_project_env(path: Path, *, environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """Parse and strictly validate a project .env file.
 
     Returns the parsed key-value mapping. Raises ConfigError on any discrepancy,
@@ -219,6 +231,13 @@ def read_project_env(path: Path) -> dict[str, str]:
         values[key] = val
         seen_keys.add(key)
 
+    # Explicit process settings override the project file for SQLcl session-pool behavior. Keep this limited
+    # to the two documented runtime controls; the remaining project profile stays file-backed.
+    explicit = os.environ if environ is None else environ
+    for key in ("SQLCL_PERSISTENT_SESSIONS", "SQLCL_POOL_MAX_READERS"):
+        if key in explicit:
+            values[key] = str(explicit[key])
+
     # DEV shorthand: all three or none. A profile with none of its own keys takes the DEV values, and
     # its prefixes default to '*' when absent. A profile with some of its keys keeps today's errors.
     dev_present = [key for key in DEV_TRIO_KEYS if key in seen_keys]
@@ -244,10 +263,7 @@ def read_project_env(path: Path) -> dict[str, str]:
     retry_key = "MIGRATION_PREFLIGHT_INVENTORY_RETRIES"
     if retry_key in values and not RE_NONNEGATIVE_INTEGER.fullmatch(values[retry_key]):
         raise ConfigError(f"{retry_key} must be a non-negative integer")
-    if values.get("SQLCL_PERSISTENT_SESSIONS", "1") not in ("0", "1"):
-        raise ConfigError("SQLCL_PERSISTENT_SESSIONS must be 1 (persistent SQLcl sessions) or 0 (one SQLcl per script)")
-    if values.get("SQLCL_POOL_MAX_READERS", "2") not in ("1", "2", "3", "4"):
-        raise ConfigError("SQLCL_POOL_MAX_READERS must be 1, 2, 3 or 4")
+    validate_sqlcl_pool_settings(values)
 
     # Developer name validation
     if not RE_DEVELOPER_NAME.fullmatch(values["DEVELOPER_NAME"]):

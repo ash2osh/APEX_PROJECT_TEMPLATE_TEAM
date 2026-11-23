@@ -1414,10 +1414,13 @@ class FeaturePrepareTests(unittest.TestCase):
         "CREATE OR REPLACE TRIGGER APP_CODE.PROBE_TRIGGER\nBEFORE INSERT ON PROBE_TABLE\nFOR EACH ROW\nBEGIN NULL; END;\n/\n"
     )
 
-    def _trigger_checkpoint(self) -> FeatureCheckpoint:
+    def _trigger_checkpoint(self, state_clause: str | None = None) -> FeatureCheckpoint:
         from scripts.migration_manifest import QueryCheck
 
-        source = self.TRIGGER_SQL.encode("ascii")
+        sql = self.TRIGGER_SQL
+        if state_clause is not None:
+            sql = sql.replace("FOR EACH ROW\nBEGIN", f"FOR EACH ROW\n{state_clause}\nBEGIN")
+        source = sql.encode("ascii")
         item = FeatureInput(
             "features/probe/APP_CODE/triggers/probe_trigger.trg.sql", source,
             hashlib.sha256(source).hexdigest(), ("APP_CODE", "TRIGGER", "PROBE_TRIGGER"), "stored-source",
@@ -1487,6 +1490,65 @@ class FeaturePrepareTests(unittest.TestCase):
         guard = plan.checkpoint_guards[0]["sourceGuards"][0]
         self.assertTrue(guard["noOp"])
         self.assertFalse([query for query in guard["preconditions"] if query["id"].startswith("enabled-")])
+        self.assertFalse([query for query in guard["preconditions"] if query["id"].startswith("trigger-state-")])
+
+    def test_explicit_trigger_state_mismatch_refuses_even_when_the_body_is_identical(self) -> None:
+        from scripts import feature_release
+
+        for requested, current in (("DISABLE", "ENABLED"), ("ENABLE", "DISABLED")):
+            with self.subTest(requested=requested, current=current):
+                checkpoint = self._trigger_checkpoint(requested)
+                state = self._trigger_state(checkpoint, status=current, same_source=True)
+                with self.assertRaisesRegex(
+                    feature_release.FeatureReleaseError,
+                    rf"trigger PROBE_TRIGGER declares {requested} but is {current}.*reviewed migration",
+                ):
+                    self._prepare(checkpoint, state)
+
+    def test_explicit_trigger_state_is_rechecked_before_the_write(self) -> None:
+        checkpoint = self._trigger_checkpoint("DISABLE")
+        plan = self._prepare(checkpoint, self._trigger_state(checkpoint, status="DISABLED", same_source=True))
+
+        guard = plan.checkpoint_guards[0]["sourceGuards"][0]
+        self.assertTrue(guard["noOp"])
+        state_checks = [query for query in guard["preconditions"] if query["id"].startswith("trigger-state-")]
+        self.assertEqual(len(state_checks), 1)
+        self.assertIn("ALL_TRIGGERS", state_checks[0]["sql"])
+        self.assertIn("STATUS = 'DISABLED'", state_checks[0]["sql"])
+        self.assertEqual(1, state_checks[0]["expected"])
+
+    def test_explicit_trigger_state_is_verified_after_write_even_for_a_new_trigger(self) -> None:
+        from scripts import feature_release
+
+        for requested, expected_status in (("ENABLE", "ENABLED"), ("DISABLE", "DISABLED")):
+            with self.subTest(requested=requested):
+                checkpoint = self._trigger_checkpoint(requested)
+                plan = self._prepare(
+                    checkpoint,
+                    self._trigger_state(checkpoint, status=None, same_source=False, present=False),
+                )
+                _preconditions, postconditions = feature_release._checkpoint_runtime_checks(
+                    checkpoint, plan.checkpoint_guards[0],
+                )
+                state_checks = [check for check in postconditions if check.id.startswith("trigger-state-")]
+                self.assertEqual(len(state_checks), 1)
+                self.assertIn("ALL_TRIGGERS", state_checks[0].sql)
+                self.assertIn("TRIGGER_NAME = 'PROBE_TRIGGER'", state_checks[0].sql)
+                self.assertIn(f"STATUS = '{expected_status}'", state_checks[0].sql)
+                self.assertEqual(state_checks[0].expected, 1)
+
+    def test_unspecified_new_trigger_state_has_no_firing_state_postcondition(self) -> None:
+        from scripts import feature_release
+
+        checkpoint = self._trigger_checkpoint()
+        plan = self._prepare(
+            checkpoint,
+            self._trigger_state(checkpoint, status=None, same_source=False, present=False),
+        )
+        _preconditions, postconditions = feature_release._checkpoint_runtime_checks(
+            checkpoint, plan.checkpoint_guards[0],
+        )
+        self.assertFalse([check for check in postconditions if check.id.startswith("trigger-state-")])
 
     def test_a_captured_trigger_keeps_its_dev_baseline_for_the_prepare_review(self) -> None:
         from scripts import baseline, feature_release, feature_sources
@@ -1733,6 +1795,60 @@ class TriggerStateClauseTests(unittest.TestCase):
             ],
             lines,
         )
+
+    def test_keywords_inside_quoted_trigger_identifiers_are_not_state_clauses(self) -> None:
+        from scripts import feature_release
+
+        sql = (
+            'CREATE OR REPLACE TRIGGER APP_CODE."DISABLE TRG"\n'
+            "BEFORE INSERT ON APP_CODE.T\nFOR EACH ROW\nBEGIN NULL; END;\n/\n"
+        )
+        raw = sql.encode("utf-8")
+        item = FeatureInput(
+            "features/probe/APP_CODE/triggers/quoted.sql", raw, hashlib.sha256(raw).hexdigest(),
+            ("APP_CODE", "TRIGGER", "DISABLE TRG"), "stored-source",
+        )
+
+        stored, _overrides = feature_release._stored_source(item)
+
+        self.assertNotIn("triggerState", stored)
+        self.assertIn('"DISABLE TRG"', "".join(stored["lines"]))
+
+    def test_explicit_state_capture_ignores_quoted_names_comments_strings_and_body_words(self) -> None:
+        from scripts import feature_release
+
+        sql = (
+            'CREATE OR REPLACE TRIGGER "APP_CODE"."TRG_ENABLE_FLAG"\n'
+            "-- DISABLE here is only a comment\n"
+            "BEFORE UPDATE ON APP_CODE.T\nFOR EACH ROW\n"
+            "WHEN (NEW.MODE = 'ENABLE ')\nDISABLE\n"
+            "BEGIN\n  -- ENABLE here is body documentation\n  NULL;\nEND;\n/\n"
+        )
+        raw = sql.encode("utf-8")
+        item = FeatureInput(
+            "features/probe/APP_CODE/triggers/trg_enable_flag.sql", raw, hashlib.sha256(raw).hexdigest(),
+            ("APP_CODE", "TRIGGER", "TRG_ENABLE_FLAG"), "stored-source",
+        )
+
+        stored, _ = feature_release._stored_source(item)
+
+        self.assertEqual("DISABLE", stored["triggerState"])
+        self.assertTrue(any("WHEN (NEW.MODE = 'ENABLE ')" in line for line in stored["lines"]))
+        self.assertTrue(any("ENABLE here is body documentation" in line for line in stored["lines"]))
+
+    def test_omitted_state_clause_remains_unspecified(self) -> None:
+        from scripts import feature_release
+
+        raw = (
+            "CREATE OR REPLACE TRIGGER APP_CODE.TRG_OMITTED\nBEFORE INSERT ON T\n"
+            "FOR EACH ROW\nBEGIN NULL; END;\n/\n"
+        ).encode("ascii")
+        item = FeatureInput(
+            "features/probe/APP_CODE/triggers/trg_omitted.sql", raw, hashlib.sha256(raw).hexdigest(),
+            ("APP_CODE", "TRIGGER", "TRG_OMITTED"), "stored-source",
+        )
+        stored, _ = feature_release._stored_source(item)
+        self.assertNotIn("triggerState", stored)
 
     def test_trigger_body_disable_word_is_kept(self) -> None:
         lines = self._lines(

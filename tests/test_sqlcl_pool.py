@@ -68,6 +68,15 @@ class SqlclPoolTests(unittest.TestCase):
     def _events(self, kind: str) -> list[dict]:
         return [event for event in fake_sqlcl_pool.events(self.log) if event.get("event") == kind]
 
+    def _wait_for_script(self, run_dir: Path, timeout: float = 3) -> None:
+        deadline = time.monotonic() + timeout
+        expected = str(run_dir / "driver.sql")
+        while time.monotonic() < deadline:
+            if any(event.get("path") == expected for event in self._events("script")):
+                return
+            time.sleep(0.01)
+        self.fail(f"fake SQLcl did not begin {expected}")
+
     def _pool(self, **kwargs) -> sqlcl_pool.SessionPool:
         pool = sqlcl_pool.SessionPool(**kwargs)
         sqlcl_session._set_active_pool(pool)
@@ -100,14 +109,17 @@ class SqlclPoolTests(unittest.TestCase):
 
     def test_timeout_kills_process_group(self) -> None:
         self._pool()
+        driver, run_dir = self._driver("FAKE_SLEEP 20;")
         with self.assertRaises(SqlclTimeout):
-            self._run("FAKE_SLEEP 20;", timeout=2)
+            run_sqlcl(self.target, driver, run_dir, environment=self.environment, timeout_seconds=2)
         pids = {event["pid"] for event in self._events("start")}
         deadline = time.monotonic() + 10
         while pids and time.monotonic() < deadline:
             pids = {pid for pid in pids if _alive(pid)}
             time.sleep(0.1)
         self.assertEqual(set(), pids, "the timed-out SQLcl process tree was killed")
+        self.assertEqual(1, sum(event.get("path") == str(driver) for event in self._events("script")))
+        self.assertEqual(1, len(self._events("start")), "a dispatched driver was never replayed one-shot")
 
     def test_cancel_event_kills_process(self) -> None:
         self._pool()
@@ -115,6 +127,92 @@ class SqlclPoolTests(unittest.TestCase):
         threading.Timer(0.5, event.set).start()
         with self.assertRaises(SqlclCancelled):
             self._run("FAKE_SLEEP 20;", cancel_event=event)
+
+    def test_cancelled_before_dispatch_does_not_start_a_session(self) -> None:
+        self._pool()
+        event = threading.Event()
+        event.set()
+        with self.assertRaises(SqlclCancelled):
+            self._run("PROMPT must not run", cancel_event=event)
+        self.assertEqual([], self._events("start"))
+        self.assertEqual([], self._events("script"))
+
+    def test_pool_wait_timeout_does_not_start_a_pending_reader_after_deadline(self) -> None:
+        self._pool(max_readers=1)
+        first_driver, first_run = self._driver("FAKE_SLEEP 0.8;", pooled=True)
+        result: list[BaseException] = []
+
+        def occupy_reader() -> None:
+            try:
+                run_sqlcl(self.target, first_driver, first_run, environment=self.environment, timeout_seconds=3,
+                          phase="postconditions")
+            except BaseException as error:
+                result.append(error)
+
+        worker = threading.Thread(target=occupy_reader)
+        worker.start()
+        self._wait_for_script(first_run)
+        queued_driver, queued_run = self._driver("PROMPT queued", pooled=True)
+        with self.assertRaises(SqlclTimeout):
+            run_sqlcl(self.target, queued_driver, queued_run, environment=self.environment, timeout_seconds=0.15,
+                      phase="preconditions")
+
+        self.assertFalse(any(event.get("path") == str(queued_driver) for event in self._events("script")))
+        self.assertEqual(1, len(self._events("start")), "the expired reader did not start a fallback session")
+        worker.join(timeout=4)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([], result)
+
+    def test_cancellation_while_queued_does_not_dispatch_the_reader(self) -> None:
+        self._pool(max_readers=1)
+        first_driver, first_run = self._driver("FAKE_SLEEP 0.6;", pooled=True)
+        result: list[BaseException] = []
+
+        def occupy_reader() -> None:
+            try:
+                run_sqlcl(self.target, first_driver, first_run, environment=self.environment, timeout_seconds=3,
+                          phase="postconditions")
+            except BaseException as error:
+                result.append(error)
+
+        worker = threading.Thread(target=occupy_reader)
+        worker.start()
+        self._wait_for_script(first_run)
+        queued_driver, queued_run = self._driver("PROMPT cancelled", pooled=True)
+        event = threading.Event()
+        threading.Timer(0.1, event.set).start()
+        with self.assertRaises(SqlclCancelled):
+            run_sqlcl(self.target, queued_driver, queued_run, environment=self.environment, timeout_seconds=3,
+                      phase="preconditions", cancel_event=event)
+
+        self.assertFalse(any(event.get("path") == str(queued_driver) for event in self._events("script")))
+        self.assertEqual(1, len(self._events("start")), "the cancelled reader did not start a fallback session")
+        worker.join(timeout=4)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([], result)
+
+    def test_startup_time_uses_the_workflow_deadline_and_does_not_fallback_after_expiry(self) -> None:
+        self.environment["FAKE_BASELINE_DELAY"] = "0.4"
+        self._pool()
+        driver, run_dir = self._driver("PROMPT too late", pooled=True)
+        started = time.monotonic()
+        with self.assertRaises(SqlclTimeout):
+            run_sqlcl(self.target, driver, run_dir, environment=self.environment, timeout_seconds=0.15)
+
+        self.assertLess(time.monotonic() - started, 0.7)
+        self.assertEqual(1, len(self._events("start")), "expired startup did not launch one-shot SQLcl")
+        self.assertFalse(any(event.get("path") == str(driver) for event in self._events("script")))
+
+    def test_reset_time_uses_the_workflow_deadline_and_does_not_replay_the_driver(self) -> None:
+        self.environment["FAKE_RESET_DELAY"] = "0.4"
+        self._pool()
+        self._run("PROMPT first", phase="apply", commit=True)
+        driver, run_dir = self._driver("PROMPT second", pooled=True, commit=True)
+        with self.assertRaises(SqlclTimeout):
+            run_sqlcl(self.target, driver, run_dir, environment=self.environment, timeout_seconds=0.15, phase="apply")
+
+        self.assertFalse(any(event.get("path") == str(driver) for event in self._events("script")))
+        self.assertEqual(1, len(self._events("start")), "reset timeout did not launch a fallback session")
 
     def test_output_limit_applies_to_segment(self) -> None:
         self._pool()
@@ -226,6 +324,20 @@ class SqlclPoolTests(unittest.TestCase):
         self.assertIn("still runs", result.output)
         self.assertIsNotNone(pool.stats()["fallbackReason"])
         self.assertEqual("one-shot", pool.stats()["mode"])
+        self.assertEqual(1, sum(event.get("path", "").endswith("driver.sql") for event in self._events("script")))
+        self.assertEqual(2, len(self._events("start")), "the fallback delivered the never-dispatched driver once")
+
+    def test_safe_fallback_gets_only_the_remaining_workflow_time(self) -> None:
+        self.environment.update(FAKE_START_FAIL="1", FAKE_BASELINE_DELAY="0.2")
+        self._pool()
+        driver, run_dir = self._driver("FAKE_SLEEP 0.25;", pooled=True)
+        started = time.monotonic()
+        with self.assertRaises(SqlclTimeout):
+            run_sqlcl(self.target, driver, run_dir, environment=self.environment, timeout_seconds=0.35)
+
+        self.assertLess(time.monotonic() - started, 0.7)
+        self.assertEqual(2, len(self._events("start")), "pool failure fell back once with residual time")
+        self.assertEqual(1, sum(event.get("path") == str(driver) for event in self._events("script")))
 
 
 class EntryPointTests(unittest.TestCase):

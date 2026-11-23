@@ -109,6 +109,8 @@ Commands:
          [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Confirm and execute a frozen deployment manifest
+  rollout --env prod --capsule DIR --retry-release-tag RUN_ID
+                                              Retry Git tagging from verified production evidence
   feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan|release-plan> ...
                                               Create mutable feature sources and freeze version-2 release capsules;
                                               reconcile-run closes an unfinished run; convert-plan plans offline
@@ -149,13 +151,17 @@ Commands:
          [--yes|-y] [--confirm-target <db_unique_name>]
                                               Observe, check or explicitly operate on one scoped automation
   staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]
-  rehearsal-reset --env staging [--apply --confirm-target <db_unique_name> [--yes|-y]]
                                               Report, check, disable or undo a restored staging copy's jobs,
                                               APEX automations and network grants (DBA alias)
+  rehearsal-reset --env staging [--schema NAME] [--target-profile read|migration]
+         [--initialize-proof | --begin-restore --operation-id UUID | --apply --operation-id UUID]
+         [--confirm-target <db_unique_name>] [--yes|-y]
+                                              Archive local rollout and migration evidence after a staging restore
 Options:
   --schema <NAME>                             Run one configured schema (except offline/tooling commands)
   --help                                      Show this help
 Environment:
+  APEX_RELEASE_PROOF_REGISTRY                 Absolute shared staging proof registry file
   MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
   <ENV>_DBA_SQLCL_CONNECTION                   Read-only compare-env and baseline grant-export connection
 "@ | Write-Output
@@ -693,7 +699,7 @@ try {
       Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("staging-neutralize") + @($Arguments))
     }
     "rehearsal-reset" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 rehearsal-reset --env staging [--apply --confirm-target <db_unique_name> [--yes|-y]]" }
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 rehearsal-reset --env staging --help" }
       Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("rehearsal-reset") + @($Arguments))
     }
     "backup-db" {

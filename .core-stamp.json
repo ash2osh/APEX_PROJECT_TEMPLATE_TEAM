@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "a168bd71abbc2feb0d72cb26088f25cb4adfe7b6",
+  "coreCommit": "0eb52f2fc5d0cbc872f6506a671a4cbb5798f257",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -234,7 +234,7 @@
     },
     {
       "path": "scripts/feature_release.py",
-      "sha256": "ff6b6f955e2cd5f65cef2807f4d605055374ac8df855e30b499de6ad5e6e2c46",
+      "sha256": "e842bf1ad6f888852f2e4b6d5396fdec6021ef4fb2dcc40607a318e9ba8c46c8",
       "executable": false
     },
     {
@@ -254,17 +254,17 @@
     },
     {
       "path": "scripts/load_env.ps1",
-      "sha256": "5285a23e40d2d935cbf520e4e4ae9dd8e0cdc79fda7cc5913319c980887d9d17",
+      "sha256": "ae8d52cda4e8946f9a9ddcb149e096e08e162951d07c7b3bea2ec9144b3f7131",
       "executable": false
     },
     {
       "path": "scripts/load_env.sh",
-      "sha256": "abf4a86106eed8988396c833152f0e71d006daad8faceec0c964704303f6b7fd",
+      "sha256": "9dd71ce80f9293220ad5912e24e9183656c767c0a886e65897f07c2c12f0cb25",
       "executable": true
     },
     {
       "path": "scripts/local_config.py",
-      "sha256": "c8ba09ca2791b907a94cd86628837b11966f038b63ae8b48b952e3cfd83fbac5",
+      "sha256": "630490286736515cc30289d5463c08d4518af771d46b1663c11a8669828479d2",
       "executable": false
     },
     {
@@ -274,7 +274,7 @@
     },
     {
       "path": "scripts/migrate.py",
-      "sha256": "1109a8b0a017a2a43d7c75342551095e96b6861e822435f1d7f24fb0bb411d1b",
+      "sha256": "5a7f9e7d3bd601892c8c5805e9be148c8d1c07242ffe880741e08e07fff64afd",
       "executable": false
     },
     {
@@ -389,27 +389,32 @@
     },
     {
       "path": "scripts/rehearsal_reset.py",
-      "sha256": "de37a7af888cc264e8b93ae9d30c8d220a9f7e8e6aed91bb24d3cb081f2d33ac",
+      "sha256": "0a9256c9ac381ffb53c77fd3f5167820c0f5049c597bc75f64d5f0ad125b3f1f",
       "executable": false
     },
     {
       "path": "scripts/release_capsule.py",
-      "sha256": "c395c27b33f1e7edb5d78c952e04d7717bdc464721b0bd6352e2bc8a1e8bd5e0",
+      "sha256": "578cf317dc47823d813cc8a62757a44c03278b3d2546b5358fdc2d5dce809056",
       "executable": false
     },
     {
       "path": "scripts/release_cleanup.py",
-      "sha256": "291354dab9769c6ea7ec15f8afbabaab417514fc334662306fbfcbf82ba84f41",
+      "sha256": "cfdb8553555270fbd379cd7e7d924213db0c42d09b593400052c1b711ac8fb9e",
       "executable": false
     },
     {
       "path": "scripts/release_ownership.py",
-      "sha256": "1473040fecb0d46bcd55036db7d7a970346fff8c67d570f5cd803cd8f7a2465b",
+      "sha256": "f923d1628640d888d6717700ea53f687b4ed45a97551fe9bed32210c5adce8f6",
       "executable": false
     },
     {
       "path": "scripts/release_plan.py",
       "sha256": "6a61cd8afa9bdf418b363448487af8424758f16f95e7a6a8e1cd660d6574fd83",
+      "executable": false
+    },
+    {
+      "path": "scripts/release_proof_generation.py",
+      "sha256": "3bddff5948777a76b6724f3c1f76d398a119c4860b4ae5dd1a4ed8ea94958020",
       "executable": false
     },
     {
@@ -419,7 +424,7 @@
     },
     {
       "path": "scripts/release_state.py",
-      "sha256": "b4271c526566d5072b7ab201916dbb8aad2fdaf579c882b4ff945bd9b9ed4a74",
+      "sha256": "9bbf4ee7de0c1dd919e5a9858e7739c00ac85632357839172d06b723a09a2eae",
       "executable": false
     },
     {
@@ -429,7 +434,7 @@
     },
     {
       "path": "scripts/rollout.sh",
-      "sha256": "571de0e09377478997ce8209bed8d77621fa70bd413eacb8634a9ac3d63120c3",
+      "sha256": "45d60649fe105cbb86470d6a879d5c55b5cd3da423f1937f1ad7337718f52552",
       "executable": true
     },
     {
@@ -454,7 +459,7 @@
     },
     {
       "path": "scripts/sqlcl_pool.py",
-      "sha256": "5628a24d75e2b2a68c768326b31186500d27627bedc148873ed3cae2e3c08819",
+      "sha256": "f36690dff81c67539c833692163f77e8e2d2435231ec11801b368fda59c8a72f",
       "executable": false
     },
     {
@@ -464,7 +469,7 @@
     },
     {
       "path": "scripts/sqlcl_session.py",
-      "sha256": "3ac831774112cad602c2d147da0331dc04b0b9543f6fce6f86dc1a9937669e3d",
+      "sha256": "7b771a6e2c7c2bdb7a89304b2fd6c042c416f8fe8067477fb62c80af725320b3",
       "executable": false
     },
     {
@@ -549,7 +554,7 @@
     },
     {
       "path": "scripts/windows_job.py",
-      "sha256": "e736fffaef613313c830a4ccd931e2540fe70c819050a618f85b7b54ab966587",
+      "sha256": "056937ce237fda611af4bbe5a1c43e1d1b0e7ba258c7cc9e68ac92ae1a7173c3",
       "executable": false
     },
     {
@@ -589,7 +594,7 @@
     },
     {
       "path": "tests/fake_sqlcl_pool.py",
-      "sha256": "9e5fb05ff3812efe1a075e2c3cd40f79851a9adfab7e6ab78c32a075fd4338f6",
+      "sha256": "5996abb33fa86607349e74096183bd14a10d7d444e5152db544716b50717c23d",
       "executable": false
     },
     {
@@ -954,7 +959,7 @@
     },
     {
       "path": "tests/test_env_schema_lists.py",
-      "sha256": "a49ecf5e10223fb1f1b07fadb5a9c1dad438fb5d15ce45ab7498fe7c55bf80d2",
+      "sha256": "766d15002400fa307e9b8099e6baf41f723fdf19f16e1e1be1ad753db22a5c1e",
       "executable": false
     },
     {
@@ -984,7 +989,7 @@
     },
     {
       "path": "tests/test_feature_dev.py",
-      "sha256": "4048837622af74e472271d57e3af162bf15ded8937386cab19a414899e1613ba",
+      "sha256": "2dc784c9d67d6543f0c0c1b3aef46fc0605b7e490450b1055eb18555411038c6",
       "executable": false
     },
     {
@@ -1009,7 +1014,7 @@
     },
     {
       "path": "tests/test_feature_prepare.py",
-      "sha256": "ffec17241ab5217964341aa67632cb0db2e4bd4c40ce418a6521299009f21201",
+      "sha256": "bebacb96529c8c12aae8ce690b733510fd70480ae84e869a30c7bbd671d91262",
       "executable": false
     },
     {
@@ -1064,7 +1069,7 @@
     },
     {
       "path": "tests/test_local_config.py",
-      "sha256": "f2a1ea3586b51ff41bb469a404a6ddaad213596d92303cc4b68e07f9726389e4",
+      "sha256": "33ba11de1a0a69acc6dc57c6a92d8d3f47c2974b5be880e6edda94628b3249ba",
       "executable": false
     },
     {
@@ -1174,12 +1179,12 @@
     },
     {
       "path": "tests/test_rehearsal_reset.py",
-      "sha256": "d0aa4e09338f5ac74d1755c26994f81b1faed448d549b105a94809232f85b573",
+      "sha256": "19407ad577d50e13a4704314eabbb1ceb13d7454f089e10044de7539684bbc46",
       "executable": false
     },
     {
       "path": "tests/test_release_capsule.py",
-      "sha256": "5b2020c72e8f88d7c54518de9cae577c9ac8134dd32845e206ac08c8805a2be7",
+      "sha256": "91eea56b4b4f4a408d82576d84dd481862036379c2907dbd9bf46f8461a1996c",
       "executable": false
     },
     {
@@ -1199,12 +1204,17 @@
     },
     {
       "path": "tests/test_release_promotion.py",
-      "sha256": "5a3adc36640528ef01e7a3af05f694d81fee46c44492c933fa652cb27fcb4efe",
+      "sha256": "59f0e43b7d7fb408d0d1d3a621f392de8de6074b4a1bf9c3f1e0e10f9daa2034",
+      "executable": false
+    },
+    {
+      "path": "tests/test_release_proof_generation.py",
+      "sha256": "1a886622bef5f1445572be74c18e582145bf2b1e6b47169d9da0482a35989c61",
       "executable": false
     },
     {
       "path": "tests/test_release_state.py",
-      "sha256": "6630afac8dd23a2a9894c24a0002b0631edd330b2cd9f6bddd53222b17d15cfe",
+      "sha256": "bac9503f51977321a5909a60f43ab308c831e2db80bc5fd4f6a07926a1233b8e",
       "executable": false
     },
     {
@@ -1234,7 +1244,7 @@
     },
     {
       "path": "tests/test_sqlcl_pool.py",
-      "sha256": "c3f5ea10ff6f312f14869ea786729c89e81c2b6ff21b7799cefcb55842e660df",
+      "sha256": "7c70595cd1f7464debabea3e160bdaf6cd179a04433f2ded805f12e420433791",
       "executable": false
     },
     {
