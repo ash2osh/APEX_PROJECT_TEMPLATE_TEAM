@@ -39,7 +39,7 @@ from scripts.local_config import ALLOWED_KEYS, ConfigError, read_project_env
 from scripts.path_utils import relative_to_root
 from scripts.release_ownership import TargetWriterLease
 from scripts.ords_export import OrdsExportError, check_no_oauth, check_structure, mask_sql
-from scripts import sqlcl_pool
+from scripts import release_ownership, sqlcl_pool
 from scripts.sqlcl_session import ALIAS_RE, SqlclError, driver_epilogue, run_sqlcl, safe_rmtree
 from scripts.sqlcl_transport import generated_clob_assembly, lint_sqlcl_transport
 from scripts.validate_app_source import validate_app_source
@@ -1952,6 +1952,7 @@ def execute_step(
                     expected_db_unique_name=confirm_target,
                     rollout_confirmed_by=rollout_confirmed_by,
                     writer_lease=writer_lease,
+                    **release_ownership.nested_staging_migration(repo_root, environment),
                 )
         else:
             arguments.extend(("--phase", step["phase"], "--format", "json"))
@@ -2446,6 +2447,7 @@ def _run_legacy_rollout(
         return 2
 
 
+@release_ownership.coordinate_staging_rollout(ROOT)
 def run_rollout(
     manifest_path: Path | str,
     environment: str,
@@ -2515,7 +2517,7 @@ def run_rollout(
 @sqlcl_pool.with_deployment_sessions
 def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("manifest", type=Path, help="ordered rollout manifest JSON, relative to the repository root")
+    parser.add_argument("manifest", type=Path, nargs="?", help="ordered rollout manifest JSON, relative to the repository root")
     parser.add_argument("--env", required=True, choices=("dev", "staging", "prod"))
     parser.add_argument("--from-step", type=int, default=1, help="resume at a one-based step after verifying earlier receipts")
     parser.add_argument("--dry-run", action="store_true", help="validate and print the hashed plan without running steps")
@@ -2535,7 +2537,23 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path | None = None) ->
         action="store_true",
         help="production capsule run: do not create the release/<date>-rNNN tag after a successful rollout",
     )
+    parser.add_argument(
+        "--retry-release-tag",
+        metavar="RUN_ID",
+        help="retry only release-tag creation from a saved verified production run; executes no rollout steps",
+    )
     args = parser.parse_args(argv)
+    if args.retry_release_tag is not None:
+        if (
+            args.env != "prod" or args.capsule is None or args.manifest is not None
+            or args.prepare or args.dry_run or args.stage_report is not None or args.recover is not None
+            or args.no_release_tag or args.yes or args.confirm_target is not None
+            or args.report is not None or args.from_step != 1
+        ):
+            parser.error("--retry-release-tag requires only --env prod and --capsule <capsule-dir>; omit the manifest and write confirmations")
+        return retry_release_tag(repo_root or ROOT, args.capsule, args.retry_release_tag)
+    if args.manifest is None:
+        parser.error("manifest is required unless --retry-release-tag is used")
     if args.no_release_tag and (args.env != "prod" or args.capsule is None or args.prepare or args.dry_run):
         parser.error("--no-release-tag applies only to a production capsule rollout")
     if args.prepare and args.dry_run:
@@ -2582,4 +2600,5 @@ from scripts.rollout_capsule import (
     _migration_write_state,  # noqa: F401
     _run_capsule_rollout,
     migration_folder_rows,  # noqa: F401
+    retry_release_tag,
 )

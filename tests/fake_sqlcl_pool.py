@@ -60,6 +60,7 @@ def run_file(path, depth):
 
 def run_block(block):
     if "TEAM_POOL_BASELINE" in block:
+        time.sleep(float(os.environ.get("FAKE_BASELINE_DELAY", "0")))
         if os.environ.get("FAKE_START_FAIL"):
             emit("SP2-0640: Not connected")
             return
@@ -68,6 +69,7 @@ def run_block(block):
              "nls": {"NLS_LANGUAGE": "AMERICAN", "NLS_DATE_FORMAT": "DD-MON-RR"}, "compiler": compiler}))
         return
     if "DBMS_SESSION.RESET_PACKAGE" in block:
+        time.sleep(float(os.environ.get("FAKE_RESET_DELAY", "0")))
         state["resets"] += 1
         record(event="reset", number=state["resets"], session=state["session"])
         if os.environ.get("FAKE_RESET_FAIL") == str(state["resets"]):
@@ -159,6 +161,7 @@ if "-name" in args:
 script = next((arg[1:] for arg in args if arg.startswith("@")), None)
 record(event="start", args=args, sqlpath=os.environ.get("SQLPATH"), cwd=os.getcwd())
 if script is not None:
+    record(event="script", path=script, session=state["session"])
     run_file(script, 1)
 record(event="end")
 sys.exit(0)

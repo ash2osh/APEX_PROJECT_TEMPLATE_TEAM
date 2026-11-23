@@ -17,6 +17,7 @@ from pathlib import Path
 from collections.abc import Mapping
 
 from . import windows_job
+from .local_config import ConfigError, validate_sqlcl_pool_settings
 
 
 def safe_rmtree(
@@ -164,10 +165,14 @@ class _BridgeCancelled(Exception):
 
 def _run_bridge_bounded_posix(
     command: list[str], *, cwd: Path, env: Mapping[str, str], timeout_seconds: float,
-    output_limit_bytes: int, cancel_event: threading.Event | None = None,
+    output_limit_bytes: int, cancel_event: threading.Event | None = None, deadline: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Stream at most the requested bytes and kill the isolated SQLcl process tree on overflow."""
-    deadline = time.monotonic() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds if deadline is None else deadline
+    if cancel_event is not None and cancel_event.is_set():
+        raise _BridgeCancelled("")
+    if time.monotonic() >= deadline:
+        raise subprocess.TimeoutExpired(command, timeout_seconds)
     process = subprocess.Popen(
         command,
         cwd=cwd,
@@ -270,8 +275,15 @@ def _run_bridge(
     timeout_seconds: float,
     output_limit_bytes: int | None = None,
     cancel_event: threading.Event | None = None,
+    deadline: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the SQLcl bridge with its output (stderr included) as text and nothing on stdin."""
+    deadline = time.monotonic() + timeout_seconds if deadline is None else deadline
+    if cancel_event is not None and cancel_event.is_set():
+        raise _BridgeCancelled("")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired("sqlcl", timeout_seconds)
     options = {
         "cwd": cwd,
         "env": env,
@@ -287,7 +299,8 @@ def _run_bridge(
             return windows_job.run(
                 command,
                 input_text="",
-                timeout=timeout_seconds,
+                timeout=remaining,
+                deadline=deadline,
                 output_limit_bytes=output_limit_bytes,
                 cancel_event=cancel_event,
                 **options,
@@ -304,10 +317,15 @@ def _run_bridge(
             timeout_seconds=timeout_seconds,
             output_limit_bytes=output_limit_bytes,
             cancel_event=cancel_event,
+            deadline=deadline,
         )
     # Killing only the Bash bridge leaves its SQLcl/JVM descendants running.
     # Give this invocation its own process group so timeout/interrupt cleanup
     # cannot terminate the caller or another developer's SQLcl session.
+    if cancel_event is not None and cancel_event.is_set():
+        raise _BridgeCancelled("")
+    if time.monotonic() >= deadline:
+        raise subprocess.TimeoutExpired(command, timeout_seconds)
     with subprocess.Popen(command, stdin=subprocess.PIPE, start_new_session=True, **options) as process:
         previous_handlers = {}
 
@@ -342,7 +360,6 @@ def _run_bridge(
                     del previous_handlers[signum]
                     break
             pending: str | None = ""
-            deadline = time.monotonic() + timeout_seconds
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     stop_tree()
@@ -378,10 +395,11 @@ def _run_pooled(
     environment: Mapping[str, str],
     output_limit_bytes: int | None,
     cancel_event: threading.Event | None,
+    deadline: float,
 ) -> subprocess.CompletedProcess | None:
     """Send a pooled driver to the active session pool; None means run it with its own SQLcl."""
     pool = _active_pool
-    if pool is None or str(environment.get("SQLCL_PERSISTENT_SESSIONS", "1")).strip() == "0":
+    if pool is None or str(environment.get("SQLCL_PERSISTENT_SESSIONS", "1")) == "0":
         return None
     try:
         text = driver.read_text(encoding="utf-8", errors="replace")
@@ -395,10 +413,16 @@ def _run_pooled(
         return pool.run_driver(  # type: ignore[attr-defined]
             target.connection, driver, run_dir, phase=phase, timeout_seconds=timeout_seconds,
             environment=environment, output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,
+            deadline=deadline,
         )
     except PoolUnavailable:
         # Nothing of this driver ran: a pooled driver ends with its own COMMIT;/ROLLBACK;, so it is safe to
-        # run with a one-shot SQLcl, whose end of input then has nothing left to commit.
+        # run with a one-shot SQLcl, whose end of input then has nothing left to commit. Preserve the same
+        # workflow deadline and do not start a fallback after cancellation or expiry.
+        if cancel_event is not None and cancel_event.is_set():
+            raise _BridgeCancelled("") from None
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired("sqlcl", timeout_seconds) from None
         return None
 
 
@@ -427,6 +451,10 @@ def run_sqlcl(
         raise SqlclError("SQLcl cancellation must be a threading event", run_dir)
 
     child_environment = dict(os.environ if environment is None else environment)
+    try:
+        validate_sqlcl_pool_settings(child_environment)
+    except ConfigError as error:
+        raise SqlclError(str(error), run_dir) from error
     timeout_key = "MIGRATION_APPLY_TIMEOUT_SECONDS" if phase == "apply" else "MIGRATION_CHECK_TIMEOUT_SECONDS"
     configured_timeout = child_environment.get(timeout_key) if phase is not None else None
     timeout_label = timeout_key if phase is not None else "SQLcl timeout"
@@ -469,8 +497,14 @@ def run_sqlcl(
             target, resolved_driver, resolved_run,
             phase=phase, timeout_seconds=effective_timeout, environment=child_environment,
             output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,
+            deadline=started + effective_timeout,
         )
         if completed is None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _BridgeCancelled("")
+            remaining = started + effective_timeout - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("sqlcl", effective_timeout)
             completed = _run_bridge(
                 # as_posix: the bridge compares the driver path with the run directory
                 # as strings, which only works when both use "/" (Git Bash accepts
@@ -481,6 +515,7 @@ def run_sqlcl(
                 timeout_seconds=effective_timeout,
                 output_limit_bytes=output_limit_bytes,
                 cancel_event=cancel_event,
+                deadline=started + effective_timeout,
             )
         output = completed.stdout or ""
         reason = None

@@ -33,8 +33,12 @@ are cleared. Variables a script defined are undefined, including those defined i
 `START`, and the positional variables (`&1`, `&2`, ...) an include was given.
 
 If any part of the reset fails, the process ends and the next script gets a new one. A script that fails
-still ends its SQLcl process through `WHENEVER SQLERROR EXIT`, exactly as before. A script whose time
-limit is reached, or that is cancelled, has its whole process tree killed, as before.
+still ends its SQLcl process through `WHENEVER SQLERROR EXIT`.
+
+A driver’s timeout includes waiting for a pooled session, startup, reset and script execution. If the
+timeout expires or the request is cancelled before dispatch, the driver does not run. A timeout or
+cancellation after dispatch terminates the SQLcl process tree. A one-shot fallback uses the time
+remaining and requires that the pooled process has never dispatched that driver.
 
 Each script's run folder keeps `sqlcl-output.log` and a `sqlcl-session.json` record of the process and
 role that ran it. A rollout report records how scripts reached SQLcl, under `sqlcl`:
@@ -51,8 +55,8 @@ role that ran it. A rollout report records how scripts reached SQLcl, under `sql
 | `SQLCL_PERSISTENT_SESSIONS` | `1` | `0` starts one SQLcl per script, as earlier versions did |
 | `SQLCL_POOL_MAX_READERS` | `2` | Read-only processes per connection, 1 to 4 |
 
-Set them in the root `.env`, or for one run in the environment, for example
-`SQLCL_PERSISTENT_SESSIONS=0 scripts/team.sh rollout ...`.
+An explicit process environment value overrides the root `.env` for these two settings. For example,
+`SQLCL_PERSISTENT_SESSIONS=0 scripts/team.sh rollout ...` disables pooling for that invocation.
 
 ## Limits
 

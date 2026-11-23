@@ -88,6 +88,28 @@ class LocalConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ConfigError, "non-negative integer"):
                 read_project_env(self.write_env(VALID_BASE_CONFIG + f"MIGRATION_PREFLIGHT_INVENTORY_RETRIES={value}\n"))
 
+    def test_sqlcl_pool_environment_overrides_project_values_and_is_validated(self) -> None:
+        content = VALID_BASE_CONFIG + "SQLCL_PERSISTENT_SESSIONS=1\nSQLCL_POOL_MAX_READERS=2\n"
+        values = read_project_env(
+            self.write_env(content),
+            environ={"SQLCL_PERSISTENT_SESSIONS": "0", "SQLCL_POOL_MAX_READERS": "4"},
+        )
+        self.assertEqual("0", values["SQLCL_PERSISTENT_SESSIONS"])
+        self.assertEqual("4", values["SQLCL_POOL_MAX_READERS"])
+
+    def test_sqlcl_pool_settings_accept_only_the_documented_ranges(self) -> None:
+        cases = (
+            ("SQLCL_PERSISTENT_SESSIONS", "2", "must be 1"),
+            ("SQLCL_POOL_MAX_READERS", "0", "must be 1, 2, 3 or 4"),
+        )
+        for key, value, message in cases:
+            for source, environ in (("project", {}), ("environment", {key: value})):
+                with self.subTest(key=key, source=source), self.assertRaisesRegex(ConfigError, message):
+                    read_project_env(
+                        self.write_env(VALID_BASE_CONFIG + (f"{key}={value}\n" if source == "project" else "")),
+                        environ=environ,
+                    )
+
     def test_utf8_bom_stripped_cleanly(self) -> None:
         path = self.write_env(VALID_BASE_CONFIG, prefix=b"\xef\xbb\xbf")
         values = read_project_env(path)

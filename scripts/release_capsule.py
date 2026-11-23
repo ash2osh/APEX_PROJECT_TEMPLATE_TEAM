@@ -39,6 +39,7 @@ WORKFLOW_ENGINE_FILES = (
     "scripts/release_capsule.py",
     "scripts/release_state.py",
     "scripts/release_cleanup.py",
+    "scripts/release_proof_generation.py",
     "scripts/release_recovery.py",
     "scripts/feature_release.py",
     "scripts/feature_cli.py",

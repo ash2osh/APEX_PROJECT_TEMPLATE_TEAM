@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,6 +24,15 @@ class ReleasePromotionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
+        self.prior_proof_registry = os.environ.get("APEX_RELEASE_PROOF_REGISTRY")
+        self.registry_path = self.root / "trusted-release-evidence" / "proof-generations.json"
+        self.registry_path.parent.mkdir()
+        from scripts import release_proof_generation
+
+        release_proof_generation.initialize_baseline(self.registry_path, {
+            "db_unique_name": "STAGING_UNIQUE", "container_id": "3",
+        })
+        os.environ["APEX_RELEASE_PROOF_REGISTRY"] = str(self.registry_path)
         self.manifest_bytes = b'{"schemaVersion":2}\n'
         self.driver_bytes = b"-- generated driver\n"
         self.file_rows = [
@@ -62,6 +73,10 @@ class ReleasePromotionTests(unittest.TestCase):
         self.write_capsule_manifest()
 
     def tearDown(self) -> None:
+        if self.prior_proof_registry is None:
+            os.environ.pop("APEX_RELEASE_PROOF_REGISTRY", None)
+        else:
+            os.environ["APEX_RELEASE_PROOF_REGISTRY"] = self.prior_proof_registry
         self.temporary.cleanup()
 
     def write_capsule_manifest(self) -> None:
@@ -229,6 +244,13 @@ class ReleasePromotionTests(unittest.TestCase):
         plan = self.make_prod_plan(environment=environment)
         with patch.object(state.release_capsule, "load_capsule", return_value=self.capsule):
             run_id = state.start_rollout(self.root, self.capsule, plan)
+        run_row = next(row for row in state._load_index(self.root)["rollouts"] if row["runId"] == run_id)
+        from scripts import release_proof_generation
+
+        restore_generations = (
+            release_proof_generation.capture_generations(self.registry_path, run_row["targetScopes"])
+            if environment == "staging" else []
+        )
         evidence_by_checkpoint = {}
         for checkpoint, mode in enumerate(modes, start=1):
             scope = state.target_scope_from_identity(plan.checkpoint_guards[checkpoint - 1]["targetIdentity"])
@@ -318,13 +340,15 @@ class ReleasePromotionTests(unittest.TestCase):
             })
 
         elapsed = float(len(modes)) if object_seconds is None else object_seconds
-        within = elapsed <= 120
-        budget = {"seconds": 120, "elapsedSeconds": elapsed, "coverageComplete": True, "passed": within}
+        reported_elapsed = round(elapsed, 3)
+        within = reported_elapsed <= 120
+        budget = {"seconds": 120, "elapsedSeconds": reported_elapsed, "coverageComplete": True, "passed": within}
         report = {
             "schemaVersion": 2, "environment": environment, "status": "success",
             "databaseState": "verified", "payloadDigest": self.payload_digest,
             "engineDigest": self.engine_digest, "sourceCommit": self.source_commit,
             "targetPlanDigest": plan.plan_digest, "inputHashes": list(self.input_hashes),
+            "restoreGenerations": restore_generations,
             "objectBudget": {
                 "seconds": 120, "elapsedSeconds": budget["elapsedSeconds"],
                 "coverageComplete": True, "withinBudget": within,
@@ -341,7 +365,7 @@ class ReleasePromotionTests(unittest.TestCase):
             "steps": report_steps,
         }
         proof = {
-            "schemaVersion": 1, "runId": run_id, "environment": environment,
+            "schemaVersion": 2, "runId": run_id, "environment": environment,
             "sourceCommit": self.source_commit, "payloadDigest": self.payload_digest,
             "engineDigest": self.engine_digest, "planDigest": plan.plan_digest,
             "targetScopes": index["rollouts"][-1]["targetScopes"],
@@ -350,6 +374,7 @@ class ReleasePromotionTests(unittest.TestCase):
             "recoveryLinks": [
                 row for row in index["recoveryLinks"] if row["verificationId"] in verification_ids
             ],
+            "restoreGenerations": restore_generations,
             "budget": budget, "finalReportPath": report_path,
             "finalReportSha256": state._completion_core_hash(report),
         }
@@ -419,6 +444,63 @@ class ReleasePromotionTests(unittest.TestCase):
         report["inputHashes"] = [{"path": "features/dispatch/APP_CODE/ddl.sql", "sha256": digest(b"changed")}]
         with self.assertRaisesRegex(state.ReleaseStateError, "input|source|hash"):
             state.validate_stage_proof(self.capsule, report)
+
+    def test_stage_proof_is_invalidated_by_a_later_restore(self) -> None:
+        from scripts import release_proof_generation
+
+        state = self.state_module()
+        report = self.stage_report()
+        state.validate_stage_proof(self.capsule, report)
+        release_proof_generation.begin_restore(
+            self.registry_path,
+            {"db_unique_name": "STAGING_UNIQUE", "container_id": "3"},
+            str(uuid.uuid4()),
+        )
+        release_proof_generation.complete_restore(
+            self.registry_path,
+            {"db_unique_name": "STAGING_UNIQUE", "container_id": "3"},
+            json.loads(self.registry_path.read_text(encoding="utf-8"))["targets"][0]["operationId"],
+        )
+        with self.assertRaisesRegex(state.ReleaseStateError, "stale or unavailable"):
+            state.validate_stage_proof(self.capsule, report)
+
+    def test_historical_stage_report_without_generation_is_rejected(self) -> None:
+        state = self.state_module()
+        report = self.stage_report()
+        report.pop("restoreGenerations")
+        report["completionProof"].pop("restoreGenerations")
+        report["completionProof"]["schemaVersion"] = 1
+        with self.assertRaisesRegex(state.ReleaseStateError, "schemaVersion|historical staging proof"):
+            state.validate_stage_proof(self.capsule, report)
+
+    def test_completion_uses_the_reported_millisecond_budget_precision(self) -> None:
+        state = self.state_module()
+        for elapsed, expected in ((119.9996, True), (120.0, True), (120.0004, True), (120.001, False)):
+            with self.subTest(elapsed=elapsed):
+                report, _run_id, _plan = self.complete_rollout(environment="staging", object_seconds=elapsed)
+                self.assertEqual(report["objectBudget"]["elapsedSeconds"], round(elapsed, 3))
+                self.assertIs(report["objectBudget"]["withinBudget"], expected)
+                self.assertIs(report["completionProof"]["budget"]["passed"], expected)
+                state.validate_stage_proof(self.capsule, report)
+
+    def test_release_tag_status_is_separate_from_verified_completion_bytes(self) -> None:
+        state = self.state_module()
+        report, run_id, _plan = self.complete_rollout(environment="prod")
+        report_path = self.root / report["completionProof"]["finalReportPath"]
+        before = report_path.read_bytes()
+        state.record_release_tag(self.root, run_id, state="failed", message="tag service unavailable")
+        state.record_release_tag(self.root, run_id, state="created", tag_name="release/2026-11-23-r001")
+
+        self.assertEqual(report_path.read_bytes(), before)
+        stored = json.loads(report_path.read_text(encoding="utf-8"))
+        state._validate_completion_proof(self.capsule, stored, environment="prod")
+        run = next(row for row in state._load_index(self.root)["rollouts"] if row["runId"] == run_id)
+        self.assertEqual(run["releaseTag"], {
+            "state": "created", "tagName": "release/2026-11-23-r001", "message": None,
+            "updatedAt": run["releaseTag"]["updatedAt"],
+        })
+        with self.assertRaisesRegex(state.ReleaseStateError, "immutable"):
+            state.record_release_tag(self.root, run_id, state="created", tag_name="release/2026-11-23-r002")
 
     def test_over_budget_staging_run_is_still_proof_for_production(self) -> None:
         # ASHARIF 2026-11-22: the object budget is a planning measure. A verified staging run that took longer than

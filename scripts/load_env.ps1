@@ -12,6 +12,14 @@ param([string]$EnvFile = $env:PROJECT_ENV_FILE)
 
 $ErrorActionPreference = "Stop"
 try {
+$projectEnvProcess = [Environment]::GetEnvironmentVariables("Process")
+$projectEnvInheritedPool = @{}
+foreach ($projectEnvPoolKey in @("SQLCL_PERSISTENT_SESSIONS", "SQLCL_POOL_MAX_READERS")) {
+  $projectEnvInheritedPool[$projectEnvPoolKey] = @{
+    Present = $projectEnvProcess.Contains($projectEnvPoolKey)
+    Value = [Environment]::GetEnvironmentVariable($projectEnvPoolKey, "Process")
+  }
+}
 Remove-Item -Path Env:PROD_SQLCL_CONNECTION, Env:PROD_EXPECTED_USER,
   Env:PROD_SCHEMA, Env:STAGING_SQLCL_CONNECTION, Env:STAGING_EXPECTED_USER,
   Env:STAGING_SCHEMA,
@@ -112,6 +120,25 @@ foreach ($projectEnvLine in [System.IO.File]::ReadAllLines($EnvFile)) {
   }
   Set-Item -LiteralPath "Env:$projectEnvKey" -Value $projectEnvValue
   $projectEnvSeen[$projectEnvKey] = $true
+}
+
+# An explicitly supplied process value wins over the project file for these two runtime controls.
+foreach ($projectEnvPoolKey in @("SQLCL_PERSISTENT_SESSIONS", "SQLCL_POOL_MAX_READERS")) {
+  if ($projectEnvInheritedPool[$projectEnvPoolKey].Present) {
+    [Environment]::SetEnvironmentVariable($projectEnvPoolKey, [string]$projectEnvInheritedPool[$projectEnvPoolKey].Value, "Process")
+  }
+}
+if ($projectEnvSeen.ContainsKey("SQLCL_PERSISTENT_SESSIONS") -or $projectEnvInheritedPool["SQLCL_PERSISTENT_SESSIONS"].Present) {
+  $projectEnvPoolValue = [Environment]::GetEnvironmentVariable("SQLCL_PERSISTENT_SESSIONS", "Process")
+  if (@("0", "1") -cnotcontains $projectEnvPoolValue) {
+    throw "project environment error: SQLCL_PERSISTENT_SESSIONS must be 1 (persistent SQLcl sessions) or 0 (one SQLcl per script)"
+  }
+}
+if ($projectEnvSeen.ContainsKey("SQLCL_POOL_MAX_READERS") -or $projectEnvInheritedPool["SQLCL_POOL_MAX_READERS"].Present) {
+  $projectEnvPoolValue = [Environment]::GetEnvironmentVariable("SQLCL_POOL_MAX_READERS", "Process")
+  if (@("1", "2", "3", "4") -cnotcontains $projectEnvPoolValue) {
+    throw "project environment error: SQLCL_POOL_MAX_READERS must be 1, 2, 3 or 4"
+  }
 }
 
 # DEV shorthand: DEV_SCHEMA, DEV_SQLCL_CONNECTION and DEV_EXPECTED_USER are all or none. A profile
@@ -472,10 +499,12 @@ Remove-Variable -Name projectEnvRepoRoot, projectEnvSeen, projectEnvAllowed,
   -ErrorAction SilentlyContinue
 Remove-Variable -Name projectEnvMigrationPrefix, projectEnvMigrationKeys, projectEnvMigrationPresent, projectEnvSuffix, projectEnvDevMigrationSchema -ErrorAction SilentlyContinue
 Remove-Variable -Name projectEnvDevKeys, projectEnvDevPresent, projectEnvDevValue, projectEnvOwnKeys -ErrorAction SilentlyContinue
+Remove-Variable -Name projectEnvProcess, projectEnvInheritedPool, projectEnvPoolKey, projectEnvPoolValue -ErrorAction SilentlyContinue
 Remove-Item -Path Function:Assert-ProjectEnvUniqueCsv, Function:Split-ProjectEnvList,
   Function:Assert-ProjectEnvList, Function:Assert-ProjectEnvTriple,
   Function:Set-ProjectEnvNarrow, Function:Set-ProjectEnvFromDev -ErrorAction SilentlyContinue
 }
 finally {
-  Remove-Variable -Name projectEnvRepoRoot, projectEnvRootRelative -ErrorAction SilentlyContinue
+  Remove-Variable -Name projectEnvRepoRoot, projectEnvRootRelative, projectEnvProcess,
+    projectEnvInheritedPool, projectEnvPoolKey, projectEnvPoolValue -ErrorAction SilentlyContinue
 }

@@ -11,6 +11,7 @@ scratch/
 /releases/.local-state.json
 /releases/.local-state.lock
 /releases/.target-writer-*.lock
+/releases/.staging-coordination.lock
 /releases/.local-state-history/
 /releases/.dev-apply-attempts/
 migrations/**/attempt-event.*.json

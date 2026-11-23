@@ -956,6 +956,7 @@ def apply_batch(
     expected_db_unique_name: str | None = None,
     rollout_confirmed_by: str | None = None,
     writer_lease: release_ownership.TargetWriterLease | None = None,
+    staging_lease: release_ownership.StagingCoordinationLease | None = None,
 ) -> int:
     """Freeze, preflight, confirm when needed, apply in input order, and verify.
 
@@ -1055,7 +1056,15 @@ def apply_batch(
             if not writer_lease.holds(repo_root, scope):
                 raise MigrationApplyError("the rollout writer lease does not cover the observed migration target")
             ownership = contextlib.nullcontext()
-        with ownership:
+        with contextlib.ExitStack() as claims:
+            if staging_lease is not None:
+                if target.environment != "staging" or not staging_lease.holds(repo_root):
+                    raise MigrationApplyError("the rollout staging claim does not cover this checkout and target")
+            elif target.environment == "staging":
+                claims.enter_context(release_ownership.staging_coordination_lease(
+                    repo_root, {"purpose": "staging-migrate", "runId": run_dir.name},
+                ))
+            claims.enter_context(ownership)
             # A run that finished while confirmation was open may already own the receipt.
             _verify_receipts_and_attempts(repo_root, migrations, initial_target_identity)
             # Re-read original bytes after review and before any write.
@@ -1377,6 +1386,7 @@ def main(
     expected_db_unique_name: str | None = None,
     rollout_confirmed_by: str | None = None,
     writer_lease: release_ownership.TargetWriterLease | None = None,
+    staging_lease: release_ownership.StagingCoordinationLease | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("folders", nargs="*")
@@ -1436,10 +1446,27 @@ def main(
         print(f"migration error: {error}", file=sys.stderr)
         return 2
     if args.rehearse:
+        if target.environment == "staging":
+            if staging_lease is None:
+                try:
+                    with release_ownership.staging_coordination_lease(
+                        repo_root, {"purpose": "migrate-rehearse", "environment": target.environment,
+                                    "folders": [migration.folder.name for migration in migrations]},
+                    ):
+                        return rehearse_batch(Path(repo_root), migrations, target, confirm, report_path=args.report, yes=args.yes)
+                except release_ownership.ReleaseOwnershipError as error:
+                    print(f"migration error: staging coordination is unavailable: {error}; no rehearsal ran.", file=sys.stderr)
+                    return 2
+            if not staging_lease.holds(repo_root):
+                print("migration error: the rollout staging coordination claim does not cover this checkout", file=sys.stderr)
+                return 2
+        elif staging_lease is not None:
+            print("migration error: a staging coordination claim may be used only for a staging migration", file=sys.stderr)
+            return 2
         return rehearse_batch(Path(repo_root), migrations, target, confirm, report_path=args.report, yes=args.yes)
     status = apply_batch(Path(repo_root), migrations, target, confirm, verbose=args.verbose, confirm_target=args.confirm_target,
                          yes=args.yes, expected_db_unique_name=expected_db_unique_name, rollout_confirmed_by=rollout_confirmed_by,
-                         writer_lease=writer_lease)
+                         writer_lease=writer_lease, staging_lease=staging_lease)
     if status == 0 and target.environment == "dev":
         record_daily_diffs(Path(repo_root), migrations)
     return status

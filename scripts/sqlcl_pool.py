@@ -28,6 +28,7 @@ import json
 import os
 import queue
 import re
+import select
 import secrets
 import signal
 import stat
@@ -39,14 +40,13 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import sqlcl_session
+from . import local_config, sqlcl_session
 from .sqlcl_session import ALIAS_RE, SQLCL_ERROR_RE, SqlclError, bash_command, safe_rmtree
 
 DEFAULT_BATCH_SIZE = 500
 # SQLcl refuses a 21st nested script (SP2-0309). Loop file b is nested b+1 deep, its slot one more and the
 # driver one more; drivers may include a few levels of their own (@@payload files), so stay well below 20.
 MAX_BATCHES = 12
-START_TIMEOUT_SECONDS = 120.0
 RESET_OK_MARKER = "TEAM_POOL_RESET_OK"
 BASELINE_MARKER = "TEAM_POOL_BASELINE:"
 DDL_MARKER = "TEAM_POOL_DDL_BEGIN"
@@ -69,6 +69,20 @@ def _kill_tree(process: subprocess.Popen) -> None:
         _KILLPG(process.pid, _SIGKILL)
     else:
         process.kill()
+
+
+def _check_request(
+    deadline: float,
+    timeout_seconds: float,
+    cancel_event: threading.Event | None,
+) -> float:
+    """Return remaining time or raise before a cancelled/expired driver can be dispatched."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise sqlcl_session._BridgeCancelled("")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired("sqlcl-pool", timeout_seconds)
+    return remaining
 
 
 class PoolUnavailable(Exception):
@@ -303,9 +317,16 @@ class SqlclProcess:
     def alive(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
-    def start(self, timeout_seconds: float = START_TIMEOUT_SECONDS) -> None:
+    def start(
+        self,
+        *,
+        deadline: float,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         if os.name == "nt":
             raise PoolUnavailable("windows-pipes")
+        _check_request(deadline, timeout_seconds, cancel_event)
         self._write_loop(0)
         self._write_loop(1)
         os.mkfifo(self._slot(0), 0o600)
@@ -320,7 +341,10 @@ class SqlclProcess:
             raise PoolUnavailable(f"SQLcl could not be started: {error}") from error
         threading.Thread(target=self._pump, name=f"sqlcl-pool-{self.role}", daemon=True).start()
         self.connects = 1
-        returncode, output = self.run_segment(session_init_block(self.baseline_settings), timeout_seconds=timeout_seconds)
+        returncode, output = self.run_segment(
+            session_init_block(self.baseline_settings), timeout_seconds=timeout_seconds,
+            deadline=deadline, cancel_event=cancel_event,
+        )
         baseline = None
         for line in output.splitlines():
             if line.startswith(BASELINE_MARKER):
@@ -356,13 +380,22 @@ class SqlclProcess:
             with contextlib.suppress(OSError):
                 self.process.stdout.close()
 
-    def _send(self, text: str, deadline: float) -> None:
+    def _send(
+        self,
+        text: str,
+        deadline: float,
+        *,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         """Write one segment into the current slot; create the next slot (and loop file) first."""
+        _check_request(deadline, timeout_seconds, cancel_event)
         current = self._slot(self.next_slot)
         os.mkfifo(self._slot(self.next_slot + 1), 0o600)
         if (self.next_slot + 1) % self.batch_size == 0:
             self._write_loop((self.next_slot + 1) // self.batch_size + 1)
         while True:
+            _check_request(deadline, timeout_seconds, cancel_event)
             try:
                 descriptor = os.open(current, os.O_WRONLY | os.O_NONBLOCK)
                 break
@@ -375,10 +408,18 @@ class SqlclProcess:
                 raise subprocess.TimeoutExpired("sqlcl-pool", 0)
             time.sleep(0.005)
         try:
-            os.set_blocking(descriptor, True)
+            os.set_blocking(descriptor, False)
             data = text.encode("utf-8")
             while data:
-                written = os.write(descriptor, data)
+                remaining = _check_request(deadline, timeout_seconds, cancel_event)
+                _, writable, _ = select.select([], [descriptor], [], min(0.05, remaining))
+                if not writable:
+                    continue
+                _check_request(deadline, timeout_seconds, cancel_event)
+                try:
+                    written = os.write(descriptor, data)
+                except BlockingIOError:
+                    continue
                 data = data[written:]
         finally:
             os.close(descriptor)
@@ -393,19 +434,26 @@ class SqlclProcess:
         timeout_seconds: float,
         output_limit_bytes: int | None = None,
         cancel_event: threading.Event | None = None,
+        deadline: float | None = None,
     ) -> tuple[int, str]:
         """Run one segment. Returns (0, output) at the sentinel, or (exit status, output) if SQLcl ended."""
         sentinel = f"__TEAM_SQLCL_DONE_{secrets.token_hex(16)}__"
-        deadline = time.monotonic() + timeout_seconds
+        deadline = time.monotonic() + timeout_seconds if deadline is None else deadline
         collected: list[str] = []
         size = 0
         try:
-            self._send(f"{body}\nPROMPT {sentinel}\n", deadline)
+            self._send(
+                f"{body}\nPROMPT {sentinel}\n", deadline, timeout_seconds=timeout_seconds,
+                cancel_event=cancel_event,
+            )
         except _ProcessEnded:
-            return self._ended(collected)
+            return self._ended(collected, deadline=deadline, cancel_event=cancel_event)
         except subprocess.TimeoutExpired:
             self.kill()
             raise subprocess.TimeoutExpired("sqlcl-pool", timeout_seconds, output="".join(collected)) from None
+        except sqlcl_session._BridgeCancelled:
+            self.kill()
+            raise
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 self.kill()
@@ -418,8 +466,20 @@ class SqlclProcess:
                 line = self._lines.get(timeout=min(remaining, 0.1))
             except queue.Empty:
                 continue
+            try:
+                _check_request(deadline, timeout_seconds, cancel_event)
+            except subprocess.TimeoutExpired:
+                self.kill()
+                raise subprocess.TimeoutExpired(
+                    "sqlcl-pool", timeout_seconds, output="".join(collected),
+                ) from None
+            except sqlcl_session._BridgeCancelled as error:
+                self.kill()
+                raise sqlcl_session._BridgeCancelled("".join(collected) or error.output) from None
             if line is None:
-                return self._ended(collected)
+                return self._ended(
+                    collected, deadline=deadline, eof_seen=True, cancel_event=cancel_event,
+                )
             if line.strip() == sentinel:
                 return 0, "".join(collected)
             collected.append(line)
@@ -428,26 +488,69 @@ class SqlclProcess:
                 self.kill()
                 raise sqlcl_session._BridgeOutputLimitExceeded("".join(collected))
 
-    def _ended(self, collected: list[str]) -> tuple[int, str]:
-        while True:
-            try:
-                line = self._lines.get(timeout=5)
-            except queue.Empty:
+    def _ended(
+        self,
+        collected: list[str],
+        *,
+        deadline: float | None = None,
+        eof_seen: bool = False,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[int, str]:
+        while not eof_seen:
+            if cancel_event is not None and cancel_event.is_set():
+                self.kill(wait_seconds=0)
+                raise sqlcl_session._BridgeCancelled("".join(collected))
+            remaining = 5.0 if deadline is None else deadline - time.monotonic()
+            if remaining <= 0:
                 break
+            try:
+                line = self._lines.get(timeout=min(remaining, 0.05))
+            except queue.Empty:
+                if deadline is None:
+                    break
+                continue
             if line is None:
                 break
             collected.append(line)
-        returncode = self.process.wait() if self.process is not None else 1
+        if self.process is None:
+            returncode = 1
+        elif deadline is None:
+            returncode = self.process.wait()
+        else:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    self.kill(wait_seconds=0)
+                    raise sqlcl_session._BridgeCancelled("".join(collected))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.kill(wait_seconds=0)
+                    raise subprocess.TimeoutExpired("sqlcl-pool", 0, output="".join(collected)) from None
+                try:
+                    returncode = self.process.wait(timeout=min(remaining, 0.05))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        if deadline is not None and time.monotonic() >= deadline:
+            self.kill(wait_seconds=0)
+            raise subprocess.TimeoutExpired("sqlcl-pool", 0, output="".join(collected)) from None
         return (returncode if returncode != 0 else 1), "".join(collected)
 
-    def reset(self, timeout_seconds: float) -> bool:
+    def reset(
+        self,
+        timeout_seconds: float,
+        *,
+        deadline: float,
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
         """Return this reused session to its baseline; False means the process must be replaced."""
         if self.baseline is None or not self.alive():
             return False
         reconnect = self.alias if self.role == "writer" and self.baseline.compiler is None else None
         try:
             text = reset_block(self.baseline, self.baseline_settings, self.defines, reconnect_alias=reconnect)
-            returncode, output = self.run_segment(text, timeout_seconds=timeout_seconds)
+            returncode, output = self.run_segment(
+                text, timeout_seconds=timeout_seconds, deadline=deadline, cancel_event=cancel_event,
+            )
         except (PoolUnavailable, subprocess.TimeoutExpired):
             self.kill()
             return False
@@ -459,29 +562,52 @@ class SqlclProcess:
         self.defines.clear()
         return True
 
-    def close(self, grace_seconds: float = 5.0) -> None:
+    def close(
+        self,
+        grace_seconds: float = 5.0,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        if deadline is not None:
+            grace_seconds = min(grace_seconds, max(0.0, deadline - time.monotonic()))
         if self.alive():
-            with contextlib.suppress(Exception):
-                self._send("EXIT ROLLBACK\n", time.monotonic() + grace_seconds)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                assert self.process is not None
-                self.process.wait(timeout=grace_seconds)
-        self.kill()
+            if grace_seconds > 0:
+                with contextlib.suppress(Exception):
+                    self._send(
+                        "EXIT ROLLBACK\n", time.monotonic() + grace_seconds,
+                        timeout_seconds=grace_seconds, cancel_event=cancel_event,
+                    )
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    assert self.process is not None
+                    wait_seconds = grace_seconds if deadline is None else min(
+                        grace_seconds, max(0.0, deadline - time.monotonic()),
+                    )
+                    if cancel_event is not None and cancel_event.is_set():
+                        wait_seconds = 0
+                    self.process.wait(timeout=wait_seconds)
+        kill_wait = 10 if deadline is None else max(0.0, deadline - time.monotonic())
+        if cancel_event is not None and cancel_event.is_set():
+            kill_wait = 0
+        self.kill(wait_seconds=kill_wait)
         safe_rmtree(self.run_dir)
 
-    def kill(self) -> None:
+    def kill(self, *, wait_seconds: float = 10) -> None:
         if self.process is not None and self.process.poll() is None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 _kill_tree(self.process)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                self.process.wait(timeout=10)
+            if wait_seconds > 0:
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    self.process.wait(timeout=wait_seconds)
 
 
 class SessionPool:
     """Long-lived SQLcl processes per saved alias: one writer and up to ``max_readers`` readers."""
 
     def __init__(self, *, max_readers: int = 2, batch_size: int = DEFAULT_BATCH_SIZE) -> None:
-        self.max_readers = max(1, max_readers)
+        if isinstance(max_readers, bool) or max_readers not in (1, 2, 3, 4):
+            raise ValueError("SQLCL_POOL_MAX_READERS must be 1, 2, 3 or 4")
+        self.max_readers = max_readers
         self.batch_size = batch_size
         self.root = Path(tempfile.mkdtemp(prefix="team-sqlcl-pool-"))
         self.root.chmod(0o700)
@@ -504,17 +630,29 @@ class SessionPool:
         }
 
     @contextlib.contextmanager
-    def _acquire(self, alias: str, role: str, environment: Mapping[str, str]) -> Iterator[SqlclProcess]:
+    def _acquire(
+        self,
+        alias: str,
+        role: str,
+        environment: Mapping[str, str],
+        *,
+        deadline: float,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None,
+    ) -> Iterator[SqlclProcess]:
         key = (alias, role)
         limit = 1 if role == "writer" else self.max_readers
         with self._condition:
             while True:
+                remaining = _check_request(deadline, timeout_seconds, cancel_event)
+                if self.closed:
+                    raise PoolUnavailable("pool closed")
                 group = self._processes.setdefault(key, [])
                 for process in list(group):
                     if process.retired() and not process.lock.locked():
                         group.remove(process)
                         self._retired_connects += process.connects
-                        process.close()
+                        process.close(deadline=deadline, cancel_event=cancel_event)
                 idle = next((process for process in group if not process.lock.locked()), None)
                 if idle is not None:
                     idle.lock.acquire()
@@ -526,11 +664,11 @@ class SessionPool:
                     group.append(chosen)
                     fresh = True
                     break
-                self._condition.wait()
+                self._condition.wait(timeout=min(remaining, 0.05))
         try:
             if fresh:
                 try:
-                    chosen.start()
+                    chosen.start(deadline=deadline, timeout_seconds=timeout_seconds, cancel_event=cancel_event)
                     self.processes_started += 1
                 except BaseException:
                     with self._condition:
@@ -555,29 +693,40 @@ class SessionPool:
         environment: Mapping[str, str],
         output_limit_bytes: int | None = None,
         cancel_event: threading.Event | None = None,
+        deadline: float | None = None,
     ) -> subprocess.CompletedProcess:
         """Run one pooled driver; raise PoolUnavailable before anything of it ran if no session is available."""
+        started = time.monotonic()
+        deadline = started + timeout_seconds if deadline is None else deadline
+        _check_request(deadline, timeout_seconds, cancel_event)
         if self.fallback_reason is not None or self.closed:
             raise PoolUnavailable(self.fallback_reason or "pool closed")
         role = "writer" if phase == "apply" else "reader"
-        started = time.monotonic()
         attempts = 0
         while True:
             attempts += 1
             try:
-                with self._acquire(connection, role, environment) as process:
-                    if process.scripts > 0 and not process.reset(timeout_seconds):
+                with self._acquire(
+                    connection, role, environment, deadline=deadline, timeout_seconds=timeout_seconds,
+                    cancel_event=cancel_event,
+                ) as process:
+                    if process.scripts > 0 and not process.reset(
+                        timeout_seconds, deadline=deadline, cancel_event=cancel_event,
+                    ):
                         replace = True
                     else:
                         replace = False
                         reset_seconds = round(time.monotonic() - started, 3)
+                        _check_request(deadline, timeout_seconds, cancel_event)
                         segment = f'cd "{run_dir.as_posix()}"\n@"{driver_path.as_posix()}"'
+                        defines = script_defines(driver_path, run_dir)
+                        _check_request(deadline, timeout_seconds, cancel_event)
                         process.scripts += 1
                         self.scripts += 1
                         slot = process.next_slot
-                        process.defines |= script_defines(driver_path, run_dir)
+                        process.defines |= defines
                         returncode, output = process.run_segment(
-                            segment, timeout_seconds=max(1.0, timeout_seconds - (time.monotonic() - started)),
+                            segment, timeout_seconds=timeout_seconds, deadline=deadline,
                             output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,
                         )
                         _write_evidence(run_dir, {
@@ -591,6 +740,8 @@ class SessionPool:
             except PoolUnavailable as error:
                 self.fallback_reason = str(error).splitlines()[0][:200]
                 raise
+            if replace:
+                _check_request(deadline, timeout_seconds, cancel_event)
             if replace and attempts >= 3:
                 raise PoolUnavailable("persistent SQLcl session could not be reset")
 
@@ -616,7 +767,8 @@ def _write_evidence(run_dir: Path, record: Mapping) -> None:
 
 
 def _enabled(environment: Mapping[str, str]) -> tuple[bool, str | None]:
-    if str(environment.get("SQLCL_PERSISTENT_SESSIONS", "1")).strip() == "0":
+    local_config.validate_sqlcl_pool_settings(environment)
+    if str(environment.get("SQLCL_PERSISTENT_SESSIONS", "1")) == "0":
         return False, "disabled by SQLCL_PERSISTENT_SESSIONS=0"
     if os.name == "nt":
         return False, "windows-pipes"
@@ -651,10 +803,7 @@ def deployment_sessions(environment: Mapping[str, str] | None = None) -> Iterato
     if not enabled:
         yield None
         return
-    try:
-        max_readers = int(str(env.get("SQLCL_POOL_MAX_READERS", "2")).strip() or "2")
-    except ValueError:
-        max_readers = 2
+    max_readers = int(str(env.get("SQLCL_POOL_MAX_READERS", "2")))
     pool = SessionPool(max_readers=max_readers)
     previous_handlers: dict[int, object] = {}
 

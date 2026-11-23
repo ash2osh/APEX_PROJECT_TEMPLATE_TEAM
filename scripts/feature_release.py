@@ -325,7 +325,7 @@ def _capture_selected_state(target: Target, checkpoint: FeatureCheckpoint, run_d
 
 
 _TRIGGER_BODY_START = re.compile(r"(?i)\b(?:COMPOUND\s+TRIGGER|DECLARE|BEGIN|CALL)\b")
-_TRIGGER_STATE_CLAUSE = re.compile(r"(?i)\b(?:ENABLE|DISABLE)\s+")
+_TRIGGER_STATE_CLAUSE = re.compile(r"(?i)\b(ENABLE|DISABLE)\s+")
 
 
 def _without_trigger_state_clause(lines: list[str]) -> list[str]:
@@ -350,8 +350,18 @@ def _without_trigger_state_clause(lines: list[str]) -> list[str]:
     return "".join(kept).splitlines(keepends=True)
 
 
+def _trigger_state_clause(lines: list[str]) -> str | None:
+    """Return an explicit ENABLE/DISABLE trigger clause from the header, if present."""
+    text = "".join(lines)
+    masked = _mask_comments_and_strings(text)
+    body = _TRIGGER_BODY_START.search(masked)
+    header_end = body.start() if body is not None else len(text)
+    clauses = list(_TRIGGER_STATE_CLAUSE.finditer(masked, 0, header_end))
+    return clauses[-1].group(1).upper() if clauses else None
+
+
 def _mask_comments_and_strings(text: str) -> str:
-    """text with -- and /* */ comments and '...' literals replaced by spaces; newlines and length are kept."""
+    """Mask comments, literals and quoted identifiers while preserving positions and newlines."""
     out = list(text)
     index, length = 0, len(text)
     while index < length:
@@ -361,12 +371,13 @@ def _mask_comments_and_strings(text: str) -> str:
         elif text.startswith("/*", index):
             end = text.find("*/", index + 2)
             end = length if end < 0 else end + 2
-        elif text[index] == "'":
+        elif text[index] in {"'", '"'}:
+            quote = text[index]
             end = index + 1
             while end < length:
-                if text[end] == "'" and text.startswith("''", end):
+                if text[end] == quote and text.startswith(quote * 2, end):
                     end += 2
-                elif text[end] == "'":
+                elif text[end] == quote:
                     end += 1
                     break
                 else:
@@ -425,7 +436,9 @@ def _stored_source(item: FeatureInput) -> tuple[dict, dict[str, str]]:
         # columns, so the expected header does too. A trigger header keeps the qualifier as written (live check, 23ai).
         owner_start, name_start = header.start("first"), header.start("second")
         lines[0] = lines[0][:owner_start] + " " * (name_start - owner_start) + lines[0][name_start:]
+    trigger_state = None
     if object_type == "TRIGGER":
+        trigger_state = _trigger_state_clause(lines)
         lines = _without_trigger_state_clause(lines)
     overrides: dict[str, str] = {}
     for start, end in spans[:-1]:
@@ -442,7 +455,10 @@ def _stored_source(item: FeatureInput) -> tuple[dict, dict[str, str]]:
         if raw.startswith("'") and raw.endswith("'"):
             raw = raw[1:-1].replace("''", "'")
         overrides[SETTING_FIELDS[key]] = raw
-    return {"type": item.unit[1], "name": item.unit[2], "lines": lines}, overrides
+    stored = {"type": item.unit[1], "name": item.unit[2], "lines": lines}
+    if trigger_state is not None:
+        stored["triggerState"] = trigger_state
+    return stored, overrides
 
 
 def _validated_settings(name: str, object_type: str, values: Mapping[str, object]) -> dict:
@@ -558,6 +574,25 @@ def _source_guards(
         actual = actual_units.get(f"{object_type}:{name}")
         expected_unit, setting_overrides = _stored_source(item)
         expected_lines = expected_unit["lines"]
+        requested_trigger_state = expected_unit.get("triggerState")
+        captured_trigger_state = None
+        if object_type == "TRIGGER" and requested_trigger_state is not None and actual is not None:
+            trigger_rows = {
+                row.get("name"): row
+                for row in state.get("structural", {}).get("triggers", [])
+                if isinstance(row, Mapping)
+            }
+            captured_trigger_state = str(trigger_rows.get(name, {}).get("status", "")).upper()
+            if captured_trigger_state not in {"ENABLED", "DISABLED"}:
+                raise FeatureReleaseError(
+                    f"enablement state is unavailable for selected TRIGGER {name}; preparation stopped"
+                )
+            requested_state = "ENABLED" if requested_trigger_state == "ENABLE" else "DISABLED"
+            if captured_trigger_state != requested_state:
+                raise FeatureReleaseError(
+                    f"trigger {name} declares {requested_trigger_state} but is {captured_trigger_state} on the target; "
+                    "handle the state change in a reviewed migration (new-migration) and keep it out of this release"
+                )
         before_settings = actual["settings"] if actual is not None else None
         if setting_overrides:
             if before_settings is None and set(setting_overrides) != set(REQUIRED_SETTINGS):
@@ -627,6 +662,16 @@ def _source_guards(
                     "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TRIGGERS "
                     f"WHERE OWNER = '{checkpoint.schema}' AND TRIGGER_NAME = {_sql_literal(name)} AND STATUS = 'ENABLED') "
                     "THEN 1 ELSE 0 END FROM DUAL"
+                ),
+                "expected": 1,
+            })
+        if actual is not None and object_type == "TRIGGER" and requested_trigger_state is not None:
+            preconditions.append({
+                "id": f"trigger-state-{checkpoint_number:03d}-{len(result) + 1:03d}",
+                "sql": (
+                    "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TRIGGERS "
+                    f"WHERE OWNER = '{checkpoint.schema}' AND TRIGGER_NAME = {_sql_literal(name)} "
+                    f"AND STATUS = '{captured_trigger_state}') THEN 1 ELSE 0 END FROM DUAL"
                 ),
                 "expected": 1,
             })
@@ -1743,6 +1788,17 @@ def _checkpoint_runtime_checks(
         if item.category != "stored-source" or item.unit is None:
             continue
         _owner, object_type, name = item.unit
+        expected_unit, _overrides = _stored_source(item)
+        requested_trigger_state = expected_unit.get("triggerState")
+        if object_type == "TRIGGER" and requested_trigger_state is not None:
+            expected_status = "ENABLED" if requested_trigger_state == "ENABLE" else "DISABLED"
+            postconditions.append(QueryCheck(
+                f"trigger-state-{baseline._safe_check_slug(name)}",
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TRIGGERS "
+                f"WHERE OWNER = {_sql_literal(checkpoint.schema)} AND TRIGGER_NAME = {_sql_literal(name)} "
+                f"AND STATUS = '{expected_status}') THEN 1 ELSE 0 END FROM DUAL",
+                1,
+            ))
         source_guard = next((
             row for row in guard["sourceGuards"]
             if isinstance(row, Mapping)
@@ -1759,7 +1815,6 @@ def _checkpoint_runtime_checks(
             if not isinstance(source_checks, list) or not source_checks:
                 raise FeatureReleaseError(f"prepared no-op source check is missing for {object_type} {name}")
         else:
-            expected_unit, _overrides = _stored_source(item)
             source_checks = baseline._source_check_queries(
                 {"name": name, "type": object_type, "lines": expected_unit["lines"]}, checkpoint.schema,
             )

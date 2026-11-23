@@ -41,7 +41,15 @@ def _next_release_tag_name(root: Path, now: datetime) -> str:
     return f"release/{day}-r{following:03d}"
 
 
-def _create_release_tag(root: Path, *, environment: str, capsule, report_path: str, now: datetime | None = None) -> tuple[str | None, str | None]:
+def _create_release_tag(
+    root: Path,
+    *,
+    environment: str,
+    capsule,
+    report_path: str,
+    run_id: str,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None]:
     """Tag the shipped commit after a verified production rollout. Returns (tag name, warning); never pushes.
 
     The tag names the capsule's source commit, not HEAD: commits made after the freeze did not ship.
@@ -58,6 +66,7 @@ def _create_release_tag(root: Path, *, environment: str, capsule, report_path: s
             "Production release\n"
             f"Capsule payload SHA-256: {capsule.payload_digest}\n"
             f"Source commit: {capsule.source_commit}\n"
+            f"Rollout run: {run_id}\n"
             f"Rollout report: {report_path}\n"
         )
         subprocess.run(
@@ -69,6 +78,166 @@ def _create_release_tag(root: Path, *, environment: str, capsule, report_path: s
         detail_text = detail.decode("utf-8", "replace").strip() if isinstance(detail, bytes) else ""
         return None, f"release tag was not created; the production rollout itself succeeded ({detail_text or error})"
     return name, None
+
+
+def _existing_release_tag_for_run(root: Path, *, capsule, run_id: str) -> str | None:
+    """Find and verify a tag created by this run before a crash interrupted its local status write."""
+    listing = subprocess.run(
+        ["git", "-C", str(root), "tag", "--list", "release/*"], capture_output=True, check=True,
+    ).stdout.decode("utf-8")
+    matches = []
+    expected_commit = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", f"{capsule.source_commit}^{{commit}}"],
+        capture_output=True, check=True,
+    ).stdout.decode("utf-8").strip()
+    for name in listing.splitlines():
+        if not name:
+            continue
+        message = subprocess.run(
+            ["git", "-C", str(root), "for-each-ref", "--format=%(contents)", f"refs/tags/{name}"],
+            capture_output=True, check=True,
+        ).stdout.decode("utf-8")
+        if f"Rollout run: {run_id}" not in message.splitlines():
+            continue
+        tagged_commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", f"{name}^{{commit}}"],
+            capture_output=True, check=True,
+        ).stdout.decode("utf-8").strip()
+        required = {
+            f"Capsule payload SHA-256: {capsule.payload_digest}",
+            f"Source commit: {capsule.source_commit}",
+        }
+        if tagged_commit != expected_commit or not required.issubset(set(message.splitlines())):
+            raise rollout.RolloutError(f"release tag {name} for this run points at a different capsule or commit")
+        matches.append(name)
+    if len(matches) > 1:
+        raise rollout.RolloutError("multiple release tags already name this production rollout; reconcile them before retry")
+    return matches[0] if matches else None
+
+
+def _save_release_tag_status(root: Path, run_id: str, *, state: str, tag_name: str | None = None, message: str | None = None) -> None:
+    from scripts import release_state
+
+    release_state.record_release_tag(root, run_id, state=state, tag_name=tag_name, message=message)
+
+
+def _release_tag_lease(root: Path, run_id: str):
+    """Serialize tag lookup, creation, and status persistence with the target's existing kernel writer lock."""
+    from scripts import release_ownership, release_state
+
+    index = release_state._load_index(root)
+    run = next((item for item in index["rollouts"] if item["runId"] == run_id), None)
+    if run is None or not run["targetScopes"]:
+        raise rollout.RolloutError("release tag has no saved rollout target scope to lock")
+    scope = run["targetScopes"][0]
+    return release_ownership.target_writer_lease(root, dict(scope), {
+        "purpose": "release-tag", "runId": run_id, "payloadDigest": run["payloadDigest"],
+    })
+
+
+def _finish_production_tag(root: Path, capsule, run_id: str, report_path: str) -> None:
+    """Tag only after the verified completion is durable; keep tag status out of completion-bound report bytes."""
+    from scripts import release_cleanup, release_state
+
+    try:
+        with _release_tag_lease(root, run_id):
+            index = release_state._load_index(root)
+            run = next((item for item in index["rollouts"] if item["runId"] == run_id), None)
+            capsule_rows = release_state._matching_capsules(root, capsule.payload_digest)
+            capsule_row = next((item for item in capsule_rows if (
+                item["engineDigest"] == capsule.engine_digest and item["sourceCommit"] == capsule.source_commit
+            )), None)
+            if run is None or capsule_row is None or run["finalReportPath"] != report_path:
+                raise rollout.RolloutError("verified production completion could not be reloaded for release tagging")
+            release_cleanup._verify_local_completion(root, index, capsule_row, run)
+            existing = _existing_release_tag_for_run(root, capsule=capsule, run_id=run_id)
+            if existing is not None:
+                tag_name = existing
+                tag_warning = None
+            else:
+                tag_name, tag_warning = _create_release_tag(
+                    root, environment="prod", capsule=capsule, report_path=report_path, run_id=run_id,
+                )
+            if tag_warning is not None:
+                try:
+                    _save_release_tag_status(root, run_id, state="failed", message=tag_warning[:4000])
+                except Exception as error:
+                    print(f"warning: {tag_warning}; tag status could not be saved: {error}", file=sys.stderr)
+                else:
+                    print(f"warning: {tag_warning}", file=sys.stderr)
+                return
+            _save_release_tag_status(root, run_id, state="created", tag_name=tag_name)
+            print(f"Release tag {tag_name} created; push it with: git push origin {tag_name}")
+    except Exception as error:
+        message = f"release tag was not created; the verified production rollout remains complete ({error})"
+        try:
+            _save_release_tag_status(root, run_id, state="failed", message=message[:4000])
+        except Exception as record_error:
+            print(f"warning: {message}; tag status could not be saved: {record_error}", file=sys.stderr)
+        else:
+            print(f"warning: {message}", file=sys.stderr)
+
+
+def retry_release_tag(repo_root: Path, capsule_path: Path | str, run_id: str) -> int:
+    """Retry only tag creation from a previously verified production completion; never invokes rollout steps."""
+    from scripts import release_capsule, release_cleanup, release_state
+
+    try:
+        root = Path(repo_root).resolve(strict=True)
+        release_state._uuid(run_id, "release-tag retry runId")
+        index = release_state._load_index(root)
+        run = next((item for item in index["rollouts"] if item["runId"] == run_id), None)
+        if run is None or run["environment"] != "prod" or run["state"] != "verified" or run["databaseState"] != "verified":
+            raise rollout.RolloutError("tag retry requires a durably verified production rollout run ID")
+        with _release_tag_lease(root, run_id):
+            index = release_state._load_index(root)
+            run = next((item for item in index["rollouts"] if item["runId"] == run_id), None)
+            if run is None or run["environment"] != "prod" or run["state"] != "verified" or run["databaseState"] != "verified":
+                raise rollout.RolloutError("tag retry requires a durably verified production rollout run ID")
+            capsule = release_capsule.load_capsule(root, capsule_path)
+            if (
+                capsule.payload_digest != run["payloadDigest"]
+                or capsule.engine_digest != run["engineDigest"]
+                or capsule.source_commit != run["sourceCommit"]
+            ):
+                raise rollout.RolloutError("selected capsule does not match the saved production result")
+            matches = [item for item in release_state._matching_capsules(root, run["payloadDigest"]) if (
+                item["engineDigest"] == run["engineDigest"] and item["sourceCommit"] == run["sourceCommit"]
+            )]
+            if len(matches) != 1 or Path(root / matches[0]["path"]).resolve(strict=True) != capsule.root.resolve(strict=True):
+                raise rollout.RolloutError("saved production result does not identify this exact frozen capsule")
+            release_cleanup._verify_local_completion(root, index, matches[0], run)
+
+            saved_tag = run.get("releaseTag")
+            if saved_tag is not None and saved_tag["state"] == "skipped":
+                print("Release tagging was explicitly skipped for this verified production run.")
+                return 0
+            existing = _existing_release_tag_for_run(root, capsule=capsule, run_id=run_id)
+            if saved_tag is not None and saved_tag["state"] == "created":
+                if existing != saved_tag["tagName"]:
+                    raise rollout.RolloutError("recorded release tag is missing or changed; reconcile its local tag status without rerunning deployment")
+                print(f"Verified existing release tag {existing}; no rollout steps were run.")
+                return 0
+            if existing is None:
+                tag_name, warning = _create_release_tag(
+                    root,
+                    environment="prod",
+                    capsule=capsule,
+                    report_path=run["finalReportPath"],
+                    run_id=run_id,
+                )
+                if warning is not None:
+                    _save_release_tag_status(root, run_id, state="failed", message=warning[:4000])
+                    print(f"warning: {warning}", file=sys.stderr)
+                    return 1
+            else:
+                tag_name = existing
+            _save_release_tag_status(root, run_id, state="created", tag_name=tag_name)
+            print(f"Release tag {tag_name} recorded; no rollout steps were run.")
+        return 0
+    except Exception as error:
+        print(f"release tag retry refused: {error}", file=sys.stderr)
+        return 2
 
 
 def migration_folder_rows(folders: Sequence[str], migrations: Sequence) -> list[dict]:
@@ -250,6 +419,34 @@ def _validate_capsule_auxiliary_targets(target_plan, steps: Sequence[dict], envi
             raise rollout.RolloutError(f"step {number} prepared target identity is incomplete")
 
 
+def _capsule_step_observed_identity(step_number: int, step: Mapping, target_plan, result) -> dict[str, str] | None:
+    """Bind a completed receipt to the physical identity captured in its prepared target plan."""
+    kind = step.get("type")
+    if kind == "pause":
+        if result.observed_identity is not None:
+            raise rollout.RolloutError(f"pause step {step_number} unexpectedly reported a database identity")
+        return None
+    if kind == "feature-migrate":
+        key = f"schema:{step.get('schema')}"
+    elif kind == "app-deploy":
+        key = f"app:{step.get('appId')}"
+    elif kind in {"sql-script", "ords-import", "migrate"}:
+        key = f"step:{step_number}"
+    else:
+        raise rollout.RolloutError(f"step {step_number} has no recognized prepared target identity")
+    target = target_plan.targets.get(key)
+    observed = target.get("observed") if isinstance(target, Mapping) else None
+    if not isinstance(observed, Mapping) or any(
+        not isinstance(observed.get(field), str) or not observed[field].strip()
+        for field in rollout.OBSERVED_IDENTITY_FIELDS
+    ):
+        raise rollout.RolloutError(f"step {step_number} has no complete observed identity for {key}")
+    identity = {field: observed[field] for field in rollout.OBSERVED_IDENTITY_FIELDS}
+    if result.observed_identity is not None and result.observed_identity != identity:
+        raise rollout.RolloutError(f"step {step_number} writer identity differs from its prepared database identity")
+    return identity
+
+
 def _capsule_object_budget(
     capsule,
     elapsed: float,
@@ -258,13 +455,14 @@ def _capsule_object_budget(
     included_migrations: Sequence[int] = (),
     migration_steps: int = 0,
 ) -> dict:
+    reported_elapsed = round(elapsed, 3)
     return {
         "seconds": capsule.database_object_budget_seconds,
-        "elapsedSeconds": round(elapsed, 3),
+        "elapsedSeconds": reported_elapsed,
         "coverageComplete": (
             len(included) == len(capsule.checkpoints) and not excluded and len(included_migrations) == migration_steps
         ),
-        "withinBudget": elapsed <= capsule.database_object_budget_seconds,
+        "withinBudget": reported_elapsed <= capsule.database_object_budget_seconds,
         "includedCheckpoints": list(included),
         "includedMigrationSteps": list(included_migrations),
         "excludedObjectSteps": list(excluded),
@@ -362,13 +560,15 @@ def _run_capsule_rollout(
     confirm_target: str | None = None,
     release_tag: bool = True,
 ) -> int:
-    from scripts import feature_release, release_capsule, release_ownership, release_state
+    from scripts import feature_release, release_capsule, release_ownership, release_proof_generation, release_state
 
     started = time.perf_counter()
     root = Path(repo_root).resolve(strict=True)
     report = None
     report_paths = None
     run_id = None
+    promotion_generations = None
+    promotion_scopes = None
 
     def finish_local_run(*, verified: bool = False) -> None:
         if run_id is None or report is None:
@@ -416,6 +616,13 @@ def _run_capsule_rollout(
         if verified:
             if report.get("status") != "success" or any(item["status"] != "verified" for item in step_outcomes):
                 raise rollout.RolloutError("whole-rollout completion requires a successful receipt for every step")
+            if environment == "staging":
+                try:
+                    release_proof_generation.assert_current_generations(
+                        None, report.get("restoreGenerations"), run["targetScopes"],
+                    )
+                except release_proof_generation.ReleaseProofGenerationError as error:
+                    raise rollout.RolloutError(f"staging completion refused because its restore generation changed: {error}") from error
             verification_rows = sorted(
                 (row for row in index["checkpointVerifications"] if row["runId"] == run_id),
                 key=lambda row: row["checkpoint"],
@@ -433,17 +640,6 @@ def _run_capsule_rollout(
                 raise rollout.RolloutError("whole-rollout completion requires a measured object time for the capsule's budget")
             if report_paths is None:
                 raise rollout.RolloutError("whole-rollout completion has no final report destination")
-            if release_tag and environment == "prod":
-                tag_name, tag_warning = _create_release_tag(
-                    root, environment=environment, capsule=capsule,
-                    report_path=relative_to_root(report_paths[0], root).as_posix(),
-                )
-                report["releaseTag"] = tag_name
-                if tag_warning is not None:
-                    report["releaseTagWarning"] = tag_warning
-                    print(f"warning: {tag_warning}", file=sys.stderr)
-                else:
-                    print(f"Release tag {tag_name} created; push it with: git push origin {tag_name}")
             report["reportFiles"] = {
                 "json": relative_to_root(report_paths[0], root).as_posix(),
                 "markdown": relative_to_root(report_paths[1], root).as_posix(),
@@ -457,7 +653,7 @@ def _run_capsule_rollout(
                 if row["verificationId"] in verification_ids
             ]
             report["completionProof"] = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "runId": run_id,
                 "environment": environment,
                 "sourceCommit": capsule.source_commit,
@@ -471,11 +667,21 @@ def _run_capsule_rollout(
                 "checkpointVerificationIds": verification_ids,
                 "checkpointVerifications": verification_rows,
                 "recoveryLinks": recovery_links,
+                "restoreGenerations": list(report.get("restoreGenerations", [])),
                 "budget": budget,
                 "finalReportPath": final_report_path,
                 "finalReportSha256": final_report_sha,
             }
             rollout._write_reports(report, report_paths)
+            if environment == "staging":
+                try:
+                    release_proof_generation.assert_current_generations(
+                        None, report.get("restoreGenerations"), run["targetScopes"],
+                    )
+                except release_proof_generation.ReleaseProofGenerationError as error:
+                    raise rollout.RolloutError(
+                        f"staging completion refused because its restore generation changed before proof was saved: {error}"
+                    ) from error
             release_state.finish_rollout(
                 root, run_id,
                 outcome={
@@ -486,7 +692,13 @@ def _run_capsule_rollout(
                     "finalReportPath": final_report_path,
                     "finalReportSha256": final_report_sha,
                 },
+                **({"skip_release_tag": True} if environment == "prod" and not release_tag else {}),
             )
+            if environment == "prod":
+                if release_tag:
+                    _finish_production_tag(root, capsule, run_id, final_report_path)
+                else:
+                    print("Release tag skipped by --no-release-tag.")
             return
 
         database_state = report.get("databaseState", "not-started")
@@ -697,6 +909,8 @@ def _run_capsule_rollout(
                 release_state.validate_stage_proof(capsule, stage_report)
             except release_state.ReleaseStateError as error:
                 raise rollout.RolloutError(f"production promotion refused: {error}") from error
+            promotion_generations = stage_report["restoreGenerations"]
+            promotion_scopes = stage_report["completionProof"]["targetScopes"]
 
         _capsule_live_source_check(root, capsule_document)
         _validate_capsule_app_targets(root, target_plan, [item["step"] for item in plan], environment)
@@ -717,6 +931,7 @@ def _run_capsule_rollout(
             "sourceCommit": capsule.source_commit,
             "targetPlanDigest": target_plan.plan_digest,
             "inputHashes": list(capsule.input_hashes),
+            "restoreGenerations": [],
             "preparationSeconds": preparation_seconds,
             "databaseState": "not-started",
             "objectPhaseSeconds": 0.0,
@@ -815,6 +1030,21 @@ def _run_capsule_rollout(
 
         run_id = release_state.start_rollout(root, capsule, target_plan)
         report["localRunId"] = run_id
+        run_record = next(
+            (item for item in release_state._load_index(root)["rollouts"] if item["runId"] == run_id), None,
+        )
+        if run_record is None:
+            raise rollout.RolloutError("rollout has no durable target-scope record")
+        confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+        confirmation.update(localRunId=run_id, targetScopes=run_record["targetScopes"])
+        rollout._write_atomic(confirmation_path, json.dumps(confirmation, sort_keys=True, indent=2) + "\n")
+        if environment == "staging":
+            try:
+                report["restoreGenerations"] = release_proof_generation.capture_generations(
+                    None, run_record["targetScopes"],
+                )
+            except release_proof_generation.ReleaseProofGenerationError as error:
+                raise rollout.RolloutError(f"staging rollout cannot establish current restore proof: {error}") from error
         # Rollout receipts are never replaced. Refuse before any write when a step of this manifest already has
         # one for this environment, as a schema-version 1 rollout does. This comes after start_rollout so that
         # an unresolved earlier run is reported first; the run then ends failed with nothing started.
@@ -826,6 +1056,7 @@ def _run_capsule_rollout(
         migration_step_count = sum(item["step"]["type"] == "migrate" for item in plan)
         object_seconds = 0.0
         checkpoint_number = 0
+        promotion_generation_rechecked = False
         for index, item in enumerate(plan):
             step = item["step"]
             step_report = report["steps"][index]
@@ -844,6 +1075,16 @@ def _run_capsule_rollout(
             result = None
             try:
                 if step["type"] == "feature-migrate":
+                    if environment == "prod" and not promotion_generation_rechecked:
+                        try:
+                            release_proof_generation.assert_current_generations(
+                                None, promotion_generations, promotion_scopes,
+                            )
+                        except release_proof_generation.ReleaseProofGenerationError as error:
+                            raise rollout.RolloutError(
+                                f"production promotion refused before its first write because staging was restored: {error}"
+                            ) from error
+                        promotion_generation_rechecked = True
                     checkpoint_number += 1
                     checkpoint_result = feature_release.execute_checkpoint(
                         root, capsule, target_plan, checkpoint_number, run_id=run_id, environ=os.environ,
@@ -922,6 +1163,16 @@ def _run_capsule_rollout(
                                 if prepared_binding.get("folders") != migration_folder_rows(step["folders"], migrations):
                                     raise rollout.RolloutError(f"step {item['number']} migration folders changed after target preparation")
                                 migration_baseline = set(_migration_attempt_events(step["folders"], root))
+                            if environment == "prod" and not promotion_generation_rechecked:
+                                try:
+                                    release_proof_generation.assert_current_generations(
+                                        None, promotion_generations, promotion_scopes,
+                                    )
+                                except release_proof_generation.ReleaseProofGenerationError as error:
+                                    raise rollout.RolloutError(
+                                        f"production promotion refused before its first write because staging was restored: {error}"
+                                    ) from error
+                                promotion_generation_rechecked = True
                             auxiliary_write_invoked = True
                             result = rollout.execute_step(
                                 bound_step,
@@ -939,6 +1190,16 @@ def _run_capsule_rollout(
                                 writer_lease=lease,
                             )
                     else:
+                        if environment == "prod" and step["type"] == "app-deploy" and not promotion_generation_rechecked:
+                            try:
+                                release_proof_generation.assert_current_generations(
+                                    None, promotion_generations, promotion_scopes,
+                                )
+                            except release_proof_generation.ReleaseProofGenerationError as error:
+                                raise rollout.RolloutError(
+                                    f"production promotion refused before its first write because staging was restored: {error}"
+                                ) from error
+                            promotion_generation_rechecked = True
                         result = rollout.execute_step(
                             step,
                             environment=environment,

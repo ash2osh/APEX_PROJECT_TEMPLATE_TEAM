@@ -263,6 +263,32 @@ class FeatureDevTests(unittest.TestCase):
         self.assertIn("DISABLED", output)
         self.assertFalse(self.plans())
 
+    def test_dev_prepare_refuses_explicit_trigger_state_drift_for_an_identical_body(self):
+        name = "JOBS_T"
+        path = feature_sources._unit_source_path(self.scope, name, "TRIGGER")
+        path.parent.mkdir(exist_ok=True)
+        source = (
+            feature_release._settings_prologue(name, "TRIGGER", SETTINGS)[0]
+            + "\nCREATE OR REPLACE TRIGGER JOBS_T\nBEFORE INSERT ON JOBS\nFOR EACH ROW\n"
+            + "DISABLE\nBEGIN NULL; END;\n/\n"
+        )
+        path.write_text(source, encoding="utf-8")
+        item = feature_release.FeatureInput(
+            path.relative_to(self.root).as_posix(), source.encode("utf-8"),
+            feature_release._sha256(source.encode("utf-8")), ("APP_CODE", "TRIGGER", name), "stored-source",
+        )
+        self.state["sourceUnits"][f"TRIGGER:{name}"] = {
+            "lines": feature_release._stored_source(item)[0]["lines"], "settings": dict(SETTINGS), "valid": True,
+        }
+        self.state["structural"]["triggers"] = [{"name": name, "table_name": "JOBS", "status": "ENABLED"}]
+
+        code, output = self.prepare(selector=f"TRIGGER:{name}")
+
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("declares DISABLE but is ENABLED", output)
+        self.assertIn("reviewed migration", output)
+        self.assertFalse(self.plans())
+
     def test_invalid_unit_and_unresolved_or_unreadable_evidence_block_adoption(self):
         _, lines = self.add_source()
         self.existing(lines, valid=False)
