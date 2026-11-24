@@ -53,10 +53,10 @@ Everyday commands:
   doctor                                  Check .env and the database connections
   export <app_id>                         Copy a live app from DEV into Git
   publish <app_id> --env dev              Import your edited app files to DEV
-  check-conflicts <folder> --env dev      Check a migration against the live database
-  migrate <folder> --env dev              Apply a migration
-  revise <folder>                         Start the next revision of an attempted migration
-  archive-migrations <folder> [...]       Preview migration folders to archive
+  release list                            List open draft and deployed release bundles
+  release check <bundle> --env dev        Preflight and preview a release bundle
+  release run <bundle> --env dev --confirm-target <db>
+                                          Execute a release bundle against DEV
   backup-db                               Refresh the local database mirror
   upgrade-template --dry-run              Preview a template upgrade
 
@@ -81,55 +81,25 @@ Commands:
   app-lock <app_id> [--env dev] [--comment <text>]
                                               Acquire a native DEV application lock
   app-unlock <app_id> [--env dev]             Release only your DEV application lock
-  check-conflicts <folder> [...] (--env <env>|--local)
-                                              Preflight selected migrations against local/live scope
-  migration-plan [<folder> ...] [--live --env <env>] [--schema NAME] [--format text|json|markdown]
-                                              Inventory selected migrations or run a guarded read-only preflight
+  release list [--format text|json]           List open draft and deployed release bundles offline
+  release new <slug>                          Create a new draft release bundle under releases/<slug>/
+  release collect <bundle> --from <env> --schema <SCHEMA> --object <TYPE:NAME> --mode <new|replace|patch> [--target-env <env>] [--file <relpath>]
+                                              Export live source into 02-code/ and update release.json
+  release check <bundle> --env <dev|staging|prod> [--format text|json] [--allow-existing]
+                                              Read-only preflight, patch SHA-256 check, and plan preview
+  release run <bundle> --env <dev|staging|prod> --confirm-target <db_unique_name> [--allow-existing] [--skip-backup] [--report <path>]
+                                              Zero-prompt 6-step backup, apply, invalid-delta check, verify, app deploy, report & prod lock
   dev-test [--plan|--run|--report RUN_ID|--cleanup RUN_ID] [--env dev] [--schema NAME]
            [--suite FILE] [--scenario ID ...] [--format text|json|markdown]
                                               Plan, run, inspect or explicitly clean retained DEV fixtures
-  new-migration <name> --source TYPE:NAME [...] --env dev
-                                              Start a code migration from the live DEV source
-  migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>] [--confirm-target <db_unique_name>] [--yes|-y]
-                                              Apply, or rehearse DML in one transaction and roll it back
-  revise <folder> [--reason TEXT]             Copy to the next migration revision
-  revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
-  archive-migrations <folder> [...] [--schema SCHEMA] [--destination DIR] [--reason TEXT] [--yes|-y]
-  archive-migrations --all [--keep <folder>...] [--schema SCHEMA] [--destination DIR] [--reason TEXT] [--yes|-y]
-           [--preserve-unresolved] [--skip-refused]
-                                              Move released folders outside migrations/ (dry run by default)
-  reconcile-migration <folder> --env dev|staging|prod --outcome <outcome> --evidence <file>
-           [--attempt <id>] [--superseded-by <folder>] [--yes|-y]
-                                              Record the owner's resolution of a pending attempt (local files only)
-  verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
-         [--format text|json] [--jobs N]     Evaluate migration checks read-only
   query --env <env> --connection <profile> [--file <path> | SQL]
                                               Run one bounded, conservative SELECT read-only
-  rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare]
-         [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]
-         [--yes|-y] [--confirm-target <db_unique_name>]
-                                              Confirm and execute a frozen deployment manifest
-  rollout --env prod --capsule DIR --retry-release-tag RUN_ID
-                                              Retry Git tagging from verified production evidence
-  feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan|release-plan> ...
-                                              Create mutable feature sources and freeze version-2 release capsules;
-                                              reconcile-run closes an unfinished run; convert-plan plans offline
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only
   compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown]
               [--emit-dba-script <file>]
                                               Compare complete environment catalogs by name, read-only
-  baseline export-source --from <env> [--scratch <dir>]
-                                              Export configured exact stored source and settings
-  baseline export-grants --from <env> [--scratch <dir>]
-                                              Export configured object and system grants
-  baseline export-data --from <env> [--scratch <dir>]
-                                              Export allow-listed reference rows without excluded columns
-  baseline build --to <env> [--from <env>] [--data] [--bundle <name>]
-                                              Build baseline migrations, optionally bundling structure, grants, and source
-  baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>
-                                              Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual] [--strict-bytes] [--no-restore-automations]
@@ -153,17 +123,11 @@ Commands:
   staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]
                                               Report, check, disable or undo a restored staging copy's jobs,
                                               APEX automations and network grants (DBA alias)
-  rehearsal-reset --env staging [--schema NAME] [--target-profile read|migration]
-         [--initialize-proof | --begin-restore --operation-id UUID | --apply --operation-id UUID]
-         [--confirm-target <db_unique_name>] [--yes|-y]
-                                              Archive local rollout and migration evidence after a staging restore
 Options:
-  --schema <NAME>                             Run one configured schema (except offline/tooling commands)
+  --schema <NAME>                             Run one configured schema (except upgrade-template, verify-local, template-status, targets, release, dev-test, skills, mcp and staging-neutralize)
   --help                                      Show this help
 Environment:
-  APEX_RELEASE_PROOF_REGISTRY                 Absolute shared staging proof registry file
-  MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
-  <ENV>_DBA_SQLCL_CONNECTION                   Read-only compare-env and baseline grant-export connection
+  <ENV>_DBA_SQLCL_CONNECTION                   Read-only compare-env connection
 "@ | Write-Output
 }
 
@@ -325,7 +289,7 @@ if ($Command -in @("--help", "-h")) {
 
 # --schema NAME is the one selection channel: strip it and set PROJECT_SCHEMA so
 # every child script's loader narrows to that schema.
-if ($Command -notin @("upgrade-template", "verify-local", "template-status", "targets", "migration-plan", "archive-migrations", "dev-test", "skills", "mcp", "feature", "reconcile-migration", "staging-neutralize", "rehearsal-reset")) {
+if ($Command -notin @("upgrade-template", "verify-local", "template-status", "targets", "release", "dev-test", "skills", "mcp", "staging-neutralize")) {
   $schemaFiltered = @()
   for ($index = 0; $index -lt $Arguments.Count; $index++) {
     if ($Arguments[$index] -eq "--schema") {
@@ -495,160 +459,31 @@ try {
       & (Join-Path $PSScriptRoot 'app_lock.ps1') $lockOperation @Arguments
       if ($LASTEXITCODE -ne 0) { Exit-Team $LASTEXITCODE }
     }
-    "check-conflicts" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)" }
-      Invoke-TeamBash -ScriptName "check_conflicts.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
-    }
-    "migration-plan" {
-      . (Join-Path $PSScriptRoot "migration_plan_args.ps1")
-      $planArguments = @()
-      foreach ($classifiedArgument in @(Get-MigrationPlanArgumentKinds -Values $Arguments)) {
-        if ($classifiedArgument.kind -ceq "folder") {
-          $planArguments += ConvertTo-MigrationFolderArgument ([string] $classifiedArgument.value)
-        } else {
-          $planArguments += [string] $classifiedArgument.value
+    "release" {
+      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 release <list|new|collect|check|run> [arguments]" }
+      $releaseArguments = @($Arguments)
+      if ($releaseArguments[0] -cin @("collect", "check", "run") -and $releaseArguments.Count -gt 1 -and -not $releaseArguments[1].StartsWith("-")) {
+        $releaseArguments[1] = ConvertTo-MigrationFolderArgument ([string] $releaseArguments[1])
+      }
+      if ($releaseArguments[0] -ceq "run") {
+        for ($releaseIndex = 1; $releaseIndex -lt $releaseArguments.Count; $releaseIndex++) {
+          $releaseValue = [string] $releaseArguments[$releaseIndex]
+          if ($releaseValue -ceq "--report" -and $releaseIndex + 1 -lt $releaseArguments.Count) {
+            $releaseIndex++
+            $releaseArguments[$releaseIndex] = ConvertTo-MigrationFolderArgument ([string] $releaseArguments[$releaseIndex])
+          } elseif ($releaseValue.StartsWith("--report=", [System.StringComparison]::Ordinal)) {
+            $releaseArguments[$releaseIndex] = "--report=" + (ConvertTo-MigrationFolderArgument $releaseValue.Substring("--report=".Length))
+          }
         }
       }
-      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("migration-plan") + $planArguments)
-    }
-    "archive-migrations" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 archive-migrations <folder> [...] [--schema SCHEMA] [--destination DIR] [--reason TEXT] [--yes] | --all [--keep <folder>...]" }
-      $archiveArguments = @($Arguments)
-      for ($archiveIndex = 0; $archiveIndex -lt $archiveArguments.Count; $archiveIndex++) {
-        $archiveValue = [string] $archiveArguments[$archiveIndex]
-        if ($archiveValue -cin @("--reason", "--schema") -and $archiveIndex + 1 -lt $archiveArguments.Count) {
-          $archiveIndex++
-        } elseif ($archiveValue -ceq "--keep" -and $archiveIndex + 1 -lt $archiveArguments.Count) {
-          $archiveIndex++
-          $archiveArguments[$archiveIndex] = ConvertTo-MigrationFolderArgument ([string] $archiveArguments[$archiveIndex])
-        } elseif ($archiveValue -ceq "--destination" -and $archiveIndex + 1 -lt $archiveArguments.Count) {
-          $archiveIndex++
-          $archiveArguments[$archiveIndex] = ConvertTo-MigrationFolderArgument ([string] $archiveArguments[$archiveIndex])
-        } elseif ($archiveValue.StartsWith("--keep=", [System.StringComparison]::Ordinal)) {
-          $keepValue = $archiveValue.Substring("--keep=".Length)
-          $archiveArguments[$archiveIndex] = "--keep=" + (ConvertTo-MigrationFolderArgument $keepValue)
-        } elseif ($archiveValue.StartsWith("--destination=", [System.StringComparison]::Ordinal)) {
-          $destinationValue = $archiveValue.Substring("--destination=".Length)
-          $archiveArguments[$archiveIndex] = "--destination=" + (ConvertTo-MigrationFolderArgument $destinationValue)
-        } elseif (-not $archiveValue.StartsWith("-")) {
-          $archiveArguments[$archiveIndex] = ConvertTo-MigrationFolderArgument $archiveValue
-        }
-      }
-      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("archive-migrations") + $archiveArguments)
-    }
-    "reconcile-migration" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 reconcile-migration <folder> --env dev|staging|prod --outcome <outcome> --evidence <file> [--attempt <id>] [--superseded-by <folder>] [--yes|-y]" }
-      $reconcileArguments = @($Arguments)
-      for ($reconcileIndex = 0; $reconcileIndex -lt $reconcileArguments.Count; $reconcileIndex++) {
-        $reconcileValue = [string] $reconcileArguments[$reconcileIndex]
-        if ($reconcileValue -ceq "--evidence" -and $reconcileIndex + 1 -lt $reconcileArguments.Count) {
-          $reconcileIndex++
-          $reconcileArguments[$reconcileIndex] = ConvertTo-MigrationFolderArgument ([string] $reconcileArguments[$reconcileIndex])
-        } elseif ($reconcileValue.StartsWith("--evidence=", [System.StringComparison]::Ordinal)) {
-          $evidenceValue = $reconcileValue.Substring("--evidence=".Length)
-          $reconcileArguments[$reconcileIndex] = "--evidence=" + (ConvertTo-MigrationFolderArgument $evidenceValue)
-        } elseif (-not $reconcileValue.StartsWith("-") -and $reconcileIndex -eq 0) {
-          $reconcileArguments[$reconcileIndex] = ConvertTo-MigrationFolderArgument $reconcileValue
-        }
-      }
-      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("reconcile-migration") + $reconcileArguments)
+      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("release") + $releaseArguments)
     }
     "dev-test" {
       Invoke-TeamBash -ScriptName "dev_test.sh" -ScriptArguments $Arguments
     }
-    "migrate" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 migrate <migration-folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]" }
-      $migrateArguments = @($Arguments)
-      for ($migrateIndex = 0; $migrateIndex -lt $migrateArguments.Count; $migrateIndex++) {
-        if ($migrateArguments[$migrateIndex] -ceq "--report" -and $migrateIndex + 1 -lt $migrateArguments.Count) {
-          $migrateIndex++
-          $migrateArguments[$migrateIndex] = ConvertTo-MigrationFolderArgument ([string] $migrateArguments[$migrateIndex])
-        } elseif ([string] $migrateArguments[$migrateIndex] -clike "--report=*") {
-          $reportValue = ([string] $migrateArguments[$migrateIndex]).Substring("--report=".Length)
-          $migrateArguments[$migrateIndex] = "--report=" + (ConvertTo-MigrationFolderArgument $reportValue)
-        } elseif (-not ([string] $migrateArguments[$migrateIndex]).StartsWith("-")) {
-          $migrateArguments[$migrateIndex] = ConvertTo-MigrationFolderArgument ([string] $migrateArguments[$migrateIndex])
-        }
-      }
-      Invoke-TeamBash -ScriptName "migrate.sh" -ScriptArguments $migrateArguments
-    }
     "query" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 query --env dev|staging|prod --connection tables|code|apex|ords|migration [--file <path> | SQL]" }
       Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("query") + @($Arguments))
-    }
-    "new-migration" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 new-migration <name> --source TYPE:NAME [...] --env dev [--schema NAME]" }
-      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("new-migration") + @($Arguments))
-    }
-    "revise" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 revise <folder> [--reason TEXT] | revise --check <folder>" }
-      $revisionArguments = @($Arguments)
-      if ($revisionArguments[0] -ceq "--check") {
-        if ($revisionArguments.Count -lt 2) { Fail "usage: scripts/team.ps1 revise --check <folder>" }
-        $revisionArguments[1] = ConvertTo-MigrationFolderArgument ([string] $revisionArguments[1])
-      } else {
-        $revisionArguments[0] = ConvertTo-MigrationFolderArgument ([string] $revisionArguments[0])
-      }
-      $teamArguments = @("revise") + $revisionArguments
-      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments $teamArguments
-    }
-    "verify" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]" }
-      Invoke-TeamBash -ScriptName "verify_checks.sh" -ScriptArguments @($Arguments | ForEach-Object { ConvertTo-MigrationFolderArgument $_ })
-    }
-    "rollout" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare] [--capsule DIR] [--stage-report FILE] [--recover ATTEMPT] [--report <file>]" }
-      $rolloutArguments = @($Arguments)
-      if (-not $rolloutArguments[0].StartsWith("-")) {
-        $rolloutArguments[0] = ConvertTo-MigrationFolderArgument ([string] $rolloutArguments[0])
-      }
-      for ($rolloutIndex = 1; $rolloutIndex -lt $rolloutArguments.Count; $rolloutIndex++) {
-        $rolloutValue = [string] $rolloutArguments[$rolloutIndex]
-        if ($rolloutValue -cin @("--report", "--capsule", "--stage-report") -and $rolloutIndex + 1 -lt $rolloutArguments.Count) {
-          $rolloutIndex++
-          $rolloutArguments[$rolloutIndex] = ConvertTo-MigrationFolderArgument ([string] $rolloutArguments[$rolloutIndex])
-        } else {
-          foreach ($pathOption in @("--report", "--capsule", "--stage-report")) {
-            $prefix = $pathOption + "="
-            if ($rolloutValue.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
-              $rolloutArguments[$rolloutIndex] = $prefix + (ConvertTo-MigrationFolderArgument $rolloutValue.Substring($prefix.Length))
-              break
-            }
-          }
-        }
-      }
-      Invoke-TeamBash -ScriptName "rollout.sh" -ScriptArguments $rolloutArguments
-    }
-    "feature" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan|release-plan> [arguments]" }
-      $featureArguments = @($Arguments)
-      if ($featureArguments[0] -ceq "freeze" -and $featureArguments.Count -gt 1) {
-        $featureArguments[1] = ConvertTo-MigrationFolderArgument ([string] $featureArguments[1])
-      }
-      if ($featureArguments[0] -ceq "convert-plan") {
-        # Only positional arguments are folders; the values of --feature and --format stay opaque.
-        $expectsValue = $false
-        for ($featureIndex = 1; $featureIndex -lt $featureArguments.Count; $featureIndex++) {
-          $featureValue = [string] $featureArguments[$featureIndex]
-          if ($expectsValue) { $expectsValue = $false; continue }
-          if ($featureValue -ceq "--feature" -or $featureValue -ceq "--format") { $expectsValue = $true; continue }
-          if (-not $featureValue.StartsWith("-")) {
-            $featureArguments[$featureIndex] = ConvertTo-MigrationFolderArgument $featureValue
-          }
-        }
-      }
-      if ($featureArguments[0] -ceq "apply" -or $featureArguments[0] -ceq "reconcile-run") {
-        for ($featureIndex = 1; $featureIndex -lt $featureArguments.Count; $featureIndex++) {
-          $featureValue = [string] $featureArguments[$featureIndex]
-          if ($featureValue -cmatch '^--(?:checks|execute-plan|evidence)$' -and $featureIndex + 1 -lt $featureArguments.Count) {
-            $featureIndex++
-            $featureArguments[$featureIndex] = ConvertTo-MigrationFolderArgument ([string] $featureArguments[$featureIndex])
-          } elseif ($featureValue -cmatch '^(--(?:checks|execute-plan|evidence)=)(.*)$') {
-            $featureArguments[$featureIndex] = $Matches[1] + (ConvertTo-MigrationFolderArgument $Matches[2])
-          }
-        }
-      }
-      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("feature") + $featureArguments)
     }
     "compare-schema" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]" }
@@ -673,34 +508,9 @@ try {
       }
       Invoke-TeamBash -ScriptName "compare_schema.sh" -ScriptArguments (@("compare-env") + $compareArguments)
     }
-    "baseline" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 baseline <export-source|export-grants|export-data|build|filter-ords> [options]" }
-      $baselineArguments = @($Arguments)
-      for ($baselineIndex = 0; $baselineIndex -lt $baselineArguments.Count; $baselineIndex++) {
-        $pathOptions = @("--scratch", "--data-dir", "--input", "--output")
-        if ($pathOptions -ccontains ([string] $baselineArguments[$baselineIndex]) -and $baselineIndex + 1 -lt $baselineArguments.Count) {
-          $baselineIndex++
-          $baselineArguments[$baselineIndex] = ConvertTo-MigrationFolderArgument ([string] $baselineArguments[$baselineIndex])
-        } else {
-          foreach ($pathOption in $pathOptions) {
-            $prefix = $pathOption + "="
-            if (([string] $baselineArguments[$baselineIndex]).StartsWith($prefix, [System.StringComparison]::Ordinal)) {
-              $pathValue = ([string] $baselineArguments[$baselineIndex]).Substring($prefix.Length)
-              $baselineArguments[$baselineIndex] = $prefix + (ConvertTo-MigrationFolderArgument $pathValue)
-              break
-            }
-          }
-        }
-      }
-      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("baseline") + $baselineArguments)
-    }
     "staging-neutralize" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]" }
       Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("staging-neutralize") + @($Arguments))
-    }
-    "rehearsal-reset" {
-      if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 rehearsal-reset --env staging --help" }
-      Invoke-TeamBash -ScriptName "team.sh" -ScriptArguments (@("rehearsal-reset") + @($Arguments))
     }
     "backup-db" {
       if ($Arguments.Count -ne 0) { Fail "backup-db does not accept arguments" }

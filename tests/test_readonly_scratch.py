@@ -1,14 +1,11 @@
 import contextlib
 import io
-import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from scripts import compare_schema, migration_checks
-from scripts.migration_checks import CheckReport
+from scripts import compare_schema
 from scripts.schema_catalog import CatalogError, ObjectDefinition, ObjectKey, SchemaInventory, SchemaSnapshot
 import _no_real_sqlcl  # noqa: F401  (keeps tests away from a real SQLcl)
 
@@ -88,54 +85,6 @@ class CompareSchemaScratchTests(unittest.TestCase):
             self.assertEqual(code, 130)
             self.assertIn("nothing was changed", stderr)
             self.assertEqual(leftovers, [])
-
-
-class PreflightScratchTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        folder = self.root / "migrations" / "2026-09-27_create-orders-r001"
-        folder.mkdir(parents=True)
-        (folder / "001-change.sql").write_text("CREATE TABLE ORDERS (ID NUMBER);\n", encoding="utf-8")
-        (folder / "checks.json").write_text(json.dumps({
-            "schemaVersion": 1, "preconditions": [],
-            "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}]}) + "\n", encoding="utf-8")
-
-    def run_preflight(self, *, inventory_fn=None, checks=None):
-        observed = inventory("APP_DEV")
-        inventory_capture = inventory_fn or (lambda target, run_dir: observed)
-        stdout, stderr = io.StringIO(), io.StringIO()
-        # The snapshot session records its own owner inventory, so the fake reads it when none is passed (S5).
-        with mock.patch.dict(os.environ, VALUES), \
-                mock.patch("scripts.schema_catalog.capture_inventory", inventory_capture), \
-                mock.patch("scripts.schema_catalog.capture_snapshot", lambda target, found, keys, run_dir: snapshot_of(
-                    found if found is not None else inventory_capture(target, run_dir), keys)), \
-                mock.patch.object(migration_checks, "run_checks", lambda *args, **kwargs: checks or CheckReport(True, True, (), (), {"complete": True})), \
-                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            code = migration_checks.main(["migrations/2026-09-27_create-orders-r001", "--env", "dev", "--repo-root", str(self.root)])
-        leftovers = sorted(path.name for path in (self.root / "scratch").glob("migration-preflight*"))
-        return code, stderr.getvalue(), leftovers
-
-    def test_a_complete_preflight_leaves_no_scratch_directory(self):
-        code, _, leftovers = self.run_preflight()
-        self.assertEqual(code, 0)
-        self.assertEqual(leftovers, [])
-
-    def test_a_preflight_that_could_not_finish_keeps_its_logs(self):
-        incomplete = CheckReport(False, False, (), ({"code": "CHECK_UNAVAILABLE", "message": "SQLcl failed"},), {"complete": False})
-        code, _, leftovers = self.run_preflight(checks=incomplete)
-        self.assertEqual(code, 2)
-        self.assertEqual(len(leftovers), 1)
-
-    def test_an_interrupted_preflight_says_nothing_changed_and_leaves_no_traceback_or_directory(self):
-        def interrupted(target, run_dir):
-            raise KeyboardInterrupt
-
-        code, stderr, leftovers = self.run_preflight(inventory_fn=interrupted)
-        self.assertEqual(code, 130)
-        self.assertIn("nothing was changed", stderr)
-        self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":

@@ -29,10 +29,14 @@ At the start of every conversation, before your first reply:
 4. Open your first reply with one line: `Style: <name>`, plus ` + personal layer (N entries)`
    when `personal.md` has entries. If the value is invalid or a file is missing,
    fall back to `standard` and say so in that line.
+5. **Session-start release picker:** When the user starts a session without naming a
+   release folder, run `scripts/team.sh release list` (offline). If open `draft` release
+   folders exist under `releases/`, ask which folder to work on as a numbered list:
+   `1- <folder a>`, `2- <folder b>`, ..., `N- Create a new release folder`.
 
 Precedence, highest first: this file, `.agents/rules/agent-safety.md` and the project rules; then
 `personal.md`; then the style. A style or a personal entry never relaxes a gate (commits and
-pushes, database writes, migrations, imports, claiming a check that did not run).
+pushes, database writes, release applies, imports, claiming a check that did not run).
 
 Learning, unless `AGENT_STYLE_LEARNING=off`: when the developer states a preference or corrects your
 format, or makes the same choice three times, add one dated line to `personal.md` under the matching
@@ -86,7 +90,7 @@ independent of optional workflow packs. After installing Matt's pack, invoke
 - Keep APEXlang and SQL files in LF line endings. Review generated source and
   database mirror changes before committing.
 - The shared database is the runtime source of truth. Do not add custom team
-  metadata tables, mutexes, checkout rosters, or database-backed migration
+  metadata tables, mutexes, checkout rosters, or database-backed release
   ledgers.
 
 Supported commands may use a SQLcl login different from the target schema;
@@ -161,115 +165,29 @@ owner-only commands retain their owner-login checks. See
   `sourceVerified`, `lifecycleStatus` and the lifecycle report before recovery.
   Never resume a workflow or repair a task automatically;
   `--force` does not bypass this gate. Follow
-  [docs/publish-rules.md](docs/publish-rules.md#runtime-verification-after-import).
-- **Features first for stored code:** Keep one mutable definition per object in
-  `features/<slug>/<SCHEMA>/` for packages, types, procedures, functions,
-  triggers, and views. Use `feature capture` to start from live DEV stored
-  source, `feature doctor --live` to check ownership and drift, and
-  `feature diff` to review changes. Keep revisions in Git. Coordinate with the
-  team before replacing shared DEV objects and obtain authorization for the
-  write. Run `feature apply <slug> --schema NAME --env dev --prepare --unit TYPE:NAME`
-  to review the exact scope, target and before-state. Run `feature apply` with
-  `--execute-plan FILE` only for the authorized DEV write. For views, select
-  a dedicated `views/<name>.sql` definition with explicit projected columns.
-  Inspect unresolved attempts with `feature apply --status`. Use
-  `feature reconcile-run <plan-id> --env dev --evidence FILE` only after
-  reviewing same-target evidence and confirming the original operation ended.
-  Ship one final definition per object in the release capsule. Build the next
-  manifest with `feature release-plan` (what changed since the last `release/*`
-  tag, which a successful production rollout creates); review it before freezing.
-  Make a staging copy of production inert with `staging-neutralize` before any
-  rehearsal write there; its `--apply` follows the same target-name rule as `migrate`.
-  Before restoring staging, use `rehearsal-reset --env staging --begin-restore` with an operation ID to invalidate
-  the previous staging proof in the shared registry. After the restore, use `rehearsal-reset --env staging --apply`
-  with the same operation ID to archive local evidence and activate a fresh proof generation. Both state changes
-  follow the staging target-name and acknowledgment rules.
-  See [docs/feature-releases.md](docs/feature-releases.md).
-- **Dated migrations for one-time changes:** Use them for schema changes,
-  backfills, seed data, data fixes, and ordered transitions that require an
-  intermediate code version. Put each migration in
-  an independently configured migration owner when needed: the optional
-  `MIGRATION_SCHEMA`, `MIGRATION_SQLCL_CONNECTION`, `MIGRATION_EXPECTED_USER`
-  triple and its `STAGING_` / `PROD_` equivalents must be configured together.
-  Each accepts aligned lists. An absent triple uses the original environment
-  profile; an incomplete or empty triple refuses. Metadata mirrors retain
-  their own profiles. Then put each migration in
-  `migrations/YYYY-MM-DD_<name>-rNNN/` with consecutive named SQL steps such as
-  `001-create-table.sql`, plus `checks.json`. No developer name belongs in the
-  path. Keep source immutable after a write attempt; a follow-up uses the next
-  revision folder. A pending or unknown attempt is closed by its owner with
-  `scripts/team.sh reconcile-migration` ([docs](docs/migration-attempt-resolution.md)).
-  An agent may pass `--yes` to `reconcile-migration`, `feature reconcile-run` and the rollout
-  recovery so the command finishes without a person. `--yes` replaces the typed acknowledgment
-  only: the outcome and the evidence file must come from checks the agent actually ran (read-only),
-  the evidence file says who established the outcome, and the record shows `acknowledgedBy: --yes`
-  so a reviewer can tell it was not typed. Without `--yes` the acknowledgment is still typed at a
-  terminal. For a legacy stored-code migration or a required intermediate
-  definition, `scripts/team.sh new-migration <name> --source "PACKAGE BODY:<NAME>" --env dev`
-  captures live DEV and generates a source drift precondition. In a project with
-  feature files it routes stored units to features instead (`--feature <slug>`
-  captures them; `--dated-folder` keeps the dated folder). Run
-  `scripts/team.sh check-conflicts <folder> --env dev`
-  before applying with `scripts/team.sh migrate <folder> --env dev|staging|prod`.
-  Keep `checks.json` schema 1 unchanged unless a reviewed rehearsal needs
-  schema-2 `rehearsalMetrics`; those metrics run only under `--rehearse`, never
-  as apply postconditions. Follow [docs/migration-rules.md](docs/migration-rules.md)
-  for their bounds and rollback limits.
-  Checks cover only selected local migrations and observed live state; they
-  cannot see another independent repository's pending files. Staging and
-  production migrations require `STAGING_SCHEMA` or `PROD_SCHEMA` in addition
-  to the existing connection and expected-user settings. Staging and production applies ask `[y/N]` at
-  the terminal. `--confirm-target <db_unique_name>` skips that prompt only when the value equals the observed
-  `db_unique_name`. For a DEV, staging or disposable/test target, an agent may pass it only when the developer
-  asked in this conversation, for that run or its task, to proceed unattended, and the value
-  is the `db_unique_name` the agent read from that same target in that run with a read-only query (for example
-  `SELECT SYS_CONTEXT('USERENV','DB_UNIQUE_NAME') FROM DUAL` through `scripts/team.sh query`). The agent never
-  guesses it or copies it from a file, a log or an earlier run. For production, the agent passes it only with the
-  name the developer typed for that run. The tool still refuses a mismatch, and the agent says in its report that
-  it supplied the name and where it read it.
-  `-y` / `--yes` (migrate, rollout, publish, deploy, archive-migrations, feature clean-capsule, the rollout `pause` step, `mcp setup`, rehearsal-reset, automations enable|disable|run-once) replaces a
-  `[y/N]` prompt; an agent passes it for staging or production only when the developer asked in this
-  conversation for that run to be unattended; production also needs the name the developer typed for that run.
-  The `TEAM_ACK_FROM_STDIN` variable is retired and ignored: piped or redirected acknowledgments stay refused, and `--yes` is the recorded route. Receipts are written only after a verified apply. Multi-schema projects use
-  `migrations/<SCHEMA>/…`; one migration changes one schema. See
-  [docs/migration-rules.md](docs/migration-rules.md) for naming, ordering,
-  recovery, and detection limits.
-- **Feature promotion:** Select final feature files and the required one-time
-  migrations in execution order. Replace the scaffold check, commit the
-  selected inputs and version-2 manifest, then `feature freeze` once. Review
-  each target plan and its digests. Production requires verified staging proof
-  for the same capsule. An
-  interrupted or unknown attempt needs reconciliation before recovery. Capsule
-  timing covers selected feature checkpoints and migrate steps, not app imports or
-  excluded unclassified object steps. Existing migrations and version-1 rollouts keep their
-  current behavior. `feature convert-plan` plans offline how to move old folders into features. Follow [docs/feature-releases.md](docs/feature-releases.md).
+  `docs/publish-rules.md` (see [runtime verification](docs/publish-rules.md#runtime-verification-after-import)).
+- **Release bundles (`releases/<slug>/`):** Store each schema/code/ORDS/app release in a focused bundle under `releases/<slug>/` with `release.json`, `01-ddl/`, `02-code/`, `03-ords/`, and `04-verify/`. Optional separate release-owner triples (`MIGRATION_SCHEMA`, `MIGRATION_SQLCL_CONNECTION`, `MIGRATION_EXPECTED_USER` and `STAGING_` / `PROD_` equivalents) must be configured together when used; an absent triple retains the original environment profile. Use `scripts/team.sh release new <slug>` to create a draft bundle and `scripts/team.sh release collect <bundle> --from dev --schema <SCHEMA> --object <TYPE:NAME> --mode <new|replace|patch> [--target-env <env>]` to export stored units into `02-code/`. Run read-only `scripts/team.sh release check <bundle> --env <dev|staging|prod>` before any apply. `release` commands have **zero interactive `[y/N]` prompts** and are 100% agent-runnable; `release run <bundle> --env <dev|staging|prod> --confirm-target <db_unique_name>` requires explicit user authorization for that write and fails closed if live `DB_UNIQUE_NAME` does not match. For DEV, staging or disposable/test targets, an agent supplies `--confirm-target` only when the developer asked in this conversation to run that target write, reading `db_unique_name` from that same target in that run with a read-only query (`SELECT SYS_CONTEXT('USERENV','DB_UNIQUE_NAME') FROM DUAL` through `scripts/team.sh query`) — never guessing or copying from a log or earlier run. For production, an agent passes `--confirm-target` only with the exact name the developer typed for that run. `release run` backs up existing touched objects to `scratch/backups/`, applies `01-ddl/` -> `02-code/` -> `03-ords/` in 1 SQLcl session per schema, fails only on *new* invalid objects (ignoring pre-existing unrelated invalids), runs `04-verify/`, deploys optional `apps` via `scripts/deploy.sh <app_id> --env <env> --yes --confirm-target <db_unique_name>`, writes a markdown report to `scratch/release-reports/`, and on `--env prod` locks `release.json` (`status: "deployed"`) and creates Git tag `release/<slug>`. Make a staging copy of production inert with `staging-neutralize` before any rehearsal write there; its `--apply` follows the same target-name rule. See [docs/release-workflow.md](docs/release-workflow.md).
 - **Schema comparison:** Use `scripts/team.sh compare-schema --env staging
   --object CUSTOMERS` or `--from dev --to prod --pattern 'HR_*'` to compare
-  selected live objects. This reports schema drift; local receipts cannot
-  reliably attribute a shape to one migration file.
-- **Daily change record:** A package migration holds the whole source, so Git
-  cannot show what changed. For each day with code work, keep
-  `ai_generate/YYYY-MM-DD/` with the readable diff of each migration
-  (`migrate --env dev` writes it after a verified apply; by hand,
-  `python3 scripts/migration_diff.py migrations/<SCHEMA>/<folder>` before
-  `backup-db` refreshes the mirror; `feature diff` writes complete stored-unit
-  source diffs under `feature-diffs/`) and one `WALKTHROUGH.md` for that day. Commit the folder with the work. See
+  selected live objects. This reports current catalog drift. Keep it narrow: a schema can
+  hold thousands of objects, so never compare a whole schema (no `--pattern '*'`,
+  no unfiltered run). Name the objects a change creates or changes (`--object`,
+  repeated) or use a narrow pattern. For a readiness check, read only the
+  change's own objects with one read-only query (`all_objects`, `all_synonyms`,
+  `dba_source`), and check the synonym and source before calling an object missing.
+- **Daily change record:** A stored package file holds the whole source, so Git
+  cannot always show what changed since the database mirror. For each day with code work, keep
+  `ai_generate/YYYY-MM-DD/` with readable diffs (`git diff` or unified diffs against `database/<SCHEMA>/`) and one `WALKTHROUGH.md` for that day. Commit the folder with the work. See
   [docs/daily-change-record.md](docs/daily-change-record.md).
 - **Promotion:** Put an explicit deployment descriptor in the application
-  source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod`;
-  each direct import requires the displayed `[y/N]` confirmation, typed at a terminal, or `-y` under the unattended-run rule in the Migrations bullet above. Add
+  source. Use `scripts/team.sh deploy <app-id> --env staging` or `--env prod` (or list app IDs in `release.json` `apps` so `release run` invokes `deploy.sh --yes --confirm-target <db_unique_name>`).
+  Each direct `deploy` import requires the displayed `[y/N]` confirmation, typed at a terminal, or `-y` / `--confirm-target` under the unattended-run rule above (`TEAM_ACK_FROM_STDIN` is retired and ignored). For DEV, staging or a disposable/test target, `-y` / `--yes` (`deploy`, `staging-neutralize`, `mcp setup`, `automations enable|disable|run-once`) and `--confirm-target` follow the same conversation-authorization and read-only `db_unique_name` rules. Add
   `--manual` to print a DBA runbook without connecting. A deployment writes
-  to the selected APEX workspace and parsing schema. For an ordered release
-  manifest and recovery packet, follow
-  [the production deployment runbook](docs/production-deployment.md).
-- **Checks and shared-target reads:** Use `scripts/team.sh verify` to evaluate
-  declared migration checks read-only. For ad-hoc shared-target reads, use
+  to the selected APEX workspace and parsing schema.
+- **Checks and shared-target reads:** Use `scripts/team.sh release check` for
+  bundle preflight. For ad-hoc shared-target reads, use
   `scripts/team.sh query` with a named configured profile and identity guards;
-  do not improvise a raw SQLcl read. `migrate --rehearse` runs eligible DML on
-  the selected real target and rolls back its transaction, so use it only when
-  that exact target and DML have been authorized. Its scalar checks do not
-  prove that sequence/identity advancement, autonomous work, external effects,
-  or DDL were undone. Do not lower or remove a reviewed assertion just to make a
+  do not improvise a raw SQLcl read. Do not lower or remove a reviewed assertion just to make a
   command pass. The explicitly approved disposable-fixture route in
   [local qualification](docs/local-qualification.md) remains scoped to its
   named local target and cleanup.
@@ -277,6 +195,7 @@ owner-only commands retain their owner-login checks. See
   read-only SQLcl identity check. `scripts/team.sh query --env <env>
   --connection <profile> [--schema NAME] [--file PATH | SQL]` runs the bounded,
   conservative read-only query flow described in [README.md](README.md#read-only-ad-hoc-queries).
+  `scripts/team.sh targets` reports the configured schemas, connections and logins offline.
   `scripts/team.sh verify-local` validates local
   configuration, lock, app descriptors and native Oracle skills offline.
   `scripts/team.sh template-status` reports local template-owned file hashes
@@ -293,9 +212,6 @@ owner-only commands retain their owner-login checks. See
   These commands never repair workflow/task state or advance a failed publish
   baseline. Session creation/deletion may run configured app session
   initialization/cleanup code; the command states this before confirmation.
-  Migration, rehearsal and rollout script delivery also runs the SQLcl
-  transport preflight; an error refuses before the payload starts, while a
-  warning keeps the exact source bytes and requires review of the emitted SQL.
   `scripts/team.sh backup-db` refreshes the local table and code mirrors, and the
   ORDS mirror when the ORDS profile exists. `scripts/team.sh backup-ords`
   exports ORDS metadata only: it never enables REST, imports, changes ORDS
@@ -428,12 +344,12 @@ lock's `commit` with its recorded `templateRef` (branch or tag), using a portabl
 - Before writing PL/SQL for APEX automations, workflow activities, task
   actions, or background execution chains, read
   `.agents/skills/apex-background/SKILL.md`.
-- Read the relevant `.apx`, APEXlang, SQL, and deployment descriptor files
+- Read the relevant `.apx`, APEXlang, SQL, release bundle, and deployment descriptor files
   before editing them. Preserve the app's numeric ID and explicit workspace
-  mapping. Do not invent a live workspace, schema, connection, or migration
+  mapping. Do not invent a live workspace, schema, connection, or release
   result.
-- Treat export, migration, publish, and deployment commands according to
-  their database effects. Do not run a migration, import, or deployment unless
+- Treat export, release, publish, and deployment commands according to
+  their database effects. Do not run `release run`, import, or deployment unless
   the user requested that operation. Export only when requested because it
   refreshes tracked source from shared Builder state.
 - Coordinate shared DEV app imports with the human team, except the explicitly
@@ -448,7 +364,7 @@ lock's `commit` with its recorded `templateRef` (branch or tag), using a portabl
   compatibility information for the intended target through the configured,
   identity-guarded read-only flow. `scripts/team.sh doctor` (or `team.ps1 doctor`)
   reports the full database version and `COMPATIBLE` for each checked DEV target;
-  existing migration and schema-comparison observations also record a database
+  existing schema-comparison observations also record a database
   version, but do not establish its compatibility setting. Do not infer staging
   or production capabilities from DEV. For code intended for several targets,
   use features supported by all of them, within their compatibility settings.
@@ -463,5 +379,4 @@ lock's `commit` with its recorded `templateRef` (branch or tag), using a portabl
   setting in `.env`, and never change database compatibility to fit the code.
 
 See [README.md](README.md) for setup and command examples, and
-[migrations/README.md](migrations/README.md) and
-[docs/migration-rules.md](docs/migration-rules.md) for the migration contract.
+[docs/release-workflow.md](docs/release-workflow.md) for the Lean 6-Step Release Bundle contract.

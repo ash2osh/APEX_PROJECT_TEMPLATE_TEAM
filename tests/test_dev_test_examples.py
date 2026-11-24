@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 
 from scripts.dev_test_bindings import RenderContext, render_object_tokens
+from scripts.dev_test_checks import validate_sql_script
 from scripts.dev_test_manifest import load_suite
 from scripts.read_only_query import prepare_query
-from scripts.rollout import validate_sql_script
 
 
 ROOT = Path(__file__).resolve().parents[1]

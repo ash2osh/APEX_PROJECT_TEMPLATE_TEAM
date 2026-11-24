@@ -30,55 +30,25 @@ Commands:
   app-lock <app_id> [--env dev] [--comment <text>]
                                               Acquire a native DEV application lock
   app-unlock <app_id> [--env dev]             Release only your DEV application lock
-  check-conflicts <folder> [...] (--env <env>|--local)
-                                              Preflight selected migrations against local/live scope
-  migration-plan [<folder> ...] [--live --env <env>] [--schema NAME] [--format text|json|markdown]
-                                              Inventory selected migrations or run a guarded read-only preflight
+  release list [--format text|json]           List open draft and deployed release bundles offline
+  release new <slug>                          Create a new draft release bundle under releases/<slug>/
+  release collect <bundle> --from <env> --schema <SCHEMA> --object <TYPE:NAME> --mode <new|replace|patch> [--target-env <env>] [--file <relpath>]
+                                              Export live source into 02-code/ and update release.json
+  release check <bundle> --env <dev|staging|prod> [--format text|json] [--allow-existing]
+                                              Read-only preflight, patch SHA-256 check, and plan preview
+  release run <bundle> --env <dev|staging|prod> --confirm-target <db_unique_name> [--allow-existing] [--skip-backup] [--report <path>]
+                                              Zero-prompt 6-step backup, apply, invalid-delta check, verify, app deploy, report & prod lock
   dev-test [--plan|--run|--report RUN_ID|--cleanup RUN_ID] [--env dev] [--schema NAME]
            [--suite FILE] [--scenario ID ...] [--format text|json|markdown]
                                               Plan, run, inspect or explicitly clean retained DEV fixtures
-  new-migration <name> --source TYPE:NAME [...] --env dev
-                                              Start a code migration from the live DEV source
-  migrate <folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>] [--confirm-target <db_unique_name>] [--yes|-y]
-                                              Apply, or rehearse DML in one transaction and roll it back
-  revise <folder> [--reason TEXT]             Copy to the next migration revision
-  revise --check <folder>                     Report whether local attempt/receipt evidence locks a folder
-  archive-migrations <folder> [...] [--schema SCHEMA] [--destination DIR] [--reason TEXT] [--yes|-y]
-  archive-migrations --all [--keep <folder>...] [--schema SCHEMA] [--destination DIR] [--reason TEXT] [--yes|-y]
-           [--preserve-unresolved] [--skip-refused]
-                                              Move released folders outside migrations/ (dry run by default)
-  reconcile-migration <folder> --env dev|staging|prod --outcome <outcome> --evidence <file>
-           [--attempt <id>] [--superseded-by <folder>] [--yes|-y]
-                                              Record the owner's resolution of a pending attempt (local files only)
-  verify <folder> [...] --env <env> [--phase pre|post|both] [--only-failed]
-         [--format text|json] [--jobs N]     Evaluate migration checks read-only
   query --env <env> --connection <profile> [--file <path> | SQL]
                                               Run one bounded, conservative SELECT read-only
-  rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare]
-         [--capsule DIR] [--stage-report FILE] [--recover UUID] [--report <file>]
-         [--yes|-y] [--confirm-target <db_unique_name>]
-                                              Confirm and execute a frozen deployment manifest
-  rollout --env prod --capsule DIR --retry-release-tag RUN_ID
-                                              Retry Git tagging from verified production evidence
-  feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan|release-plan> ...
-                                              Create mutable feature sources and freeze version-2 release capsules;
-                                              reconcile-run closes an unfinished run; convert-plan plans offline
   compare-schema [--from <env>] (--to <env>|--env <env>)
                 (--object <name>|--pattern <glob>) [...] [--format text|json]
                                               Compare selected live schema objects read-only
   compare-env --from <env> --to <env> [--section <name>] [...] [--format text|json|markdown]
               [--emit-dba-script <file>]
                                               Compare complete environment catalogs by name, read-only
-  baseline export-source --from <env> [--scratch <dir>]
-                                              Export configured exact stored source and settings
-  baseline export-grants --from <env> [--scratch <dir>]
-                                              Export configured object and system grants
-  baseline export-data --from <env> [--scratch <dir>]
-                                              Export allow-listed reference rows without excluded columns
-  baseline build --to <env> [--from <env>] [--data] [--bundle <name>]
-                                              Build baseline migrations, optionally bundling structure, grants, and source
-  baseline filter-ords --exclude-module NAME [...] --input <file> --output <file>
-                                              Remove complete named modules from an ORDS export
   backup-db                                   Refresh the table and code mirrors (and ORDS, when configured)
   backup-ords                                 Export ORDS metadata read-only to database/<SCHEMA>/ords/schema.sql
   deploy <app_id> --env <staging|prod> [--manual] [--strict-bytes] [--no-restore-automations]
@@ -102,17 +72,11 @@ Commands:
   staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]
                                               Report, check, disable or undo a restored staging copy's jobs,
                                               APEX automations and network grants (DBA alias)
-  rehearsal-reset --env staging [--schema NAME] [--target-profile read|migration]
-         [--initialize-proof | --begin-restore --operation-id UUID | --apply --operation-id UUID]
-         [--confirm-target <db_unique_name>] [--yes|-y]
-                                              Archive local rollout and migration evidence after a staging restore
 Options:
-  --schema <NAME>                             Run one configured schema (except offline/tooling commands)
+  --schema <NAME>                             Run one configured schema (except upgrade-template, verify-local, template-status, targets, release, dev-test, skills, mcp and staging-neutralize)
   --help                                      Show this help
 Environment:
-  APEX_RELEASE_PROOF_REGISTRY                 Absolute shared staging proof registry file
-  MIGRATION_PREFLIGHT_INVENTORY_RETRIES        Retry changing live catalogs (default 3)
-  <ENV>_DBA_SQLCL_CONNECTION                   Read-only compare-env and baseline grant-export connection
+  <ENV>_DBA_SQLCL_CONNECTION                   Read-only compare-env connection
 USAGE
 }
 
@@ -125,10 +89,10 @@ Everyday commands:
   doctor                                  Check .env and the database connections
   export <app_id>                         Copy a live app from DEV into Git
   publish <app_id> --env dev              Import your edited app files to DEV
-  check-conflicts <folder> --env dev      Check a migration against the live database
-  migrate <folder> --env dev              Apply a migration
-  revise <folder>                         Start the next revision of an attempted migration
-  archive-migrations <folder> [...]       Preview migration folders to archive
+  release list                            List open draft and deployed release bundles
+  release check <bundle> --env dev        Preflight and preview a release bundle
+  release run <bundle> --env dev --confirm-target <db>
+                                          Execute a release bundle against DEV
   backup-db                               Refresh the local database mirror
   upgrade-template --dry-run              Preview a template upgrade
 
@@ -151,7 +115,7 @@ command_name="$1"
 shift
 # --schema NAME is the one selection channel: strip it and export PROJECT_SCHEMA
 # so every child script's loader narrows to that schema.
-if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != targets ] && [ "$command_name" != migration-plan ] && [ "$command_name" != archive-migrations ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != feature ] && [ "$command_name" != reconcile-migration ] && [ "$command_name" != staging-neutralize ] && [ "$command_name" != rehearsal-reset ]; then
+if [ "$command_name" != upgrade-template ] && [ "$command_name" != verify-local ] && [ "$command_name" != template-status ] && [ "$command_name" != targets ] && [ "$command_name" != release ] && [ "$command_name" != dev-test ] && [ "$command_name" != skills ] && [ "$command_name" != mcp ] && [ "$command_name" != staging-neutralize ]; then
   schema_filtered=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -372,182 +336,57 @@ case "$command_name" in
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/upgrade_apexlang.sh" "$@"
     ;;
-  check-conflicts)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh check-conflicts <migration-folder> [...] (--env dev|staging|prod | --local)"
-    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      exec "$REPO_ROOT/scripts/check_conflicts.sh" "$@"
-    ;;
-  migration-plan)
-    cd "$REPO_ROOT"
-    migration_plan_root="$REPO_ROOT"
-    case "$(uname -s 2>/dev/null)" in
-      MINGW*|MSYS*|CYGWIN*)
-        if command -v cygpath >/dev/null 2>&1; then
-          # Native Windows Python cannot resolve Git Bash's /c/... spelling;
-          # mixed paths also survive brackets and spaces in the checkout root.
-          migration_plan_root="$(cygpath -m -- "$REPO_ROOT")"
-        fi
-        ;;
-    esac
-    exec python3 -m scripts.migration_plan --repo-root "$migration_plan_root" "$@"
-    ;;
-  archive-migrations)
-    archive_root="$REPO_ROOT"
-    case "$(uname -s 2>/dev/null)" in
-      MINGW*|MSYS*|CYGWIN*)
-        if command -v cygpath >/dev/null 2>&1; then
-          archive_root="$(cygpath -m -- "$REPO_ROOT")"
-        fi
-        ;;
-    esac
-    cd "$REPO_ROOT"
-    exec python3 -m scripts.migration_archive --repo-root "$archive_root" "$@"
-    ;;
-  reconcile-migration)
-    # Local files only: the command never starts SQLcl and never connects to a database.
-    reconcile_root="$REPO_ROOT"
-    case "$(uname -s 2>/dev/null)" in
-      MINGW*|MSYS*|CYGWIN*)
-        if command -v cygpath >/dev/null 2>&1; then
-          reconcile_root="$(cygpath -m -- "$REPO_ROOT")"
-        fi
-        ;;
-    esac
-    cd "$REPO_ROOT"
-    exec python3 -m scripts.migration_resolution --repo-root "$reconcile_root" "$@"
-    ;;
-  dev-test)
-    exec "$REPO_ROOT/scripts/dev_test.sh" "$@"
-    ;;
-  migrate)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh migrate <migration-folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]"
-    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      exec "$REPO_ROOT/scripts/migrate.sh" "$@"
-    ;;
-  query)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh query --env dev|staging|prod --connection tables|code|apex|ords|migration [--file <path> | SQL]"
-    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
-    cd "$REPO_ROOT"
-    exec python3 -m scripts.read_only_query "$@"
-    ;;
-  new-migration)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh new-migration <name> --source TYPE:NAME [...] --env dev [--schema NAME]"
-    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
-    # shellcheck source=load_env.sh
-    source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
-    cd "$REPO_ROOT"
-    exec python3 -m scripts.new_migration "$@"
-    ;;
-  revise)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh revise <folder> [--reason TEXT] | revise --check <folder>"
-    cd "$REPO_ROOT"
-    exec python3 -m scripts.migration_revision "$@"
-    ;;
-  verify)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh verify <migration-folder> [...] --env <env> [--phase pre|post|both] [--only-failed] [--format text|json] [--jobs N]"
-    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      exec "$REPO_ROOT/scripts/verify_checks.sh" "$@"
-    ;;
-  rollout)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh rollout <manifest.json> --env <env> [--from-step N] [--dry-run] [--prepare] [--capsule DIR] [--stage-report FILE] [--recover ATTEMPT] [--report <file>]"
-    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
-      exec "$REPO_ROOT/scripts/rollout.sh" "$@"
-    ;;
-  feature)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh feature <init|capture|apply|diff|doctor|freeze|clean-capsule|reconcile-run|convert-plan|release-plan> [arguments]"
-    if [ "$1" = --help ] || [ "$1" = -h ]; then
-      cd "$REPO_ROOT"
-      exec python3 -m scripts.feature_cli --help
-    fi
-    feature_command="$1"
-    case "$feature_command" in
-      init|diff|clean-capsule|convert-plan|release-plan) ;;
-      freeze|doctor)
-        # The comparison with DEV is optional: load the project file only when it exists
-        # (and, for doctor, only for --live), so an offline freeze or doctor needs no .env.
-        feature_load_env=false
-        if [ "$feature_command" = freeze ]; then feature_load_env=true; fi
-        for feature_argument in "$@"; do
-          case "$feature_argument" in
-            --live) feature_load_env=true ;;
-            --help|-h) feature_load_env=false; break ;;
-          esac
-        done
-        if [ "$feature_load_env" = true ]; then
-          PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
-          if [ -f "$PROJECT_ENV_FILE" ] || [ -f "$REPO_ROOT/$PROJECT_ENV_FILE" ]; then
-            # shellcheck source=load_env.sh
-            source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
-          fi
-        fi
-        ;;
-      capture|apply|reconcile-run)
-        if [ "$feature_command" = capture ]; then
-          [ "$#" -ge 2 ] || fail "usage: scripts/team.sh feature capture <slug> (--package NAME | --trigger NAME | --procedure NAME | --function NAME | --type NAME) --schema SCHEMA --env dev [--refresh]"
-        fi
-        feature_help=false
-        feature_offline=false
-        for feature_argument in "$@"; do
-          if [ "$feature_argument" = --help ] || [ "$feature_argument" = -h ]; then feature_help=true; fi
-          if [ "$feature_command" = apply ] && [ "$feature_argument" = --status ]; then feature_offline=true; fi
-        done
-        feature_environment=""
-        feature_environment_count=0
-        feature_arguments=("$@")
-        for feature_index in "${!feature_arguments[@]}"; do
-          case "${feature_arguments[$feature_index]}" in
-            --env)
-              feature_next=$((feature_index + 1))
-              [ "$feature_next" -lt "${#feature_arguments[@]}" ] || fail "feature $feature_command requires --env dev"
-              feature_environment_count=$((feature_environment_count + 1))
-              [ "$feature_environment_count" -eq 1 ] || fail "feature $feature_command accepts only one --env value"
-              feature_environment="${feature_arguments[$feature_next]}"
-              ;;
-            --env=*)
-              feature_environment_count=$((feature_environment_count + 1))
-              [ "$feature_environment_count" -eq 1 ] || fail "feature $feature_command accepts only one --env value"
-              feature_environment="${feature_arguments[$feature_index]#--env=}"
-              ;;
-          esac
-        done
-        if [ "$feature_help" = false ]; then
-          if [ "$feature_command" != reconcile-run ]; then
-            [ "$feature_environment" = dev ] || fail "feature $feature_command is DEV-only; use --env dev"
-          fi
-        fi
-        feature_bind_env=false
-        if [ "$feature_help" = false ] && [ "$feature_offline" = false ] && [ "$feature_environment" = dev ]; then
+  release)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh release <list|new|collect|check|run> [arguments]"
+    release_help=false
+    for release_arg in "$@"; do
+      if [ "$release_arg" = "--help" ] || [ "$release_arg" = "-h" ]; then
+        release_help=true
+        break
+      fi
+    done
+    release_subcommand="$1"
+    release_bind_env=false
+    if [ "$release_help" = false ]; then
+      case "$release_subcommand" in
+        list|new) ;;
+        collect|check|run)
           PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
           # shellcheck source=load_env.sh
-          if ! source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"; then
-            if [ "$feature_command" = capture ]; then exit 1; fi
-            fail "feature $feature_command requires a valid DEV configuration"
-          fi
-          if [ "$feature_command" != capture ]; then
-            case "$PROJECT_ENV_FILE" in
-              /*|[A-Za-z]:[/\\]*) ;;
-              *) PROJECT_ENV_FILE="$PWD/$PROJECT_ENV_FILE" ;;
-            esac
-            export PROJECT_ENV_FILE
-            feature_bind_env=true
-          fi
-        fi
-        ;;
-      *) fail "unknown feature command '$feature_command'; use init, capture, apply, diff, doctor, freeze, clean-capsule, reconcile-run, convert-plan, or release-plan" ;;
-    esac
-    feature_root="$REPO_ROOT"
+          source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
+          case "$PROJECT_ENV_FILE" in
+            /*|[A-Za-z]:[/\\]*) ;;
+            *) PROJECT_ENV_FILE="$PWD/$PROJECT_ENV_FILE" ;;
+          esac
+          export PROJECT_ENV_FILE
+          release_bind_env=true
+          ;;
+        *) ;;
+      esac
+    fi
+    release_root="$REPO_ROOT"
     case "$(uname -s 2>/dev/null)" in
       MINGW*|MSYS*|CYGWIN*)
         if command -v cygpath >/dev/null 2>&1; then
-          feature_root="$(cygpath -m -- "$REPO_ROOT")"
-          if [ "${feature_bind_env:-false}" = true ]; then
+          release_root="$(cygpath -m -- "$REPO_ROOT")"
+          if [ "$release_bind_env" = true ]; then
             PROJECT_ENV_FILE="$(cygpath -m -- "$PROJECT_ENV_FILE")"
           fi
         fi
         ;;
     esac
     cd "$REPO_ROOT"
-    exec python3 -m scripts.feature_cli --repo-root "$feature_root" "$@"
+    exec python3 -m scripts.release --repo-root "$release_root" "$@"
+    ;;
+  dev-test)
+    cd "$REPO_ROOT"
+    exec "$REPO_ROOT/scripts/dev_test.sh" "$@"
+    ;;
+  query)
+    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh query --env dev|staging|prod --connection tables|code|apex|ords|migration [--file <path> | SQL]"
+    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
+    cd "$REPO_ROOT"
+    exec python3 -m scripts.read_only_query "$@"
     ;;
   compare-schema)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh compare-schema [--from <env>] (--to <env>|--env <env>) (--object <name>|--pattern <glob>) [...]"
@@ -566,31 +405,6 @@ case "$command_name" in
     PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}" \
       exec "$REPO_ROOT/scripts/compare_schema.sh" compare-env "$@"
     ;;
-  baseline)
-    if [ "$#" -eq 0 ]; then
-      fail "usage: scripts/team.sh baseline <export-source|export-grants|export-data|build|filter-ords> [options]"
-    fi
-    if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-      cd "$REPO_ROOT"
-      exec python3 -m scripts.baseline "$@"
-    fi
-    # Subcommand help is argparse-only and must work without a configured .env.
-    for baseline_argument in "$@"; do
-      if [ "$baseline_argument" = "--help" ] || [ "$baseline_argument" = "-h" ]; then
-        cd "$REPO_ROOT"
-        exec python3 -m scripts.baseline "$@"
-      fi
-    done
-    if [ "$1" = "filter-ords" ]; then
-      cd "$REPO_ROOT"
-      exec python3 -m scripts.baseline "$@"
-    fi
-    PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
-    # shellcheck source=load_env.sh
-    source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
-    cd "$REPO_ROOT"
-    exec python3 -m scripts.baseline "$@"
-    ;;
   staging-neutralize)
     [ "$#" -ge 1 ] || fail "usage: scripts/team.sh staging-neutralize --capture|--check|--apply|--restore FILE [--confirm-target <db_unique_name>] [--yes|-y]"
     staging_neutralize_env="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
@@ -603,19 +417,6 @@ case "$command_name" in
     esac
     cd "$REPO_ROOT"
     PROJECT_ENV_FILE="$staging_neutralize_env" exec python3 -m scripts.staging_neutralize "$@"
-    ;;
-  rehearsal-reset)
-    [ "$#" -ge 1 ] || fail "usage: scripts/team.sh rehearsal-reset --env staging --help"
-    rehearsal_reset_env="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
-    case "$(uname -s 2>/dev/null)" in
-      MINGW*|MSYS*|CYGWIN*)
-        if command -v cygpath >/dev/null 2>&1; then
-          rehearsal_reset_env="$(cygpath -m -- "$rehearsal_reset_env")"
-        fi
-        ;;
-    esac
-    cd "$REPO_ROOT"
-    PROJECT_ENV_FILE="$rehearsal_reset_env" exec python3 -m scripts.rehearsal_reset "$@"
     ;;
   backup-db)
     [ "$#" -eq 0 ] || fail "backup-db does not accept arguments"

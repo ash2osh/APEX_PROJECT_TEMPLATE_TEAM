@@ -18,8 +18,6 @@ if __package__ in (None, ""):
 from scripts.apex_compatibility import require_sqlcl_version
 from scripts.db_targets import Target
 from scripts.path_utils import relative_to_root
-from scripts.migration_checks import CheckReport, preflight
-from scripts.migration_manifest import load_batch
 from scripts.schema_catalog import capture_inventory_snapshot_with_retries
 from scripts.sqlcl_session import SqlclError, run_sqlcl
 from tools.probe_apex_26_2 import client_version
@@ -381,24 +379,6 @@ def _dictionary_rows(connection: SqlclFixture, names: Mapping[str, object], cata
     )
 
 
-def _preflight_view(snapshot, schema: str, synonym: str, family: str, root: Path) -> dict:
-    folder = root / "migrations" / schema / f"2026-10-12_{family}-r001"
-    folder.mkdir(parents=True)
-    (folder / "001-create-view.sql").write_text(
-        f"CREATE VIEW QV_{family.replace('-', '_').upper()} AS SELECT ID FROM {synonym};\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    (folder / "checks.json").write_text(
-        '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"fixture-ready","sql":"SELECT 1 FROM dual","expected":1}]}\n',
-        encoding="utf-8",
-        newline="\n",
-    )
-    migrations = load_batch(root, [f"migrations/{schema}/{folder.name}"])
-    checks = CheckReport(True, True, (), (), {"complete": True})
-    return preflight(migrations, snapshot, checks).to_dict()
-
-
 def _cleanup_owned(admin: SqlclFixture, target: SqlclFixture, names: Mapping[str, object]) -> dict:
     inventory = _read_inventory(admin, names)
     expected_objects = names["expectedObjects"]
@@ -490,7 +470,6 @@ def qualify(
         "identity": {},
         "catalogRoutes": {},
         "dictionaryRows": {},
-        "preflight": {},
         "fixtureOwnership": None,
         "fixtureCleanup": "not-started",
         "cleanupRequired": False,
@@ -645,27 +624,6 @@ def qualify(
             if decoded_rows[names["synonyms"]["materializedView"]].target_exists is not True or decoded_rows[names["synonyms"]["materializedView"]].target_type != expected_mv_type:
                 raise QualificationError(f"{route} catalog decoder returned an unexpected materialized-view target type")
         report["decodedSynonyms"] = decoded
-
-        all_cases: dict[str, dict[str, dict]] = {}
-        for route, snapshot in (("owner", owner_snapshot), ("privileged", privileged_snapshot)):
-            cases: dict[str, dict] = {}
-            for key, case in (("table", "table-index"), ("materializedView", "mv-index"), ("sequence", "sequence"), ("missing", "missing")):
-                synonym = str(names["synonyms"][key])
-                result = _preflight_view(
-                    snapshot, target.schema, synonym,
-                    f"qsn-{tag.lower()}-{route}-{case.lower()}", directory / "preflight",
-                )
-                cases[key] = result
-            all_cases[route] = cases
-            for key in ("table", "materializedView"):
-                if cases[key]["exit_code"] != 0:
-                    raise QualificationError(f"valid {route} {key} synonym did not pass CREATE VIEW migration preflight")
-            for key in ("sequence", "missing"):
-                if cases[key]["exit_code"] == 0 or not any(
-                    conflict.get("code") == "MISSING_PREREQUISITE" for conflict in cases[key].get("conflicts", [])
-                ):
-                    raise QualificationError(f"invalid {route} {key} synonym unexpectedly passed CREATE VIEW migration preflight")
-        report["preflight"] = all_cases
 
         report["status"] = "passed"
         _write_report(directory / "qualification.json", report)

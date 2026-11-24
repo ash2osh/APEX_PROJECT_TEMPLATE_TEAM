@@ -417,7 +417,7 @@ class StagingNeutralizeWrapperTests(unittest.TestCase):
                 self.assertTrue(lines[-1].startswith("ENV:"), lines[-1])
                 self.assertEqual(Path(lines[-1][len("ENV:"):]), root / ".env")
 
-    def test_both_wrappers_list_staging_neutralize_and_release_plan_in_usage(self) -> None:
+    def test_both_wrappers_list_staging_neutralize_and_release_in_usage(self) -> None:
         pwsh = _test_subprocess_safety.working_pwsh()
         entries = [[BASH, str(ROOT / "scripts" / "team.sh")]]
         if pwsh:
@@ -427,7 +427,7 @@ class StagingNeutralizeWrapperTests(unittest.TestCase):
                 result = subprocess.run([*command, "--help"], text=True, capture_output=True, check=False, cwd=ROOT)
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertIn("staging-neutralize --capture|--check|--apply|--restore FILE", result.stdout)
-                self.assertIn("convert-plan|release-plan>", result.stdout)
+                self.assertIn("release run <bundle>", result.stdout)
 
 
 if __name__ == "__main__":

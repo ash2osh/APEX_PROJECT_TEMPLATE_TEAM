@@ -36,15 +36,13 @@ from scripts.dev_test_evidence import (
     append_event,
     assert_inputs_unchanged,
 )
+from scripts.dev_test_checks import QueryCheck, run_checks, validate_sql_script
 from scripts.dev_test_manifest import Scenario
-from scripts.migration_checks import run_checks
-from scripts.migration_manifest import QueryCheck
 from scripts.read_only_query import (
     DEFAULT_TIMEOUT_SECONDS,
     MAX_CAPTURE_BYTES,
     prepare_query,
 )
-from scripts.rollout import validate_sql_script
 from scripts.sqlcl_session import (
     SqlclCancelled,
     SqlclError,

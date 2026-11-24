@@ -6,7 +6,6 @@ import tempfile
 
 from scripts.db_targets import Target
 from scripts.schema_catalog import _catalog_driver
-from scripts import rollout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +15,6 @@ SQL_DRIVERS = (
     "doctor.sql",
     "export_apps.sql",
     "lookup_app_schema.sql",
-    "migrate.sql",
     "publish_app.sql",
     "schema_catalog.sql",
 )
@@ -179,44 +177,20 @@ class SqlDriverContractTests(unittest.TestCase):
                 self.assertEqual(contents.count("|| '|' || MAX(version)"), queries)
                 self.assertIn("SET LINESIZE 32767", contents)
 
-    def test_rollout_identity_guard_only_checks_variables_the_driver_declares(self) -> None:
-        # The guard compares each observed field with v_<field>. db_name is declared as
-        # v_database_name, so an undeclared v_db_name failed every SQL-script rollout.
-        identity = {
-            "session_user": "APP", "current_schema": "APP", "db_name": "FREEPDB1",
-            "db_unique_name": "FREE", "service_name": "freepdb1", "container_id": "3",
-            "container_name": "FREEPDB1", "edition": "ORA$BASE", "database_version": "23.0",
-        }
-        with tempfile.TemporaryDirectory() as temporary:
-            driver = rollout._script_driver(
-                Path(temporary),
-                "UPDATE review_table SET flag = 1 WHERE id = 1;\n",
-                environment="staging",
-                schema="APP",
-                expected_user="APP",
-                step_number=1,
-                expected_identity=identity,
-            )
-            contents = driver.read_text(encoding="utf-8")
-        declared = set(re.findall(r"^  (v_\w+) ", contents, flags=re.MULTILINE))
-        checked = set(re.findall(r"IF NVL\((v_\w+),", contents))
-        self.assertEqual(len(checked), len(identity))
-        self.assertEqual(checked - declared, set())
+    def test_release_apply_driver_enables_sqlblanklines_and_never_sets_plsql_code_type(self) -> None:
+        from scripts import release
 
-    def test_rollout_driver_enables_sqlblanklines_before_include(self) -> None:
+        target = Target("dev", "dev-db", "OPS", "APP", "development")
         with tempfile.TemporaryDirectory() as temporary:
-            driver = rollout._script_driver(
-                Path(temporary),
-                "UPDATE review_table SET flag = 1\n\nWHERE id = 1;\n",
-                environment="dev",
-                schema="APP",
-                expected_user="OPS",
-                step_number=1,
-            )
-            contents = driver.read_text(encoding="utf-8")
+            sql_file = Path(temporary) / "001-update.sql"
+            sql_file.write_text("UPDATE review_table SET flag = 1\n\nWHERE id = 1;\n", encoding="utf-8", newline="\n")
+            step = release.BundleStep("ddl", "APP", "01-ddl/001-update.sql", sql_file)
+            contents = release._render_apply_driver(target, [step])
         self.assertIn("SET SQLBLANKLINES ON", contents)
-        self.assertIn("@@payload.sql", contents)
-        self.assertLess(contents.index("SET SQLBLANKLINES ON"), contents.index("@@payload.sql"))
+        self.assertIn("ALTER SESSION SET CURRENT_SCHEMA = APP;", contents)
+        self.assertIn("WHENEVER SQLERROR EXIT SQL.SQLCODE", contents)
+        self.assertNotIn("PLSQL_CODE_TYPE", contents)
+        self.assertLess(contents.index("SET SQLBLANKLINES ON"), contents.index("RELEASE_STEP_START:01-ddl/001-update.sql"))
 
 
 BACKUP_DB_SQL = ROOT / "scripts" / "backup_db.sql"

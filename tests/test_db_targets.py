@@ -457,11 +457,11 @@ class ProductionMarkerTests(unittest.TestCase):
         self.assertEqual(PRODUCTION_MARKER_RE.pattern, powershell)
         self.assertIn(f"$nonProductionPattern = '(?i){NON_PRODUCTION_MARKER_RE.pattern}'", powershell_source)
         sql_pattern = python.replace("[0-9]", "[[:digit:]]")
-        for name in ("verify_db_access.sql", "verify_migration_access.sql", "publish_app.sql"):
+        for name in ("verify_db_access.sql", "publish_app.sql"):
             source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
             with self.subTest(script=name):
                 self.assertIn(f"'{sql_pattern}'", source)
                 self.assertIn(f"c_non_production_marker CONSTANT VARCHAR2(64) := '{NON_PRODUCTION_MARKER_RE.pattern}'", source)
                 for field in ("DB_NAME", "DB_UNIQUE_NAME", "SERVICE_NAME"):
-                    self.assertIn(f"resembles_production(SYS_CONTEXT('USERENV', '{field}'))", source) if name != "verify_migration_access.sql" else self.assertIn(f"'{field}'", source)
+                    self.assertIn(f"resembles_production(SYS_CONTEXT('USERENV', '{field}'))", source)
                 self.assertNotIn("REGEXP_LIKE(SYS_CONTEXT", source)

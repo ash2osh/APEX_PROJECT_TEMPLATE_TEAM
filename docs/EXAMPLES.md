@@ -7,8 +7,8 @@ run, what you should see, and what can go wrong. They use the example app
 
 1. [Bring a change made in Builder into Git](#1-bring-a-change-made-in-builder-into-git)
 2. [Edit app files and publish them](#2-edit-app-files-and-publish-them)
-3. [Add a column to a table safely](#3-add-a-column-to-a-table-safely)
-4. [Test a SQL change before touching the database](#4-test-a-sql-change-before-touching-the-database)
+3. [Collect code, add DDL, and run a release bundle](#3-collect-code-add-ddl-and-run-a-release-bundle)
+4. [List open and deployed release bundles offline](#4-list-open-and-deployed-release-bundles-offline)
 5. [Keep a read-only copy of the database in Git](#5-keep-a-read-only-copy-of-the-database-in-git)
 6. [Work with more than one schema](#6-work-with-more-than-one-schema)
 7. [Release to staging and production](#7-release-to-staging-and-production)
@@ -69,73 +69,43 @@ teammates tell whose import is live) before you next export this app.
 - `deployment descriptor not found`: create `apps/DEMO/100/deployments/dev.json`
   (see step 8 of the getting started guide).
 
-## 3. Add a column to a table safely
+## 3. Collect code, add DDL, and run a release bundle
 
-**When:** a table needs a new column and you want it checked, applied and
-recorded.
-
-Create `migrations/2026-09-30_add-notes-to-hr-users-r001/` with two files. The
-example assumes the table `HR_USERS` exists; its precondition fails if it does
-not. Use one of your own tables when you try it.
-
-`001-add-notes-column.sql`:
-
-```sql
-ALTER TABLE HR_USERS ADD (NOTES VARCHAR2(200));
-```
-
-`checks.json`:
-
-```json
-{
-  "schemaVersion": 1,
-  "preconditions": [
-    {
-      "id": "notes-column-absent",
-      "sql": "SELECT CASE WHEN EXISTS (SELECT 1 FROM user_tables WHERE table_name = 'HR_USERS') AND NOT EXISTS (SELECT 1 FROM user_tab_columns WHERE table_name = 'HR_USERS' AND column_name = 'NOTES') THEN 1 ELSE 0 END FROM dual",
-      "expected": 1
-    }
-  ],
-  "postconditions": [
-    {
-      "id": "notes-column-present",
-      "sql": "SELECT CASE WHEN COUNT(*) = 1 THEN 1 ELSE 0 END FROM user_tab_columns WHERE table_name = 'HR_USERS' AND column_name = 'NOTES'",
-      "expected": 1
-    }
-  ]
-}
-```
+**When:** a table needs a new column or a package changes, and you want it
+checked, backed up, applied, and verified.
 
 ```bash
-scripts/team.sh check-conflicts migrations/2026-09-30_add-notes-to-hr-users-r001 --env dev
-scripts/team.sh migrate migrations/2026-09-30_add-notes-to-hr-users-r001 --env dev
-git add migrations/ && git commit -m "Add HR_USERS.NOTES"
+scripts/team.sh release new 2026-11-24-add-notes
+scripts/team.sh release collect 2026-11-24-add-notes \
+  --from dev --target-env prod --schema DEMO \
+  --object "PACKAGE BODY:HR_PKG" --mode patch
 ```
 
-**You should see:** `Result: exit 0; 0 conflict(s), 0 incomplete/error
-condition(s)` from the check, then `Applied and verified ... on dev; receipt
-status.dev.json.` from `migrate`.
-
-**Rules to remember:**
-- A check is a query returning exactly one row with the number `1`; `expected`
-  is always `1`.
-- After you have tried to apply a migration, never edit it. Fix problems in a
-  new folder with the next revision (`...-r002`).
-- If the check says `COLUMN_ALREADY_EXISTS`, the change is already in the
-  database (or a teammate added it). Do not apply it again.
-
-## 4. Test a SQL change before touching the database
-
-**When:** you want a quick answer, or you have no database connection.
+Add `releases/2026-11-24-add-notes/01-ddl/001-add-notes-column.sql` (preferring an
+idempotent guard where appropriate) and list it under `"ddl"` in `release.json`.
+Then preflight and run:
 
 ```bash
-scripts/team.sh check-conflicts migrations/2026-09-30_add-notes-to-hr-users-r001 --local
+scripts/team.sh release check 2026-11-24-add-notes --env dev
+scripts/team.sh release run   2026-11-24-add-notes --env dev --confirm-target <DB_UNIQUE_NAME>
+git add releases/ && git commit -m "Add HR_USERS.NOTES release bundle"
 ```
 
-**You should see:** `Local selected-batch analysis only; no live database state
-was checked.` and `INCOMPLETE [LIVE_PREREQUISITE_UNKNOWN]`. That is expected:
-offline analysis can read your files but cannot know whether a table exists.
-Use `--env dev` for the real answer.
+**You should see** a read-only execution plan from `release check`, then backups
+written to `scratch/backups/`, DDL + code applied in 1 session per schema,
+zero *new* invalid objects, and a markdown report under `scratch/release-reports/`.
+
+## 4. List open and deployed release bundles offline
+
+**When:** you start work or want to see which `draft` bundles are open without
+touching the database.
+
+```bash
+scripts/team.sh release list
+```
+
+**You should see** numbered open `draft` bundles (`1- ...`) and locked
+`deployed` bundles separately, with zero SQLcl calls.
 
 ## 5. Keep a read-only copy of the database in Git
 
@@ -201,41 +171,17 @@ Then work as usual. `doctor` and `backup-db` cover every schema, `export` and
 ```bash
 scripts/team.sh doctor
 scripts/team.sh backup-db --schema SALES     # only one schema
-scripts/team.sh check-conflicts migrations/SALES/2026-09-30_add-flag-r001 --env dev
+scripts/team.sh release collect my-bundle --from dev --schema SALES --object "PACKAGE:SALES_PKG" --mode replace
 ```
 
-**Migrations go in a folder named for their schema** when more than one schema
-is configured: `migrations/HR/...` and `migrations/SALES/...`. One migration
-changes one schema. For a change that touches two (a grant, say) write two
-migrations.
+**Each entry in `release.json` names its target schema explicitly**, and
+`release check` / `release run` executes one SQLcl session per schema in the
+bundle.
 
 **If it goes wrong:**
 - `needs one schema because several are configured`: add `--schema <NAME>`.
-- `must live under migrations/<SCHEMA>/`: move your migration into its
-  schema's folder.
 - `schema X is not listed in STAGING_SCHEMA`: a schema you deploy to staging
   must appear, with the same name, in the staging settings.
-
-### Plan an ordered migration batch
-
-Inspect the local inventory without loading `.env` or starting SQLcl, then pass
-the intended order explicitly. Discovered rows are sorted for display only:
-
-```bash
-scripts/team.sh migration-plan --schema SALES --format markdown
-scripts/team.sh migration-plan \
-  migrations/SALES/2026-10-12_create-orders-r001 \
-  migrations/SALES/2026-10-13_add-order-state-r001 --format json
-scripts/team.sh migration-plan \
-  migrations/SALES/2026-10-12_create-orders-r001 \
-  migrations/SALES/2026-10-13_add-order-state-r001 \
-  --live --env dev --format text
-```
-
-The live report is read-only and marks later-folder preconditions as deferred.
-Its single-SQL-file-folder count is a review metric, not a request to squash
-folders. Attempted or applied folders stay immutable. See
-[migration planning](migration-planning.md) for evidence and limits.
 
 ## 7. Release to staging and production
 
@@ -293,30 +239,6 @@ databases, each with its own `DB_UNIQUE_NAME`.
 - `SELF_COMPARISON`: both sides resolve to the same database and schema, so
   there is nothing to compare. Check your staging settings.
 
-### Generate a compact environment baseline
-
-**When:** the configured DEV and staging schemas differ and you want new,
-reviewable migration folders for supported structure, grant and code changes.
-
-```bash
-scripts/team.sh baseline build --from dev --to staging --bundle customer-status
-scripts/team.sh baseline export-data --from dev
-scripts/team.sh baseline build --from dev --to staging --bundle customer-status --data
-```
-
-The bundle is built from complete source and target observations and keeps
-structure, grants and code in that order. When all three categories have
-changes, bundling reduces the usual three folders to one (3-to-1). With the
-allow-listed reference data export, `--data` adds a separate `baseline-data`
-folder after the bundle, so the usual four folders become two (4-to-2). Each schema has its
-own output folder. Review the bundle's SQL-to-source SHA-256 map and checks;
-the generator never applies these migrations.
-
-Oracle DDL can commit implicitly. If a bundle step or later check fails,
-inspect the target and use a reviewed recovery migration; keep attempted or
-applied folders immutable. A local build sees only configured schemas and this
-repository's files, not another independent repository's pending migrations.
-
 ## 9. Update the template
 
 **When:** the template gained fixes or features and you want them.
@@ -329,7 +251,7 @@ git status
 ```
 
 The upgrade only touches template-owned files (scripts, tests, CI, agent
-guidance, `README.md`). Your apps, database copy, migrations, `.env` and your
+guidance, `README.md`). Your apps, database copy, release bundles, `.env` and your
 `PROJECT.md` notes are never touched. If you customized a file the template also
 changed, you get `<file>.template-new` beside it and exit status 1: merge the
 two, delete the `.template-new` file, and commit.
@@ -346,12 +268,12 @@ Good first requests:
 - `/init`: sets up your `.env` by asking a few questions. It never asks for or
   writes passwords.
 - "Export app 100 and summarize what changed since the last commit."
-- "Write a migration that adds a NOTES column to HR_USERS, with checks, and run
-  `check-conflicts --local` on it."
+- "Create a release bundle that adds a NOTES column to HR_USERS and run
+  `release check <bundle> --env dev` on it."
 - "Why does `doctor` fail?" (it reads [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
   and the scripts' output).
 
-The safety rules apply to the assistant too: it should not run a migration,
+The safety rules apply to the assistant too: it should not run `release run`,
 publish or deployment unless you asked, and it should tell you when a live check
 could not be run.
 

@@ -446,34 +446,11 @@ class SqlclPoolTests(unittest.TestCase):
 
 class EntryPointTests(unittest.TestCase):
     def test_entry_points_enter_pool(self) -> None:
-        # Every deployment command keeps one pool for its whole run; rollout calls migrate in-process (nested).
-        from scripts import compare_schema, feature_cli, migrate, release_capsule, rollout
+        from scripts import compare_schema
 
-        for function in (rollout.main, migrate.main, feature_cli.main, compare_schema.main, compare_schema.main_compare_env):
+        for function in (compare_schema.main, compare_schema.main_compare_env):
             with self.subTest(function=f"{function.__module__}.{function.__name__}"):
                 self.assertTrue(hasattr(function, "__wrapped__"), "entry point is not decorated with with_deployment_sessions")
-        self.assertIn("scripts/sqlcl_pool.py", release_capsule.ENGINE_HELPER_FILES)
-
-    def test_report_records_sqlcl_mode_and_counts(self) -> None:
-        from scripts import rollout
-
-        report: dict = {}
-        rollout._finish_report(report, time.perf_counter(), "success", 0)
-        self.assertEqual("one-shot", report["sqlcl"]["mode"])
-        with sqlcl_pool.deployment_sessions({"SQLCL_PERSISTENT_SESSIONS": "0"}):
-            rollout._finish_report(report, time.perf_counter(), "success", 0)
-        stats = report["sqlcl"]
-        self.assertEqual("none", stats["mode"], "no SQLcl drivers actually ran")
-        self.assertEqual(0, stats["processesStarted"])
-        self.assertEqual(0, stats["scripts"])
-        self.assertIsNone(stats["databaseSessions"])
-        self.assertEqual("disabled by SQLCL_PERSISTENT_SESSIONS=0", stats["fallbackReason"])
-
-    def test_prod_accepts_staging_proof_from_other_sqlcl_mode(self) -> None:
-        # The mode is reported, not enforced: the stage proof requires only its own fields.
-        from scripts import release_state
-
-        self.assertNotIn("sqlcl", release_state.REPORT_FIELDS)
 
 
 class ResetBlockTests(unittest.TestCase):

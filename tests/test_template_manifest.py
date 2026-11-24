@@ -65,14 +65,25 @@ class TemplateManifestTests(unittest.TestCase):
     def test_tracked_files_are_not_ambiguously_owned_and_protected_paths_are_unowned(self) -> None:
         self.assert_tracked_ownership_valid(self.tracked)
 
-    def test_read_only_verifier_files_are_covered_by_template_ownership(self) -> None:
+    def test_release_files_are_covered_by_template_ownership(self) -> None:
         for path in (
-            "scripts/verify_checks.py",
-            "scripts/verify_checks.sh",
-            "tests/test_verify_checks.py",
+            "scripts/release.py",
+            "tests/test_release.py",
+            "docs/release-workflow.md",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
+
+    def test_release_bundles_are_protected_from_template_upgrades(self) -> None:
+        for path in (
+            "releases/current.json",
+            "releases/2026-11-24-fix/release.json",
+            "releases/2026-11-24-fix/01-ddl/001-table.sql",
+            "releases/2026-11-24-fix/02-code/pkg.sql",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(protected_project_path(path))
+                self.assertEqual(self.classify(path), [])
 
     def test_dev_test_runtime_docs_are_owned_and_project_suites_are_protected(self) -> None:
         from scripts.upgrade_template import protected_project_path
@@ -80,6 +91,7 @@ class TemplateManifestTests(unittest.TestCase):
         for path in (
             "scripts/dev_test.py",
             "scripts/dev_test_core.py",
+            "scripts/dev_test_checks.py",
             "tests/test_dev_test_cli.py",
             "docs/dev-test.md",
             "docs/dev-test-examples/example.json",
@@ -103,31 +115,10 @@ class TemplateManifestTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
 
-    def test_rollout_files_are_covered_by_template_ownership(self) -> None:
+    def test_backup_manifest_files_are_covered_by_template_ownership(self) -> None:
         for path in (
-            "scripts/rollout.py",
-            "scripts/rollout.sh",
-            "scripts/rollout_capsule.py",
-            "tests/test_rollout.py",
-            "docs/rollout-manifest.example.json",
-        ):
-            with self.subTest(path=path):
-                self.assertEqual(self.classify(path), ["templateOwned"])
-
-    def test_migration_rehearsal_files_are_covered_by_template_ownership(self) -> None:
-        for path in (
-            "scripts/migration_rehearsal.py",
-            "tests/test_migration_rehearsal.py",
-        ):
-            with self.subTest(path=path):
-                self.assertEqual(self.classify(path), ["templateOwned"])
-
-    def test_migration_revision_files_are_covered_by_template_ownership(self) -> None:
-        for path in (
-            "scripts/migration_revision.py",
-            "tests/test_migration_revision.py",
-            "scripts/migration_resolution.py",
-            "tests/test_migration_resolution.py",
+            "scripts/backup_manifest.py",
+            "tests/test_backup_manifest.py",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
@@ -136,9 +127,7 @@ class TemplateManifestTests(unittest.TestCase):
         for path in (
             "scripts/schema_catalog.py",
             "scripts/schema_catalog.sql",
-            "scripts/migration_checks.py",
             "tests/test_schema_catalog.py",
-            "tests/test_migration_checks.py",
             "tests/fixtures/schema_catalog/view-synonyms.json",
         ):
             with self.subTest(path=path):
@@ -152,23 +141,6 @@ class TemplateManifestTests(unittest.TestCase):
             "tests/test_compare_env.py",
             "tests/fixtures/compare_env/dev.json",
             "tests/fixtures/compare_env/staging.json",
-        ):
-            with self.subTest(path=path):
-                self.assertEqual(self.classify(path), ["templateOwned"])
-
-    def test_baseline_files_and_recorded_fixtures_are_template_owned(self) -> None:
-        for path in (
-            "scripts/baseline.py",
-            "docs/baseline.md",
-            "docs/baseline.example.json",
-            "tests/test_baseline.py",
-            "tests/fixtures/baseline/source_dev.json",
-            "tests/fixtures/baseline/data_dev.json",
-            "tests/fixtures/baseline/build_dev.json",
-            "tests/fixtures/baseline/reference_data_source.json",
-            "tests/fixtures/baseline/reference_data_target.json",
-            "tests/fixtures/baseline/reference_data_constraints.json",
-            "tests/fixtures/baseline/ords_modules.sql",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
@@ -205,6 +177,10 @@ class TemplateManifestTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 2)
         self.assertEqual(manifest["apexRelease"], "26.2")
         self.assertEqual(manifest["minimumSqlclVersion"], "26.3.0.0")
+        self.assertEqual(
+            manifest["upstream"],
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+        )
 
     def test_every_non_project_template_file_has_exactly_one_owner(self) -> None:
         for path in self.tracked:
@@ -223,9 +199,9 @@ class TemplateManifestTests(unittest.TestCase):
                 "template-manifest.json": (ROOT / "template-manifest.json").read_text(encoding="utf-8"),
                 ".template-lock.json": json.dumps({"schemaVersion": 1, "upstream": "template", "commit": "abc", "files": {}}),
                 "apps/DEMO/100/application.apx": "app DEMO ()\n",
-                "migrations/2026-09-27_create-customers-r001/001-create-table.sql": "CREATE TABLE CUSTOMERS (ID NUMBER);\n",
-                "migrations/2026-09-27_create-customers-r001/checks.json": "{}\n",
-                "migrations/2026-09-27_create-customers-r001/status.dev.json": "{}\n",
+                "releases/2026-11-24-customers/release.json": "{}\n",
+                "releases/2026-11-24-customers/01-ddl/001-create-table.sql": "CREATE TABLE CUSTOMERS (ID NUMBER);\n",
+                "releases/2026-11-24-customers/02-code/pkg.sql": "CREATE OR REPLACE PACKAGE PKG AS END;\n/\n",
                 "docs/architecture.md": "Downstream-owned documentation.\n",
             }
             for relative, contents in downstream_files.items():
@@ -245,9 +221,9 @@ class TemplateManifestTests(unittest.TestCase):
         for path in (
             ".template-lock.json",
             "apps/DEMO/100/application.apx",
-            "migrations/2026-09-27_create-customers-r001/001-create-table.sql",
-            "migrations/2026-09-27_create-customers-r001/checks.json",
-            "migrations/2026-09-27_create-customers-r001/status.dev.json",
+            "releases/2026-11-24-customers/release.json",
+            "releases/2026-11-24-customers/01-ddl/001-create-table.sql",
+            "releases/2026-11-24-customers/02-code/pkg.sql",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), [])
@@ -258,19 +234,17 @@ class TemplateManifestTests(unittest.TestCase):
                 self.assertTrue((ROOT / path).is_file())
                 self.assertEqual(self.classify(path), ["projectOwned"])
 
-    def test_migration_guide_is_template_owned_and_migration_payload_is_not(self) -> None:
+    def test_release_guide_is_template_owned_and_bundle_payload_is_not(self) -> None:
         for path in (
-            "docs/migration-rules.md",
-            "docs/migration-planning.md",
-            "docs/production-deployment.md",
+            "docs/release-workflow.md",
             "docs/template-feedback.md",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), ["templateOwned"])
         for path in (
-            "migrations/2026-09-27_create-customers-r001/001-create-table.sql",
-            "migrations/2026-09-27_create-customers-r001/checks.json",
-            "migrations/2026-09-27_create-customers-r001/status.dev.json",
+            "releases/2026-11-24-customers/release.json",
+            "releases/2026-11-24-customers/01-ddl/001-create-table.sql",
+            "releases/2026-11-24-customers/02-code/pkg.sql",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self.classify(path), [])
@@ -279,9 +253,8 @@ class TemplateManifestTests(unittest.TestCase):
         for path in (
             "apps/DEMO/100/application.apx",
             "database/DEMO/tables/T.sql",
-            "migrations/2026-09-27_create-customers-r001/001-create-table.sql",
-            "migrations/2026-09-27_create-customers-r001/checks.json",
-            "migrations/2026-09-27_create-customers-r001/status.dev.json",
+            "releases/2026-11-24-customers/release.json",
+            "releases/2026-11-24-customers/01-ddl/001-create-table.sql",
             "app_context/100/purpose.md",
             ".env",
             ".template-lock.json",
@@ -293,12 +266,12 @@ class TemplateManifestTests(unittest.TestCase):
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertIn("@AGENTS.md", claude)
         self.assertIn("@AGENTS.project.md", claude)
-        # The feature-release guide is linked from AGENTS.md, not imported: an import loads it into every conversation.
-        self.assertNotIn("@docs/feature-releases.md", claude)
+        # The release guide is linked from AGENTS.md, not imported: an import loads it into every conversation.
+        self.assertNotIn("@docs/release-workflow.md", claude)
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("AGENTS.project.md", agents)
         self.assertIn(".agents/rules/project.md", agents)
-        self.assertIn("docs/feature-releases.md", agents)
+        self.assertIn("docs/release-workflow.md", agents)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: team-flow
-description: Coordinate APEX application edits, guarded publishing, schema migrations and promotion in a shared team workspace
+description: Coordinate APEX application edits, guarded publishing, lean release bundles and promotion in a shared team workspace
 ---
 
 # Team workflow
@@ -23,23 +23,21 @@ commits. Git branches do not isolate shared Builder or database state.
    version; the guard compares the live version to catch a teammate's
    import. Commit the stamped `application.apx` afterwards. When publish
    refuses, follow `docs/publish-rules.md`.
-3. **Schema work:** Add `NNN-<step-name>.sql` files and `checks.json` under
-   `migrations/YYYY-MM-DD_<name>-rNNN/` (or
-   `migrations/<SCHEMA>/YYYY-MM-DD_<name>-rNNN/` when several schemas are
-   configured; one migration changes one schema). Run
-   `scripts/team.sh check-conflicts <folder> --env dev`, then
-   `scripts/team.sh migrate <folder> --env dev` (or explicitly select staging
-   or production). Preflight sees only selected local files and the live
-   catalog; independent repositories' pending files are not visible. Follow
-   [docs/migration-rules.md](../../docs/migration-rules.md) for immutable
-   revisions and recovery.
+3. **Database & release bundles:** Create or select a bundle under
+   `releases/<slug>/` with `scripts/team.sh release list` and
+   `scripts/team.sh release new <slug>`. Export DEV stored units via
+   `scripts/team.sh release collect <bundle> --from dev --schema <SCHEMA> --object <TYPE:NAME> --mode <new|replace|patch>`
+   and add ordered DDL/ORDS/verify scripts under `01-ddl/`, `03-ords/`,
+   `04-verify/`. Run `scripts/team.sh release check <bundle> --env dev` before
+   running `scripts/team.sh release run <bundle> --env dev --confirm-target <db_unique_name>`.
+   See [docs/release-workflow.md](../../docs/release-workflow.md).
 4. **Promotion:** Configure explicit workspace/app/schema descriptors and
-   use `scripts/team.sh deploy <numeric-app-id> --env staging|prod`. The
-   direct route asks for interactive confirmation. `--manual` prints a DBA
-   runbook without connecting. Compare selected live schema objects with
-   `scripts/team.sh compare-schema --env staging --pattern 'HR_*'` (add
-   `--schema <NAME>` when several schemas are configured); this reports drift
-   and does not prove migration-file attribution.
+   include app IDs in `release.json` `apps` (for automated Step 5 deployment) or
+   use `scripts/team.sh deploy <numeric-app-id> --env staging|prod`. Direct
+   `deploy` asks for interactive confirmation unless `--yes` / `--confirm-target`
+   is authorized; `--manual` prints a DBA runbook without connecting. Compare
+   selected live schema objects with `scripts/team.sh compare-schema --env staging --pattern 'HR_*'`
+   (add `--schema <NAME>` when several schemas are configured).
 
 When the optional ORDS profile is configured, `scripts/team.sh backup-ords`
 exports a schema's ORDS (REST) definition read-only to

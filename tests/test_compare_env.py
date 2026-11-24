@@ -894,7 +894,7 @@ class EnvironmentComparisonTests(unittest.TestCase):
         self.assertEqual(len(identity_versions), 2)
         for value in identity_versions:
             self.assertEqual(value.strip(), expression)
-        self.assertIn(expression, (ROOT / "scripts" / "migration_checks.py").read_text(encoding="utf-8"))
+        self.assertIn(expression, (ROOT / "scripts" / "dev_test_checks.py").read_text(encoding="utf-8"))
 
     def test_every_compare_env_query_binds_scope_once_for_its_positional_arguments(self) -> None:
         # append_rows passes the scope JSON, the schema and the page window in fixed

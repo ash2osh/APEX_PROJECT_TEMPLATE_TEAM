@@ -1,4 +1,3 @@
-import io
 import json
 import re
 import subprocess
@@ -6,15 +5,13 @@ import _test_subprocess_safety  # noqa: F401
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 
-from scripts import migrate
+from scripts import release
 from scripts.db_targets import Target, resolve_target
+from scripts.dev_test_checks import _render_check_driver
 from scripts.dev_test_target import DevTestTargetError, inspect_suite
 from scripts.local_config import ConfigError, read_project_env
-from scripts.migration_checks import _render_check_driver
-from scripts.new_migration import owner_check
 from scripts.schema_catalog import CatalogError, parse_inventory
 
 
@@ -176,22 +173,15 @@ class LoginDiffersFromSchemaTests(unittest.TestCase):
         self.assertTrue(acting_target.acts_as_other_schema)
         self.assertFalse(owner_target.acts_as_other_schema)
 
-    def test_migrate_summary_prints_banner_only_when_login_differs(self) -> None:
+    def test_release_apply_driver_switches_schema_only_when_login_differs(self) -> None:
         acting_target = Target("staging", "stage-db", "APP_LOGIN", "APP_STAGE", "staging")
         owner_target = Target("dev", "dev-db", "APP_DEV", "APP_DEV", "development")
-        banner = "Acting as schema APP_STAGE through ALTER SESSION SET CURRENT_SCHEMA; login is APP_LOGIN."
 
-        with redirect_stdout(io.StringIO()) as acting_stdout:
-            migrate._print_target_summary(acting_target, {}, [])
-        acting_lines = acting_stdout.getvalue().splitlines()
+        acting_sql = release._render_apply_driver(acting_target, [])
+        owner_sql = release._render_apply_driver(owner_target, [])
 
-        with redirect_stdout(io.StringIO()) as owner_stdout:
-            migrate._print_target_summary(owner_target, {}, [])
-        owner_output = owner_stdout.getvalue()
-
-        self.assertEqual(acting_lines[1], banner)
-        self.assertEqual(acting_stdout.getvalue().count(banner), 1)
-        self.assertNotIn(banner, owner_output)
+        self.assertIn("ALTER SESSION SET CURRENT_SCHEMA = APP_STAGE;", acting_sql)
+        self.assertNotIn("ALTER SESSION SET CURRENT_SCHEMA", owner_sql)
 
     def test_publish_prompt_names_the_login_when_it_differs(self) -> None:
         sys.path.insert(0, str(ROOT / "tests"))
@@ -254,26 +244,11 @@ class LoginDiffersFromSchemaTests(unittest.TestCase):
 
         self.assertEqual((target.connection, target.expected_user, target.schema), ("stage-b", "APP_LOGIN", "APP_DEV"))
 
-    def test_migration_guard_checks_login_before_switching_schema(self) -> None:
-        contents = (ROOT / "scripts" / "verify_migration_access.sql").read_text(encoding="utf-8")
-
-        session_user_check = contents.index("IF l_session_user != c_expected_user")
-        schema_switch = contents.index("ALTER SESSION SET CURRENT_SCHEMA =")
-        current_schema_check = contents.index("IF SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') != c_target_schema")
-        self.assertLess(session_user_check, schema_switch)
-        self.assertLess(schema_switch, current_schema_check)
-
     def test_publish_guard_compares_both_identities(self) -> None:
         contents = (ROOT / "scripts" / "publish_identity_guard.sql").read_text(encoding="utf-8")
 
         self.assertIn("require_equal('SESSION_USER'", contents)
         self.assertIn("require_equal('CURRENT_SCHEMA'", contents)
-
-    def test_generated_owner_check_reads_current_schema_not_session_user(self) -> None:
-        sql = owner_check("APP_STAGE")["sql"]
-
-        self.assertIn("CURRENT_SCHEMA", sql)
-        self.assertNotIn("SESSION_USER", sql)
 
     def test_check_driver_switches_schema_and_reports_both_identities(self) -> None:
         target = Target("staging", "stage-db", "APP_LOGIN", "APP_STAGE", "staging")

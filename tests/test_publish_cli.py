@@ -188,7 +188,7 @@ class PublishAppCliTests(unittest.TestCase):
         scripts.mkdir()
         for name in (
             "publish_app.sh",
-            "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py",
+            "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "local_config.py", "template_release.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py",
             "apex_compatibility.py", "sqlcl_version.py", "verify_apex_release.sql", "application_lifecycle.py", "application_lifecycle.sql",
             "apexlang_normalization.py",
             "load_env.sh",
@@ -1327,7 +1327,7 @@ class PublishAppCliTests(unittest.TestCase):
                 scripts.mkdir()
                 for name in (
                     "publish_app.ps1",
-                    "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py", "sqlcl_safe.sh",
+                    "publish_app.sql", "deployment_descriptor.py", "application_lock.py", "application_lock.sql", "no_application_lock.sql", "db_targets.py", "local_config.py", "template_release.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py", "sqlcl_safe.sh",
                     "apex_compatibility.py", "sqlcl_version.py", "verify_apex_release.sql", "application_lifecycle.py", "application_lifecycle.sql",
                     "load_env.ps1",
                     "invoke_sqlcl.ps1", "resolve_python.ps1",

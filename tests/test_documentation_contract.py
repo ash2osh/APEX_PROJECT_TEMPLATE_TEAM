@@ -2,7 +2,6 @@ import json
 import re
 import subprocess
 import _test_subprocess_safety  # noqa: F401
-import tempfile
 import unittest
 from fake_sqlcl import BASH
 from pathlib import Path
@@ -16,10 +15,7 @@ DOCS = (
     ROOT / ".agents" / "workflows" / "team-flow.md",
     ROOT / ".agents" / "rules" / "agent-safety.md",
     ROOT / "app_context" / "README.md",
-    ROOT / "migrations" / "README.md",
-    ROOT / "docs" / "migration-rules.md",
-    ROOT / "docs" / "migration-planning.md",
-    ROOT / "docs" / "baseline.md",
+    ROOT / "docs" / "release-workflow.md",
     ROOT / "docs" / "compare-env.md",
     ROOT / "docs" / "publish-rules.md",
     ROOT / "docs" / "GETTING_STARTED.md",
@@ -27,7 +23,6 @@ DOCS = (
     ROOT / "docs" / "TROUBLESHOOTING.md",
     ROOT / "docs" / "known-limitations.md",
     ROOT / "docs" / "login-acts-as-schema.md",
-    ROOT / "docs" / "production-deployment.md",
     ROOT / "docs" / "template-feedback.md",
 )
 # Each refusal the publish guide explains, and the script that prints it. The
@@ -92,6 +87,20 @@ RETIRED_TERMS = (
 
 
 class DocumentationContractTests(unittest.TestCase):
+    def test_compare_env_guide_documents_the_read_only_catalog_contract(self) -> None:
+        guide = (ROOT / "docs" / "compare-env.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("docs/compare-env.md", readme)
+        for phrase in (
+            "does not write to either database",
+            "SQLcl 26.3.0.0",
+            "Use `--section` more than once",
+            "not compared",
+            "not a source export",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, guide)
+
     def test_active_team_guidance_uses_the_current_cli(self) -> None:
         contents = {path: path.read_text(encoding="utf-8") for path in DOCS}
         for path, document in contents.items():
@@ -102,34 +111,24 @@ class DocumentationContractTests(unittest.TestCase):
         readme = contents[ROOT / "README.md"]
         for command in (
             "doctor",
-            "check-conflicts",
-            "team.sh migrate",
-            "team.sh revise",
-            "revise --check",
-            "--rehearse",
-            "--report scratch/customer-seed-rehearsal.json",
-            "team.sh rollout",
+            "export <id>",
+            "publish <id>",
+            "release list",
+            "release new",
+            "release collect",
+            "release check",
+            "release run",
+            "--confirm-target",
             "--env dev",
             "compare-schema",
             "compare-env --from dev --to staging",
-            "baseline export-source --from dev",
-            "baseline export-grants --from dev",
-            "baseline export-data --from dev",
-            "baseline build --from dev --to staging",
-            "baseline build --from dev --to staging --data",
-            "baseline build --from dev --to staging --bundle customer-status",
-            "baseline build --from dev --to staging --bundle customer-status --data",
-            "baseline filter-ords --exclude-module",
             "--emit-dba-script",
-            "status.<env>.json",
             "backup-db",
             "deploy 100 --env staging",
             "--manual",
         ):
             with self.subTest(command=command):
                 self.assertIn(command, readme)
-        self.assertIn("commands such as `SET DEFINE`", readme)
-        self.assertIn("`CREATE MLE MODULE`", readme)
         # The export and publish rules moved out of the README workflow sections (section 9 of the getting started
         # guide and publish-rules.md own them now), so these assertions read those documents.
         publish_rules = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
@@ -150,38 +149,16 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("AGENTS.project.md", readme)
         self.assertIn(".template-new", readme)
         self.assertIn("python3 /tmp/apex-template/scripts/upgrade_template.py", readme)
-        self.assertIn("2026-09-27_create-customers-r001", readme)
-        self.assertIn("apply-not-started", readme)
-        migration_guide = contents[ROOT / "docs" / "migration-rules.md"]
-        self.assertIn("MIGRATION_PAYLOAD_STARTED", migration_guide)
-        self.assertIn("ORA-20987", migration_guide)
-        self.assertIn("1,856", migration_guide)
-        self.assertIn("other developers' pending files", migration_guide)
-        self.assertIn("status.<env>.json", migration_guide)
-        self.assertIn("STAGING_SCHEMA", migration_guide)
-        self.assertIn("cannot reliably prove", readme)
-        self.assertIn("## Rollout", migration_guide)
-        self.assertIn("## Comparing full environments", migration_guide)
-        self.assertIn("not compared (no DBA connection)", migration_guide)
-        self.assertIn("by label, not id", migration_guide)
-        self.assertIn("Reference data: never copy foreign keys by id", migration_guide)
-        self.assertIn("Reference data: never copy foreign keys by id", contents[ROOT / "docs" / "baseline.md"])
-        self.assertIn("ERP and camp data", migration_guide)
-        self.assertIn("one manifest-level confirmation", migration_guide)
-        self.assertIn("rollout-manifest.example.json", migration_guide)
+        release_guide = contents[ROOT / "docs" / "release-workflow.md"]
         for required in (
-            "## Rehearsal",
-            "AUTOCOMMIT OFF",
-            "SAFE_FUNCTIONS",
-            "not rehearsable",
-            "folder's captured starting value",
-            "--report <file>",
-            "scratch/migration-rehearsal-*",
+            "01-ddl/", "02-code/", "03-ords/", "04-verify/",
+            "baseSha256", "--confirm-target", "PLSQL_CODE_TYPE",
+            "scratch/backups/", "scratch/release-reports/", "status",
         ):
-            with self.subTest(required=required):
-                self.assertIn(required, migration_guide)
+            with self.subTest(release_guide=required):
+                self.assertIn(required, release_guide)
         limitations = contents[ROOT / "docs" / "known-limitations.md"]
-        for limitation in ("whitespace-only lines", "trailing hyphen", "DBMS_LOB.APPEND", "five-minute", "patch levels", "compare-env", "ORA_HASH"):
+        for limitation in ("whitespace-only lines", "trailing hyphen", "patch levels", "compare-env", "ORA_HASH"):
             with self.subTest(limitation=limitation):
                 self.assertIn(limitation, limitations)
         compare_guide = contents[ROOT / "docs" / "compare-env.md"]
@@ -193,46 +170,15 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(compare_env=phrase):
                 self.assertIn(phrase, compare_guide)
 
-    def test_baseline_bundle_documentation_covers_counts_order_and_recovery(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        baseline = (ROOT / "docs" / "baseline.md").read_text(encoding="utf-8")
-        rules = (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8")
-        examples = (ROOT / "docs" / "EXAMPLES.md").read_text(encoding="utf-8")
-
-        for document, path in ((readme, "README.md"), (baseline, "docs/baseline.md"),
-                               (rules, "docs/migration-rules.md"), (examples, "docs/EXAMPLES.md")):
-            with self.subTest(path=path):
-                self.assertIn("--bundle customer-status", document)
-
-        for phrase in (
-            "--bundle <name>",
-            "baseline-bundle-<name>",
-            "3-to-1",
-            "4-to-2",
-            "data migration remains separate",
-        ):
-            with self.subTest(readme=phrase):
-                self.assertIn(phrase, readme)
-
-        for phrase in (
-            "64 characters",
-            "ASCII lowercase slug",
-            "structure, grants, and code in that order",
-            "same observed database/container/schema/edition scope",
-            "ordered original-to-generated filename mapping",
-            "SHA-256",
-            "baseline-data folder is installed separately after the DDL bundle",
-            "Oracle DDL can commit implicitly",
-            "one folder per target schema",
-            "other independent repositories",
-            "attempted or applied folder",
-        ):
-            with self.subTest(baseline=phrase):
-                self.assertIn(phrase, baseline)
-                self.assertIn(phrase, rules)
-
-        self.assertIn("4-to-2", examples)
-        self.assertIn("baseline-data", examples)
+    def test_release_startup_picker_and_zero_prompt_rules_are_documented(self) -> None:
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        for text in (agents, claude):
+            self.assertIn("scripts/team.sh release list", text)
+            self.assertIn("--confirm-target", text)
+        self.assertIn("Create a new release folder", agents)
+        self.assertIn("Create a new release folder", claude)
+        self.assertIn("zero interactive", agents.lower())
 
     def test_publish_guide_explains_every_refusal_and_is_linked(self) -> None:
         guide = (ROOT / "docs" / "publish-rules.md").read_text(encoding="utf-8")
@@ -256,19 +202,6 @@ class DocumentationContractTests(unittest.TestCase):
         # A python.org or winget install provides python.exe and py, but no python3.
         guide = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
         self.assertIn("py -3 --version", guide)
-
-    def test_reconcile_rule_lets_an_agent_pass_yes_and_no_file_says_it_never_types_the_acknowledgment(self) -> None:
-        # Owner decision 2026-11-15: no typed answer may stop an agent; --yes is the recorded route.
-        agents = " ".join((ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
-        self.assertIn("An agent may pass `--yes` to `reconcile-migration`, `feature reconcile-run` and the rollout recovery", agents)
-        self.assertIn("`acknowledgedBy: --yes`", agents)
-        for relative in ("AGENTS.md", ".agents/rules/agent-safety.md", "README.md", "docs/feature-releases.md",
-                         "docs/migration-attempt-resolution.md", "docs/migration-rules.md",
-                         "docs/live-feature-tests.md"):
-            text = " ".join((ROOT / relative).read_text(encoding="utf-8").split()).lower()
-            for withdrawn in ("an agent never types", "no flag supplies it", "are terminal-only and cannot be bypassed",
-                              "-y never replaces the typed", "does not cover the typed `reconcile`"):
-                self.assertNotIn(withdrawn, text, f"{relative} still states the withdrawn rule: {withdrawn}")
 
     def test_automations_rule_lets_an_agent_pass_yes_and_no_file_says_exact_typed_confirmation(self) -> None:
         # Owner decision 2026-11-15: --yes replaces the typed confirmation for automations enable|disable|run-once.
@@ -300,72 +233,23 @@ class DocumentationContractTests(unittest.TestCase):
         context = (ROOT / "app_context" / "README.md").read_text(encoding="utf-8")
         self.assertIn("app_context/<numeric-app-id>/", context)
         self.assertIn("apps/<schema>/<numeric-app-id>/", context)
-        self.assertIn("migrations/2026-09-27_create-customers-r001/", context)
-        self.assertIn("release.json is not read", context)
+        self.assertIn("releases/<slug>/", context)
+        self.assertIn("docs/release-workflow.md", context)
         self.assertIn("do not enforce", context)
         self.assertNotIn("app_context/<alias>/", context)
         self.assertNotIn("release builder resolves", context)
 
-    def test_migration_guidance_covers_folder_order_receipts_and_comparison_limits(self) -> None:
-        guide = (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8")
+    def test_release_workflow_guide_documents_all_six_steps_and_guards(self) -> None:
+        guide = (ROOT / "docs" / "release-workflow.md").read_text(encoding="utf-8")
         for required in (
-            "YYYY-MM-DD_<migration-name>-rNNN",
-            "NNN-<step-name>.sql",
-            "order supplied on the command line",
-            "not discovery of",
-            "STAGING_SCHEMA",
-            "PROD_SCHEMA",
-            "two developers can both pass",
-            "not reliable migration-file attribution",
-            "can mimic a migration",
-            "cannot set the browser's sort direction",
-            "apply-not-started",
-            "revise --check",
-            "MIGRATION_PAYLOAD_STARTED",
-            "committed-source-or-payload-changed",
+            "Step 1", "Step 2", "Step 3", "Step 4", "Step 5", "Step 6",
+            "release.json", "01-ddl/", "02-code/", "03-ords/", "04-verify/",
+            "baseSha256", "--confirm-target", "PLSQL_CODE_TYPE",
+            "forbiddenPatterns", "scratch/release-diffs/", "scratch/backups/",
+            "scratch/release-reports/", '"deployed"',
         ):
             with self.subTest(required=required):
                 self.assertIn(required, guide)
-        self.assertNotIn("migrations/<developer>/", guide)
-
-    def test_migration_archiving_documents_dry_run_index_gap_rule_and_example(self) -> None:
-        guide = (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8")
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        for required in (
-            "## Archiving released folders",
-            "scripts/team.sh archive-migrations <folder> [<folder>...]",
-            "--all [--keep",
-            "dry run",
-            "migrations/<SCHEMA>/.archived.json",
-            "migrations/.archived.json",
-            "r001 through r004",
-            "r005",
-            "migrations-archive/APP_DEV/",
-        ):
-            with self.subTest(required=required):
-                self.assertIn(required, guide)
-        self.assertIn("scripts/team.sh archive-migrations", readme)
-
-    def test_migration_planning_guide_documents_evidence_and_selection_rules(self) -> None:
-        planning = (ROOT / "docs" / "migration-planning.md").read_text(encoding="utf-8")
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        migration_readme = (ROOT / "migrations" / "README.md").read_text(encoding="utf-8")
-        rules = (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8")
-        examples = (ROOT / "docs" / "EXAMPLES.md").read_text(encoding="utf-8")
-        limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
-
-        self.assertIn("docs/migration-planning.md", readme)
-        self.assertIn("migration-plan", migration_readme)
-        for phrase in (
-            "local inventory", "live preflight", "caller-supplied", "sorted display order",
-            "deferred", "Single-SQL-file folders", "No other repository", "immutable",
-            "never applies SQL", "no automatic draft squasher",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase.casefold(), planning.casefold())
-        self.assertIn("migration-plan", rules)
-        self.assertIn("migration-plan", examples)
-        self.assertIn("another repository", limitations)
 
     def test_ci_runs_behavioral_unittest_suite(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "template-checks.yml").read_text(encoding="utf-8")
@@ -502,11 +386,6 @@ class GuideContractTests(unittest.TestCase):
             for index, block in enumerate(re.findall(r"```json\n(.*?)```", text, re.DOTALL), start=1):
                 with self.subTest(file=name, block=index):
                     json.loads(block)
-        baseline_example = json.loads((ROOT / "docs" / "baseline.example.json").read_text(encoding="utf-8"))
-        self.assertEqual(baseline_example["schemaVersion"], 1)
-        self.assertIn("schemas", baseline_example)
-        table = baseline_example["referenceData"]["tables"][0]
-        self.assertEqual(set(table), {"name", "excludeColumns", "keyColumns", "labelColumns", "identity", "rowLimit"})
 
     def test_deployment_descriptor_example_has_the_keys_publish_reads(self) -> None:
         text = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
@@ -518,49 +397,6 @@ class GuideContractTests(unittest.TestCase):
         self.assertIsInstance(descriptor["workspace"]["name"], str)
         self.assertIsInstance(descriptor["app"]["id"], int)
         self.assertRegex(descriptor["app"]["databaseSession"]["parsingSchema"], r"^[A-Z][A-Z0-9_$#]*$")
-
-    def test_checks_json_examples_are_accepted_by_the_migration_loader(self) -> None:
-        from scripts import migration_manifest
-
-        found = 0
-        for name in ("GETTING_STARTED.md", "EXAMPLES.md"):
-            text = (ROOT / "docs" / name).read_text(encoding="utf-8")
-            for block in re.findall(r"```json\n(.*?)```", text, re.DOTALL):
-                if '"schemaVersion"' not in block:
-                    continue
-                found += 1
-                with self.subTest(file=name, block=found), tempfile.TemporaryDirectory() as temporary:
-                    folder = Path(temporary) / "migrations" / "2026-09-30_example-r001"
-                    folder.mkdir(parents=True)
-                    (folder / "001-example.sql").write_text("ALTER TABLE HR_USERS ADD (NOTES VARCHAR2(200));\n", encoding="utf-8")
-                    (folder / "checks.json").write_text(block, encoding="utf-8")
-                    migration_manifest.load_migration(Path(temporary), "migrations/2026-09-30_example-r001")
-        self.assertGreaterEqual(found, 2)
-
-    def test_preflight_retry_setting_and_synonym_evidence_are_documented(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        rules = (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8")
-        limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
-        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
-        bash_wrapper = (ROOT / "scripts" / "team.sh").read_text(encoding="utf-8")
-        powershell_wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
-        bash_loader = (ROOT / "scripts" / "load_env.sh").read_text(encoding="utf-8")
-        powershell_loader = (ROOT / "scripts" / "load_env.ps1").read_text(encoding="utf-8")
-        help_result = subprocess.run(
-            [BASH, str(ROOT / "scripts" / "team.sh"), "--help"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        self.assertEqual(help_result.returncode, 0, help_result.stderr)
-        for text in (readme, rules, env_example, bash_wrapper, powershell_wrapper, bash_loader, powershell_loader, help_result.stdout):
-            with self.subTest(setting="MIGRATION_PREFLIGHT_INVENTORY_RETRIES"):
-                self.assertIn("MIGRATION_PREFLIGHT_INVENTORY_RETRIES", text)
-        self.assertIn("default is `3` retries", rules)
-        self.assertIn("status", rules)
-        self.assertIn("fingerprint", rules)
-        self.assertIn("one direct", limitations)
 
     def test_publish_targets_dev_and_deploy_targets_staging_and_prod(self) -> None:
         team_sh = (ROOT / "scripts" / "team.sh").read_text(encoding="utf-8")
@@ -596,8 +432,6 @@ class GuideContractTests(unittest.TestCase):
         getting_started = (ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
         self.assertIn("scripts/team.sh targets", getting_started)
         self.assertIn("never connects to a database and never starts SQLcl", getting_started)
-        self.assertIn("scripts/team.sh targets", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
-        self.assertIn("then the tables profile (`TABLES_SCHEMA`), then the\nmigration profile", (ROOT / "docs" / "migration-rules.md").read_text(encoding="utf-8"))
 
     def test_getting_started_runs_verify_local_after_the_exports_not_before_the_first_one(self) -> None:
         # verify-local reports every configured app with no folder as a failure until it is exported. A new developer

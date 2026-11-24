@@ -31,7 +31,7 @@ class PublicationIdentityTests(unittest.TestCase):
             root = Path(temporary)
             case = test_team_cli.TeamCliTests()
             script, log = case.make_deploy_checkout(root)
-            for name in ('application_lifecycle.py', 'application_lifecycle.sql', 'db_targets.py', 'sqlcl_session.py', 'windows_job.py'):
+            for name in ('application_lifecycle.py', 'application_lifecycle.sql', 'db_targets.py', 'local_config.py', 'sqlcl_session.py', 'template_release.py', 'windows_job.py'):
                 shutil.copy2(ROOT / 'scripts' / name, root / 'scripts' / name)
             shutil.copy2(ROOT / 'template-manifest.json', root / 'template-manifest.json')
             result = case.run_deploy(script, log, '--manual')

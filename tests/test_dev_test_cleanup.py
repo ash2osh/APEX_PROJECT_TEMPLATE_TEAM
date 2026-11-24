@@ -135,7 +135,7 @@ def _artifact(
     *,
     name: str | None = None,
     object_id: int | None = 101,
-    scenario_id: str = "sqlcl-delivery",
+    scenario_id: str = "datatype-roundtrip",
 ) -> dict:
     if name is None:
         prefix = f"DT_{hashlib.sha256((run.run_id + scenario_id).encode('utf-8')).hexdigest()[:12].upper()}_"
@@ -156,7 +156,7 @@ def _write_evidence(
     run: RunEvidence,
     *,
     origin: str = "builtin",
-    scenario_id: str = "sqlcl-delivery",
+    scenario_id: str = "datatype-roundtrip",
     artifact: dict | None = None,
     cleanup_contract: object = None,
     add_precreation: bool = True,
@@ -260,7 +260,7 @@ class TestCleanupPlanning(unittest.TestCase):
         from scripts.dev_test_cleanup import plan_cleanup
 
         run = create_run(Path(self.temp.name))
-        scenario_id = "sqlcl-delivery"
+        scenario_id = "datatype-roundtrip"
         prefix = f"DT_{hashlib.sha256((run.run_id + scenario_id).encode('utf-8')).hexdigest()[:12].upper()}_"
         artifact = _artifact(run, name=f"{prefix}SD_TAB")
         _write_evidence(run, scenario_id=scenario_id, artifact=artifact)
@@ -602,7 +602,7 @@ class TestProjectCleanupContract(unittest.TestCase):
                     patch("scripts.dev_test_cleanup.resolve_target", return_value=target), \
                     patch("scripts.dev_test_cleanup._capture_live_inventory", return_value=live), \
                     patch("scripts.dev_test_runtime.read_rows", return_value=rows), \
-                    patch("scripts.migration_checks.run_checks", side_effect=checks_runner):
+                    patch("scripts.dev_test_checks.run_checks", side_effect=checks_runner):
                 plan = plan_cleanup(run, {})
                 self.assertEqual(plan["status"], "READY")
                 self.assertEqual(plan["operations"][0]["bindings"], ["DEVTEST_ORDER_ID"])

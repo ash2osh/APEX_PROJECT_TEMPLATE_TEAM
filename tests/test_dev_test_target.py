@@ -25,7 +25,7 @@ from scripts.dev_test_target import (
     _gather_input_paths,
     _parse_planning_output,
 )
-from scripts.migration_checks import CheckReport, OBSERVED_IDENTITY_FIELDS
+from scripts.dev_test_checks import CheckReport, OBSERVED_IDENTITY_FIELDS
 from scripts.sqlcl_session import SqlclResult
 
 
@@ -663,7 +663,7 @@ class TestDevTestTarget(unittest.TestCase):
         def runner(target, driver_path: Path, run_dir: Path, **kwargs):
             driver = driver_path.read_text(encoding="utf-8")
             recorded.append((driver_path.name, driver))
-            if driver_path.name == "migration-checks.sql":
+            if driver_path.name == "dev-test-checks.sql":
                 payload = {
                     "schemaVersion": 1,
                     "phase": "preconditions",
@@ -701,12 +701,12 @@ class TestDevTestTarget(unittest.TestCase):
                     + json.dumps(payload)
                     + "\nPLAN_PAYLOAD_END:plan\nPLAN_VERIFIED:plan\n"
                 )
-            return SqlclResult(check_returncode if driver_path.name == "migration-checks.sql" else 0, output, run_dir)
+            return SqlclResult(check_returncode if driver_path.name == "dev-test-checks.sql" else 0, output, run_dir)
 
         report = inspect_suite(self.base_env, "DEMO", suite, self.run, runner=runner)
 
         plan_driver = next(driver for name, driver in recorded if name == "dev-test-plan-driver.sql")
-        check_driver = next(driver for name, driver in recorded if name == "migration-checks.sql")
+        check_driver = next(driver for name, driver in recorded if name == "dev-test-checks.sql")
         self.assertIn("ALL_PROCEDURES", plan_driver)
         self.assertIn("PROCEDURE_NAME", plan_driver)
         self.assertIn("OWNER = l_owner_1", plan_driver)

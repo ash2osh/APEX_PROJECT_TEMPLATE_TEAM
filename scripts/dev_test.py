@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     actions.add_argument("--cleanup", metavar="RUN_ID", help="explicitly clean supported artifacts from a saved run")
     parser.add_argument("--env", help="must be dev for planning and execution")
     parser.add_argument("--schema", help="select one configured Oracle schema")
-    parser.add_argument("--suite", type=Path, help="project suite JSON; omitted means all six built-in scenarios")
+    parser.add_argument("--suite", type=Path, help="project suite JSON; omitted means the built-in scenarios")
     parser.add_argument("--scenario", action="append", default=[], help="select a scenario (repeatable)")
     parser.add_argument("--format", choices=("text", "json", "markdown"), default="text")
     return parser
