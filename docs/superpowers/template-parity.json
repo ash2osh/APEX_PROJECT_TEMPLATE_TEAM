@@ -14,7 +14,7 @@
       "reason": "26.2 uses the isolated graphify_project.py wrapper and exact-detector corpus receipt workflow; this clarification makes the offline CLI the only graph update path and keeps semantic context indexing optional. 26.1 uses its separate Graphify setup path and is reviewed separately.",
       "blobs": [
         "88038cf071e1abfb0dce58d88eec469b9db29056",
-        "dc5374c5fb684ff572f6f447a5d53bd7bd1fc9b3"
+        "cc1e2426c0e09780f5335d996a3b7aa9e9fb070c"
       ]
     },
     ".agents/rules/project.md": {
@@ -267,10 +267,10 @@
     },
     "docs/migration-rules.md": {
       "status": "intended",
-      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow. Both lines document the physical-target writer lock and receipt recheck. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows E2E): both document the shared-database staging rehearsal limit and new-migration's schema-folder layout. Follow-up 2026-11-20 (outside review): both say --phase both usually exits 1 for an applied folder and that an empty preconditions list cannot fail. Follow-up 2026-11-21 (table triggers and sequences): both state the DEV read order (code, then tables, then migration profile). Review 2026-11-23: Both document pooled sessions. The 26.2 rehearsal metrics remain release-specific.",
+      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow. Both lines document the physical-target writer lock and receipt recheck. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows E2E): both document the shared-database staging rehearsal limit and new-migration's schema-folder layout. Follow-up 2026-11-20 (outside review): both say --phase both usually exits 1 for an applied folder and that an empty preconditions list cannot fail. Follow-up 2026-11-21 (table triggers and sequences): both state the DEV read order (code, then tables, then migration profile). Review 2026-11-23: Both document pooled sessions. The 26.2 rehearsal metrics remain release-specific. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented.",
       "blobs": [
-        "5eb453bb061aa16820d4ba8a6d8148e45df13d39",
-        "d63c079f8ca5b02b7dbb26501a6c91d2e38d0305"
+        "5608cbfc1de5608bec10731e97e681a54d7baf0b",
+        "cbd3cefb6410bf0643f976b482594c4ebab7bc01"
       ]
     },
     "docs/publish-rules.md": {
@@ -470,7 +470,7 @@
       "reason": "26.2 adds thread-local delegation-loop protection, nearest-project extractor resolution and stat-fingerprint caching for Graphify; 26.1 retains the simpler installed-extractor dispatch.",
       "blobs": [
         "34deb60e97b7010a7cf0f80c7e4520a99f9c31bb",
-        "465d47fc81201db509c4dab3220846133bdf8461"
+        "9c1e9761158527d7da3c6fee0c2f7d42148024ff"
       ]
     },
     "scripts/migration_checks.py": {
@@ -555,18 +555,18 @@
     },
     "scripts/rollout.py": {
       "status": "intended",
-      "reason": "Not ported (was missed): 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA. Both lines pass an existing capsule writer lease to migrate. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard. Follow-up 2026-11-20 (Windows E2E): both print ASCII separators. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings. Review 2026-11-23: Both use persistent SQLcl where enabled and capture lightweight identity. Their legacy receipts and resume target-binding models remain release-specific.",
+      "reason": "Not ported (was missed): 26.2 resume (_snapshot) refuses a migrate, sql-script or ords-import step whose target binding changed after planning, and the writer-identity guard runs on DEV too (expected_identity=before_identity); 26.1 keeps no frozen binding for those steps and applies the writer guard only on staging and prod. Minor: 26.1 uses Path.relative_to where 26.2 uses the alias-safe relative_to_root in directory inputs. Intended (decision): 26.1 does not port the 26.2 app-deploy target identity and child-configuration bindings; resolve_target refuses configurations 26.1 accepts and deploys today, for example a single-schema project with a staging connection and no STAGING_SCHEMA. Both lines pass an existing capsule writer lease to migrate. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard. Follow-up 2026-11-20 (Windows E2E): both print ASCII separators. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings. Review 2026-11-23: Both use persistent SQLcl where enabled and capture lightweight identity. Their legacy receipts and resume target-binding models remain release-specific. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented.",
       "blobs": [
-        "d358b38484ad71ada4bfc3eeca6c8a4f84ac9144",
-        "9fc29f08089d530950b4aa4f30180eb4eed98b1c"
+        "2ea67f5b16d4c3810d3ec18441dbebce4a618cf1",
+        "b886d9f9aefd330afe0bb8bd4c37eefd98696e04"
       ]
     },
     "scripts/rollout_capsule.py": {
       "status": "intended",
-      "reason": "Schema-2 capsule only: 26.2 passes capsule=True to rollout._target_binding, and the function and import order differ; the logic is otherwise the same. Both lines supply the acquired writer lease to the migration step. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings. Review 2026-11-23: Both use the same capsule completion, proof freshness, timing and tag policy. Their application and auxiliary target adapters remain release-specific.",
+      "reason": "Schema-2 capsule only: 26.2 passes capsule=True to rollout._target_binding, and the function and import order differ; the logic is otherwise the same. Both lines supply the acquired writer lease to the migration step. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings. Review 2026-11-23: Both use the same capsule completion, proof freshness, timing and tag policy. Their application and auxiliary target adapters remain release-specific. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented.",
       "blobs": [
-        "5044183261ff7e706d21feaeca5575ac66e48bb7",
-        "ba489758bd0887c9148eea7c9e0761ed98723801"
+        "91ed0484307a7b4c32ce52967c459e9a27c2b4e5",
+        "cf9e28afd1703d1e7f55eb780a230317343e0a7d"
       ]
     },
     "scripts/setup_graphify_apx.py": {
@@ -755,10 +755,10 @@
     },
     "tests/test_feature_rollout.py": {
       "status": "feature",
-      "reason": "26.2 adds three binding tests for its schema-2 and capsule behaviour (test_a_version_one_migrate_binding_keeps_its_shape_and_only_a_capsule_adds_the_logical_schema, test_schema_two_auxiliary_target_uses_migration_profile_binding, test_schema_two_feature_steps_do_not_require_legacy_target_binding); 26.1 has no test that 26.2 lacks, and the occupied-receipt test is on both lines now. Both lines assert that a migration receives the active capsule writer lease. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings. Review 2026-11-23: Both qualify advisory timing and equivalent capsule safety. The fixtures still use each release's rollout adapter.",
+      "reason": "26.2 adds three binding tests for its schema-2 and capsule behaviour (test_a_version_one_migrate_binding_keeps_its_shape_and_only_a_capsule_adds_the_logical_schema, test_schema_two_auxiliary_target_uses_migration_profile_binding, test_schema_two_feature_steps_do_not_require_legacy_target_binding); 26.1 has no test that 26.2 lacks, and the occupied-receipt test is on both lines now. Both lines assert that a migration receives the active capsule writer lease. Follow-up 2026-11-21 (fast releases): both lines add feature release-plan, the production release tag (--no-release-tag), feature-first new-migration, staging-neutralize and the verify-local descriptor warnings. Review 2026-11-23: Both qualify advisory timing and equivalent capsule safety. The fixtures still use each release's rollout adapter. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented.",
       "blobs": [
-        "37687db9e3d0193675eb634235d75c275497d9e4",
-        "98887faf46c5efe6f50717d02f5bf3bc32a9ed9d"
+        "807ee4c1001237e64d557b4cccb03ed7859bf78e",
+        "aad8f3441cfc457353592afaa888e422d50311cf"
       ]
     },
     "tests/test_graphify_corpus.py": {
@@ -766,15 +766,15 @@
       "reason": "Corpus rules for the 26.2 Graphify environment.",
       "blobs": [
         "bdb66d5357e6c2dc5dba0e838e7ed31925b7d1e5",
-        "058a41e1da43c6da154408b783c500c296e055c3"
+        "ca1b871f15350f999ae6948ce2733c0db307c1a5"
       ]
     },
     "tests/test_migrate_cli.py": {
       "status": "intended",
-      "reason": "26.2 keeps the selected-target attempt policy with its own test (test_receipt_for_another_environment_does_not_block_selected_apply), while 26.1 keeps the fail-closed every-chain policy decided on 2026-10-20. Both lines cover confirmation-time replay, lock contention and lease reuse. Review 2026-11-23: Both test initial preflight reuse under a confirmed rollout-owned lease. Their surrounding profile and migration fixtures remain release-specific.",
+      "reason": "26.2 keeps the selected-target attempt policy with its own test (test_receipt_for_another_environment_does_not_block_selected_apply), while 26.1 keeps the fail-closed every-chain policy decided on 2026-10-20. Both lines cover confirmation-time replay, lock contention and lease reuse. Review 2026-11-23: Both test initial preflight reuse under a confirmed rollout-owned lease. Their surrounding profile and migration fixtures remain release-specific. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented.",
       "blobs": [
-        "bea46d54b6d9e8482fa73c8f3f0b21464203c93c",
-        "300dc7bb6393b77b37bfda780a6ad615ae071426"
+        "7a3c62eafc2da9c250bf86a6af495aaaeaa030b4",
+        "2ff0b7cf5afc79d0b8c3c12b3cc149dcbeb93a5e"
       ]
     },
     "tests/test_migration_checks.py": {
@@ -851,10 +851,10 @@
     },
     "tests/test_rollout.py": {
       "status": "intended",
-      "reason": "Not ported (was missed): 26.2 tests the frozen target binding that the resume check rejects after a configuration change (test_plan_freezes_target_binding_and_snapshot_rejects_configuration_change) and rejects SQLcl abbreviations and comment-hazard reader tricks in sql-script steps (test_sql_script_rejects_sqlcl_abbreviations_and_comment_reader_hazards, the shared validate_sql_only path, which 26.1 has no rollout-level test for); 26.1 has a schema-1 receipt-without-identity resume test that 26.2 lacks. The app-deploy child-configuration tests are intended (see scripts/rollout.py). Both lines assert that a version-1 rollout uses the normal direct migration lease path. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard. Review 2026-11-23: Both test the advisory capsule budget and the matching identity capture behavior. Their legacy import and resume fixtures reflect the separate adapters.",
+      "reason": "Not ported (was missed): 26.2 tests the frozen target binding that the resume check rejects after a configuration change (test_plan_freezes_target_binding_and_snapshot_rejects_configuration_change) and rejects SQLcl abbreviations and comment-hazard reader tricks in sql-script steps (test_sql_script_rejects_sqlcl_abbreviations_and_comment_reader_hazards, the shared validate_sql_only path, which 26.1 has no rollout-level test for); 26.1 has a schema-1 receipt-without-identity resume test that 26.2 lacks. The app-deploy child-configuration tests are intended (see scripts/rollout.py). Both lines assert that a version-1 rollout uses the normal direct migration lease path. Decision 2026-11-20: not ported. 26.1 receipts carry no targetBinding and existing downstream projects hold such receipts, so adding a frozen binding and the DEV writer guard to 26.1 would change its receipt contract. The difference is kept on purpose; revisit if 26.1 needs the resume guard. Review 2026-11-23: Both test the advisory capsule budget and the matching identity capture behavior. Their legacy import and resume fixtures reflect the separate adapters. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented.",
       "blobs": [
-        "6a818420d300d58ac0c1def44b5bbdd33a30578e",
-        "2fccec92c691914b8661049e88dd506a6cd77df5"
+        "06def7bf8b732c6d396ad4583b5cb76001bea713",
+        "ea70b98935890120892b18d7fcbf2a2b3dbfa576"
       ]
     },
     "tests/test_setup_graphify.py": {
