@@ -730,8 +730,8 @@ class MigrateCliTests(unittest.TestCase):
 
         success = (
             "MIGRATION_IDENTITY_BEGIN\n" + identity + "\nMIGRATION_IDENTITY_END\n"
-            "MIGRATION_IDENTITY_VERIFIED\nMIGRATION_PRECONDITIONS_VERIFIED\n"
-            "MIGRATION_PAYLOAD_STARTED:001-insert-row.sql\n1 row inserted.\nMIGRATION_APPLY_COMPLETED\n"
+            "MIGRATION_IDENTITY_VERIFIED\nMIGRATION_PAYLOAD_STARTED:001-insert-row.sql\n"
+            "1 row inserted.\nMIGRATION_APPLY_COMPLETED\n"
         )
         install(self.root / "fake-bin", "cat <<'FAKE_SQLCL_OUTPUT'\n" + success + "FAKE_SQLCL_OUTPUT\n")
         with patch.dict("os.environ", fake_environment(binary)):
@@ -935,6 +935,37 @@ class MigrateCliTests(unittest.TestCase):
         before_apply = fake.calls[: next(index for index, call in enumerate(fake.calls) if call[0] == "apply")]
         self.assertEqual(1, sum(1 for call in before_apply if call[0] == "snapshot"))
 
+    def test_leased_folder_rechecks_preconditions_before_recording_attempt(self):
+        folder = self.add_folder(
+            "2026-09-28_late-precondition-r001",
+            {"001-create.sql": "CREATE TABLE LATE_T (ID NUMBER);\n"},
+            preconditions=[{"id": "still-present", "sql": "SELECT 1 FROM DUAL", "expected": 1}],
+        )
+        target = self.target()
+        fake = FakeDatabase(target)
+        scope = {"dbUniqueName": "DEVDB_UNIQUE", "containerId": "3", "schema": target.schema, "edition": "ORA$BASE"}
+
+        def checks(target, checks, run_dir, *, phase):
+            report = fake.run_checks(target, checks, run_dir, phase=phase)
+            # Simulate drift after the initial preflight, with the writer lease still held.
+            if phase == "preconditions" and not fake.check_requires_object:
+                fake.check_requires_object["still-present"] = ("MISSING", "TABLE")
+            return report
+
+        stderr = io.StringIO()
+        with target_writer_lease(self.root, scope, {"purpose": "rollout"}) as lease, contextlib.redirect_stderr(stderr):
+            status, _ = self.apply(
+                self.load(folder.name), target, fake=fake, writer_lease=lease, run_checks_fn=checks,
+            )
+
+        self.assertEqual(status, 2)
+        self.assertIn("CHECK_FAILED", stderr.getvalue())
+        self.assertEqual(2, sum(call[0] == "checks" and call[2] == "preconditions" for call in fake.calls))
+        self.assertEqual(1, sum(call[0] == "snapshot" for call in fake.calls))
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
+        self.assertFalse(list(folder.glob("attempt-event.*.json")))
+        self.assertFalse((folder / "status.dev.json").exists())
+
     def test_folder_one_preflight_repeated_without_writer_lease(self):
         folder = self.add_folder("2026-09-28_fresh-preflight-r001", {"001-create.sql": "CREATE TABLE FRESH_T (ID NUMBER);\n"})
         status, fake = self.apply(self.load(folder.name), self.target(), fake=FakeDatabase(self.target()))
@@ -1072,13 +1103,6 @@ class MigrateCliTests(unittest.TestCase):
             self.assertIn("PROMPT MIGRATION_PAYLOAD_STARTED:001-create-t.sql", content)
             self.assertIn("EXIT SUCCESS COMMIT", content)
             payload_at = content.index("@@../payload/")
-            self.assertIn("ALTER SESSION DISABLE COMMIT IN PROCEDURE;", content)
-            self.assertIn("SET TRANSACTION READ ONLY;", content)
-            self.assertIn("CHECK_REHEARSAL_FAILED:preconditions", content)
-            self.assertIn("ALTER SESSION ENABLE COMMIT IN PROCEDURE;", content)
-            self.assertLess(content.index("SET TRANSACTION READ ONLY;"), payload_at)
-            self.assertLess(content.index("CHECK_REHEARSAL_FAILED:preconditions"), payload_at)
-            self.assertLess(content.index("ALTER SESSION ENABLE COMMIT IN PROCEDURE;"), payload_at)
             # SQLcl ends a plain SQL statement at a blank line unless told
             # otherwise: an UPDATE split before its WHERE would run on every row.
             self.assertIn("SET SQLBLANKLINES ON", content)
@@ -1103,48 +1127,17 @@ class MigrateCliTests(unittest.TestCase):
             last_payload_at = content.rindex("@@../payload/")
             whenever_at = content.index("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", last_payload_at)
             self.assertLess(whenever_at, compile_at)
-            output = f"MIGRATION_IDENTITY_BEGIN\n{fake_identity}\nMIGRATION_IDENTITY_END\nMIGRATION_IDENTITY_VERIFIED\nMIGRATION_PRECONDITIONS_VERIFIED\nMIGRATION_PAYLOAD_STARTED:001-create-t.sql\nMIGRATION_APPLY_COMPLETED\n"
+            output = f"MIGRATION_IDENTITY_BEGIN\n{fake_identity}\nMIGRATION_IDENTITY_END\nMIGRATION_IDENTITY_VERIFIED\nMIGRATION_APPLY_COMPLETED\n"
             return SqlclResult(0, output, working)
         expected_identity = json.loads(fake_identity)
         with patch("scripts.migrate.run_sqlcl", side_effect=fake_sqlcl):
-            evidence = apply_folder(
-                staged, self.target(), run_dir, expected_identity=expected_identity, preconditions=migration.preconditions,
-            )
+            evidence = apply_folder(staged, self.target(), run_dir, expected_identity=expected_identity)
         self.assertTrue(evidence["committed"])
 
         # An identity value that cannot be embedded safely refuses before SQLcl runs.
         with patch("scripts.migrate.run_sqlcl", side_effect=AssertionError("SQLcl must not run")):
             with self.assertRaisesRegex(MigrationApplyError, "cannot be enforced"):
                 apply_folder(staged, self.target(), staged_dir / "apply-quote", expected_identity={**expected_identity, "service_name": "x'y"})
-
-    def test_writer_precondition_driver_respects_existing_check_size_budget(self):
-        folder = self.add_folder(
-            "2026-09-28_writer-precondition-size-r001",
-            {"001-create.sql": "CREATE TABLE T (ID NUMBER);\n"},
-            preconditions=[{"id": "before-change", "sql": "SELECT 1 FROM dual", "expected": 1}],
-        )
-        migration = self.load(folder.name)[0]
-        staged_dir = self.root / "scratch" / "writer-size"
-        staged_dir.mkdir(parents=True)
-        payload = staged_dir / "payload" / migration.folder.name
-        payload.mkdir(parents=True)
-        for file in migration.files:
-            (payload / file.name).write_bytes(file.source)
-        from dataclasses import replace
-        staged_files = tuple(replace(file, path=payload / file.name) for file in migration.files)
-        staged = replace(migration, folder=payload, files=staged_files)
-        expected_identity = {
-            "session_user": "LOGIN_DEV", "current_schema": "APP_DEV", "db_name": "DEVDB",
-            "db_unique_name": "DEVDB_UNIQUE", "service_name": "dev.service", "container_id": "3",
-            "container_name": "APP_PDB", "edition": "ORA$BASE", "database_version": "19.0",
-        }
-        with patch.dict(os.environ, {"MIGRATION_CHECK_BATCH_BYTES": "1"}), \
-             patch("scripts.migrate.run_sqlcl", side_effect=AssertionError("oversized check reached SQLcl")):
-            with self.assertRaisesRegex(MigrationApplyError, "precondition.*MIGRATION_CHECK_BATCH_BYTES"):
-                apply_folder(
-                    staged, self.target(), staged_dir / "apply", expected_identity=expected_identity,
-                    preconditions=migration.preconditions,
-                )
 
     def schema_folder(self, schema, name, sql):
         folder = self.root / "migrations" / schema / name

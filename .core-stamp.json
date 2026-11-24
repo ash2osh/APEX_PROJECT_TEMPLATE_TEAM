@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "cebc64fc893e88b52459bbd5cdd9da5e721f8507",
+  "coreCommit": "9421e9cf0f578f109401c4a1fb1cb3caf1dd8b38",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -274,7 +274,7 @@
     },
     {
       "path": "scripts/migrate.py",
-      "sha256": "f3d83dabd51e8e2cf4014607e882d47aaa31f85ea8d710bef011605f2dfc6dfd",
+      "sha256": "816a8c2697e68ffa578fee611d3c567f8c434d79f88e1ace24b8a5b5d5480a98",
       "executable": false
     },
     {
@@ -1059,7 +1059,7 @@
     },
     {
       "path": "tests/test_live_feature_release.py",
-      "sha256": "580579e1381be19d055a024fe457a868f8c5c2a865f3bc616110298e4a77a5ba",
+      "sha256": "d3e3ea29758e8b33d9f64dc73a6a5d5bae59dcdfd97e99be15e7f6bbf3ad709a",
       "executable": false
     },
     {

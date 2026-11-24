@@ -1810,8 +1810,8 @@ if is_rollout or any(module in sys.orig_argv for module in ("scripts.migration_c
         self.assertEqual(retried["status"], "success")
         self.assertEqual(self._count(f"select count(*) from user_tables where table_name = '{table}'", STAGING_DB), 1)
 
-    def test_late_migrate_precondition_refuses_before_payload_in_the_leased_writer(self) -> None:
-        from scripts import migrate, migration_attempts, release_ownership, sqlcl_pool
+    def test_late_migrate_precondition_refuses_before_payload_under_the_writer_lease(self) -> None:
+        from scripts import migrate, release_ownership, sqlcl_pool
         from scripts.db_targets import Target
         from scripts.migration_manifest import load_batch
 
@@ -1852,16 +1852,14 @@ if is_rollout or any(module in sys.orig_argv for module in ("scripts.migration_c
 
         self.assertTrue(changed)
         self.assertEqual(result, 2)
-        evidence, = (self.project / "scratch").glob("migration-attempt-*/apply-001/sqlcl-output.log")
+        run, = (self.project / "scratch").glob("migration-attempt-*")
+        evidence = run / "boundary-001" / "preconditions" / "sqlcl-output.log"
         transcript = evidence.read_text(encoding="utf-8")
-        self.assertIn("ORA-20985", transcript)
-        self.assertNotIn("MIGRATION_PAYLOAD_STARTED:", transcript)
-        manifest = json.loads((evidence.parents[1] / "run-manifest.json").read_bytes())
-        self.assertEqual(manifest["state"], "apply-not-started")
-        self.assertFalse(manifest["migrations"][0]["writeAttempted"])
-        events = [json.loads(path.read_bytes()) for path in (self.project / folder).glob("attempt-event.*.json")]
-        refused, = (event for event in events if event["state"] == "apply-not-started")
-        self.assertTrue(migration_attempts.validate_no_write_evidence(self.project, refused))
+        self.assertIn("CHECK_VERIFIED:preconditions", transcript)
+        self.assertFalse((run / "apply-001").exists())
+        manifest = json.loads((run / "run-manifest.json").read_bytes())
+        self.assertFalse(manifest["migrations"][0].get("writeAttempted", False))
+        self.assertFalse(list((self.project / folder).glob("attempt-event.*.json")))
         self.assertFalse((self.project / folder / "status.staging.json").exists())
         self.assertEqual(self._count(f"SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME = '{table}'", STAGING_DB), 0)
 

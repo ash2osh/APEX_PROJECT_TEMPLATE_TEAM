@@ -7,7 +7,6 @@ import argparse
 import contextlib
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
@@ -38,16 +37,13 @@ from .migration_checks import (
     compiled_units,
     preflight,
     preflight_inventory_retries,
-    render_in_session_check_driver,
     run_checks,
 )
-from . import migration_checks
 from .migration_diff import diff_path, write_diff
 from .migration_manifest import (
     Migration,
     MigrationFile,
     MigrationManifestError,
-    QueryCheck,
     assert_single_layout,
     decode_json,
     install_receipt,
@@ -661,46 +657,6 @@ def _identity_guard_lines(expected_identity: Mapping[str, str]) -> list[str]:
     return lines
 
 
-def _writer_precondition_batches(
-    target: Target, checks: Sequence[QueryCheck],
-) -> tuple[tuple[QueryCheck, ...], ...]:
-    """Partition writer checks with the same byte budget as bounded check drivers."""
-    checks = tuple(checks)
-    if not checks:
-        return ()
-    try:
-        budget = migration_checks._check_driver_budget()
-        batches = migration_checks._partition_checks(target, checks, "preconditions", budget)
-    except (MigrationManifestError, OSError, RuntimeError, ValueError) as error:
-        raise MigrationApplyError(f"writer-bound precondition checks cannot be prepared safely: {error}") from error
-    if tuple(check for batch in batches for check in batch) != checks:
-        raise MigrationApplyError("writer-bound precondition partition changed check order or coverage")
-    for batch in batches:
-        rendered = render_in_session_check_driver(target, batch, "preconditions", fail_on_false=True)
-        if len(rendered.encode("utf-8")) > budget:
-            raise MigrationApplyError(
-                f"writer-bound precondition batch exceeds MIGRATION_CHECK_BATCH_BYTES={budget}"
-            )
-    return batches
-
-
-def _inline_writer_checks_respect_check_timeout() -> bool:
-    """The writer driver's apply timeout must bound its inline check phase too."""
-    def phase_timeout(name: str) -> float | None:
-        raw = os.environ.get(name)
-        if raw is None:
-            return 300.0
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return value if math.isfinite(value) and value > 0 else None
-
-    apply_timeout = phase_timeout("MIGRATION_APPLY_TIMEOUT_SECONDS")
-    check_timeout = phase_timeout("MIGRATION_CHECK_TIMEOUT_SECONDS")
-    return apply_timeout is not None and check_timeout is not None and apply_timeout <= check_timeout
-
-
 def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -760,22 +716,9 @@ def apply_folder(
     run_dir: Path,
     *,
     expected_identity: Mapping[str, str] | None = None,
-    preconditions: Sequence[QueryCheck] = (),
-    precondition_batches: Sequence[Sequence[QueryCheck]] | None = None,
 ) -> dict:
-    """Apply staged SQL and writer checks under MIGRATION_APPLY_TIMEOUT_SECONDS.
-
-    The inline check phase shares the apply session's time budget with the payload.
-    """
+    """Apply staged SQL under MIGRATION_APPLY_TIMEOUT_SECONDS."""
     run_dir = Path(run_dir)
-    preconditions = tuple(preconditions)
-    if preconditions and expected_identity is None:
-        raise MigrationApplyError("writer-bound preconditions require the observed apply target identity")
-    batches = _writer_precondition_batches(target, preconditions) if precondition_batches is None else tuple(
-        tuple(batch) for batch in precondition_batches
-    )
-    if tuple(check for batch in batches for check in batch) != preconditions:
-        raise MigrationApplyError("writer-bound precondition batches do not match the selected folder checks")
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if run_dir.is_symlink():
         raise MigrationApplyError("migration SQLcl run directory cannot be a symbolic link")
@@ -805,24 +748,6 @@ def apply_folder(
     ]
     if expected_identity is not None:
         driver_lines.extend(_identity_guard_lines(expected_identity))
-    if batches:
-        driver_lines.extend((
-            "ALTER SESSION DISABLE COMMIT IN PROCEDURE;",
-            "SET TRANSACTION READ ONLY;",
-        ))
-        for batch in batches:
-            check_lines = render_in_session_check_driver(
-                target, batch, "preconditions", fail_on_false=True,
-            ).splitlines()
-            driver_lines.extend(
-                line for line in check_lines
-                if line.strip() != "DBMS_OUTPUT.PUT_LINE('CHECK_VERIFIED:preconditions');"
-            )
-        driver_lines.extend((
-            "ROLLBACK;",
-            "ALTER SESSION ENABLE COMMIT IN PROCEDURE;",
-            "PROMPT MIGRATION_PRECONDITIONS_VERIFIED",
-        ))
     for file in migration.files:
         driver_lines.append(f"PROMPT MIGRATION_PAYLOAD_STARTED:{file.name}")
         driver_lines.append(f"@@../payload/{migration.folder.name}/{file.name}")
@@ -862,14 +787,6 @@ def apply_folder(
     except SqlclError as error:
         raise MigrationApplyError(f"SQLcl apply failed for {migration.folder.name}; inspect {error.run_dir}") from error
     output = result.output
-    if batches:
-        output_lines = [line.strip() for line in output.splitlines()]
-        verified_at = next((index for index, line in enumerate(output_lines) if line == "MIGRATION_PRECONDITIONS_VERIFIED"), None)
-        payload_at = next((index for index, line in enumerate(output_lines) if line.startswith("MIGRATION_PAYLOAD_STARTED:")), None)
-        if verified_at is None or payload_at is None or verified_at >= payload_at:
-            raise MigrationApplyError(
-                f"SQLcl did not confirm the writer-bound preconditions before the payload for {migration.folder.name}; inspect {run_dir}"
-            )
     if "MIGRATION_APPLY_COMPLETED" not in {line.strip() for line in output.splitlines()}:
         raise MigrationApplyError(f"SQLcl did not confirm all files completed for {migration.folder.name}; inspect {run_dir}")
     identity = _apply_identity_from_output(output)
@@ -943,8 +860,6 @@ def _preflight_snapshot(
     capture_inventory_fn: Callable,
     capture_snapshot_fn: Callable,
     run_checks_fn: Callable,
-    *,
-    include_explicit_preconditions: bool = True,
 ) -> tuple[SchemaInventory, SchemaSnapshot, CheckReport, PreflightReport]:
     operations = analyze_batch(migrations, target.schema)
     keys = _selected_keys(operations)
@@ -958,11 +873,7 @@ def _preflight_snapshot(
     else:
         inventory = capture_inventory_fn(target, run_dir)
         snapshot = SchemaSnapshot(inventory.identity, inventory.objects, {}, inventory.coverage, inventory.started_at, inventory.completed_at)
-    checks = (
-        _check_report(target, migrations, "preconditions", run_dir / "preconditions", run_checks_fn)
-        if include_explicit_preconditions
-        else CheckReport(True, True, (), (), {"phase": "preconditions", "complete": True, "skippedForWriterGuard": True})
-    )
+    checks = _check_report(target, migrations, "preconditions", run_dir / "preconditions", run_checks_fn)
     report = preflight(migrations, snapshot, checks)
     return inventory, snapshot, checks, report
 
@@ -1172,19 +1083,19 @@ def apply_batch(
                 original = item.original
                 staged = item.staged
                 # Refresh identity and catalog evidence at each folder boundary. A one-folder capsule step
-                # can reuse its initial observation when it already held the lease and did not pause for review.
-                # The writer still evaluates explicit preconditions before opening the payload.
+                # can reuse its initial catalog when it already held the lease and did not pause for review;
+                # its explicit preconditions still get a fresh, independently bounded read here.
                 if folder_index == 1 and len(frozen) == 1 and writer_lease is not None and not prompted:
-                    current_inventory, current_snapshot, current_checks, current_preflight = (
-                        initial_inventory, initial_snapshot, initial_checks, initial_preflight,
+                    current_inventory, current_snapshot = initial_inventory, initial_snapshot
+                    current_checks = _check_report(
+                        target, (original,), "preconditions",
+                        run_dir / f"boundary-{folder_index:03d}" / "preconditions", run_checks_fn,
                     )
+                    current_preflight = preflight((original,), current_snapshot, current_checks)
                 else:
                     current_inventory, current_snapshot, current_checks, current_preflight = _preflight_snapshot(
                         (original,), target, run_dir / f"boundary-{folder_index:03d}",
                         capture_inventory_fn, capture_snapshot_fn, run_checks_fn,
-                        include_explicit_preconditions=(
-                            apply_folder_fn is not apply_folder or not _inline_writer_checks_respect_check_timeout()
-                        ),
                     )
                 current_identity = _identity_for_receipt(current_inventory, target)
                 _assert_same_target(initial_target_identity, current_identity)
@@ -1195,10 +1106,6 @@ def apply_batch(
                         + json.dumps(current_preflight.to_dict(), ensure_ascii=False, sort_keys=True)
                     )
                 _preflight_transport(staged.files, announce=True)
-                writer_precondition_batches = (
-                    _writer_precondition_batches(target, original.preconditions)
-                    if apply_folder_fn is apply_folder else None
-                )
                 record = _receipt_record(original, {"migrations": records})
                 phase_seconds = {"boundary": round(time.perf_counter() - boundary_started, 3)}
                 record["phaseSeconds"] = phase_seconds
@@ -1234,13 +1141,9 @@ def apply_batch(
                 apply_started = time.perf_counter()
                 try:
                     try:
-                        if apply_folder_fn is apply_folder:
-                            apply_evidence = apply_folder_fn(
-                                staged, target, folder_run_dir, expected_identity=initial_target_identity,
-                                preconditions=original.preconditions, precondition_batches=writer_precondition_batches,
-                            )
-                        else:
-                            apply_evidence = apply_folder_fn(staged, target, folder_run_dir, expected_identity=initial_target_identity)
+                        apply_evidence = apply_folder_fn(
+                            staged, target, folder_run_dir, expected_identity=initial_target_identity,
+                        )
                     finally:
                         phase_seconds["apply"] = round(time.perf_counter() - apply_started, 3)
                 except KeyboardInterrupt:
