@@ -218,6 +218,9 @@ if ($env:PROJECT_MULTI_SCHEMA -eq "true") {
   }
 }
 
+& $python.Path @($python.Prefix) $sourceValidator $repoRoot $appDir --for-import
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 if ($describe) {
   # Internal read-only interface for deployment summaries and DBA runbooks.
   Write-Output (@($appDir, $deployment.workspace.name, $parsingSchema,
@@ -228,8 +231,6 @@ if ($describe) {
 if ($appEnvironment -eq 'dev' -and [string]::IsNullOrWhiteSpace($env:APEX_WORKSPACE_USERNAME)) {
   throw 'publish error: set APEX_WORKSPACE_USERNAME to the existing Builder developer/admin login'
 }
-& $python.Path @($python.Prefix) $sourceValidator $repoRoot $appDir --for-import
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ([string]::IsNullOrWhiteSpace($sqlclConnection) -or [string]::IsNullOrWhiteSpace($expectedUser)) {
   switch ($appEnvironment) {
     "dev" {

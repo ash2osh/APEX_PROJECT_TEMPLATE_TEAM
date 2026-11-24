@@ -2,8 +2,8 @@
 """Show which database connection, login and schema each operation resolves to. Offline and read-only.
 
 `scripts/team.sh targets [--format text|json]` prints one row per environment (dev, staging, prod), purpose and schema.
-The `read` purpose reads code metadata (new-migration --source, compare-schema, baseline export); the `migration` purpose
-is what migrate applies. Each row comes from db_targets.resolve_target, the same resolver the commands use, so a REFUSED
+The `read` purpose reads code metadata (`release collect --from`, `compare-schema`); the `migration` purpose
+is what `release run` applies. Each row comes from db_targets.resolve_target, the same resolver the commands use, so a REFUSED
 row is the refusal the command would print. The dev tables, APEX and ORDS profiles are listed from their own keys.
 
 The report never connects to a database, never runs SQLcl and never prints a credential (none is stored in .env).
@@ -150,8 +150,8 @@ def _notes(values: Mapping[str, str]) -> list[str]:
         if schema not in migration:
             notes.append(
                 f"{schema} is in CODE_SCHEMA but not in the dev migration profile (MIGRATION_SCHEMA). "
-                f"DEV reads work, but `migrate` applies as the migration owner, so `new-migration` and "
-                f"`migrate` refuse a migration folder for {schema}."
+                f"DEV reads work, but `release` applies as the migration owner, so `release check` and "
+                f"`release run` refuse a release bundle for {schema}."
             )
     return notes
 

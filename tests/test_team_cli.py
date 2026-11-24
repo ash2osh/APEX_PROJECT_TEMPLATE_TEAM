@@ -28,113 +28,183 @@ def set_environment_value(environment: dict[str, str], name: str, value: str | N
         environment[name] = value
 
 
-def feature_cli_checkout(parent: Path) -> Path:
+def release_cli_checkout(parent: Path) -> Path:
     """Copy the CLI into a checkout with glob characters and Unicode in its path."""
-    root = parent / "feature project [unicode] café"
+    root = parent / "release project [unicode] café"
     root.mkdir()
-    shutil.copytree(ROOT / "scripts", root / "scripts")
+    shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
     return root
 
 
-
 class TeamCliTests(unittest.TestCase):
-    def migration_plan_checkout(self, parent: Path, *, env_contents: str | None = None, sqlcl_version: str = "26.2.0.0"):
-        """Copy only the real wrappers into a checkout path that stresses spaces and glob characters."""
-        root = parent / "migration project [report path]"
-        scripts = root / "scripts"
-        scripts.mkdir(parents=True)
-        for name in ("team.sh", "team.ps1", "resolve_python.ps1", "migration_plan_args.ps1"):
-            shutil.copy2(ROOT / "scripts" / name, scripts / name)
-        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
-        (root / "migrations").mkdir()
-        if env_contents is not None:
-            (root / ".env").write_text(env_contents, encoding="utf-8", newline="\n")
-        fake_bin = parent / "fake sqlcl [report]"
-        calls = parent / "sqlcl calls.log"
-        fake_sqlcl.install(fake_bin, """printf '%s\\n' \"$*\" >> \"$FAKE_SQLCL_CALLS\"
-if [ \"${1:-}\" = \"-V\" ]; then
-  printf 'SQLcl: Release %s Production\\n' \"$FAKE_SQLCL_VERSION\"
-  exit 0
-fi
-printf 'unexpected fake SQLcl command\\n' >&2
-exit 17
-""")
-        environment = fake_sqlcl.environment(
-            fake_bin,
-            base=os.environ,
-            PROJECT_ENV_FILE=str(root / ".env"),
-            PYTHONPATH=str(ROOT),
-            FAKE_SQLCL_CALLS=str(calls),
-            FAKE_SQLCL_VERSION=sqlcl_version,
-        )
-        return root, environment, calls
-
-    def migration_archive_checkout(self, parent: Path):
-        """Copy only the offline archive command and its shared validators."""
-        root = parent / "archive project [folder path]"
-        scripts = root / "scripts"
-        scripts.mkdir(parents=True)
-        names = (
-            "team.sh", "team.ps1", "resolve_python.ps1", "__init__.py", "migration_archive.py",
-            "migration_manifest.py", "migration_revision.py", "migration_attempts.py", "migration_resolution.py", "path_utils.py",
-            "validate_migration.py",
-        )
-        for name in names:
-            source = ROOT / "scripts" / name
-            if source.is_file():
-                shutil.copy2(source, scripts / name)
-        shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
-        (root / "migrations" / "APP_DEV").mkdir(parents=True)
-        (root / "migrations" / "APP_STAGE").mkdir(parents=True)
-        for schema, family in (("APP_DEV", "first-family"), ("APP_STAGE", "second-family")):
-            folder = root / "migrations" / schema / f"2026-10-01_{family}-r001"
-            folder.mkdir()
-            (folder / "001-create-table.sql").write_text("CREATE TABLE T (ID NUMBER);\n", encoding="utf-8")
-            (folder / "checks.json").write_text(
-                '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n',
-                encoding="utf-8",
-            )
-        return root
-
-    def test_powershell_archive_route_keeps_schema_option_and_matches_bash_dispatch(self) -> None:
+    def test_powershell_release_route_keeps_schema_option_and_matches_bash_dispatch(self) -> None:
         wrapper = (ROOT / "scripts" / "team.ps1").read_text(encoding="utf-8")
 
-        self.assertIn("archive-migrations <folder> [...] [--schema SCHEMA]", wrapper)
-        self.assertIn('"archive-migrations" {', wrapper)
-        self.assertIn('"archive-migrations") + $archiveArguments)', wrapper)
-        self.assertIn('"migration-plan", "archive-migrations", "dev-test"', wrapper)
+        self.assertIn("release list [--format text|json]", wrapper)
+        self.assertIn('"release" {', wrapper)
+        self.assertIn('"release") + $releaseArguments)', wrapper)
+        self.assertIn('"targets", "release", "dev-test"', wrapper)
 
-    def test_archive_migrations_help_and_schema_scope_are_offline_in_both_wrappers(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = self.migration_archive_checkout(Path(temporary))
+    def test_team_wrappers_expose_release_and_compare_env_with_offline_help(self) -> None:
+        environment = dict(os.environ, PROJECT_ENV_FILE="/no/such/team-env")
+        entries = [("team.sh", [BASH])]
+        pwsh = _test_subprocess_safety.working_pwsh()
+        if pwsh:
+            entries.append(("team.ps1", [pwsh, "-NoProfile", "-File"]))
+
+        for name, launcher in entries:
+            script = ROOT / "scripts" / name
+            with self.subTest(entry=name, command="help"):
+                help_result = subprocess.run(
+                    [*launcher, str(script), "--help"], cwd=ROOT, env=environment,
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(0, help_result.returncode, help_result.stderr)
+                self.assertIn("compare-env", help_result.stdout)
+                self.assertIn("release list", help_result.stdout)
+
+            for command in ("release", "compare-env"):
+                with self.subTest(entry=name, command=command):
+                    result = subprocess.run(
+                        [*launcher, str(script), command, "--help"], cwd=ROOT, env=environment,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    expected = "Lean 6-step release bundle workflow" if command == "release" else "Compare environment catalog"
+                    self.assertIn(expected, result.stdout)
+                    self.assertNotIn("configuration file", result.stderr)
+
+    def test_release_list_and_new_need_no_env_in_both_wrappers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release wrapper ") as temporary:
+            root = release_cli_checkout(Path(temporary))
             environment = dict(os.environ, PROJECT_ENV_FILE="/no/such/team-env")
             entries = [("team.sh", [BASH])]
             pwsh = _test_subprocess_safety.working_pwsh()
             if pwsh:
                 entries.append(("team.ps1", [pwsh, "-NoProfile", "-File"]))
-
             for name, launcher in entries:
                 script = root / "scripts" / name
-                with self.subTest(entry=name, command="help"):
-                    help_result = subprocess.run(
-                        [*launcher, str(script), "--help"], cwd=root, env=environment,
-                        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=30,
-                    )
-                    self.assertEqual(0, help_result.returncode, help_result.stdout + help_result.stderr)
-                    self.assertIn("archive-migrations", help_result.stdout)
-
-                with self.subTest(entry=name, command="archive-migrations"):
-                    result = subprocess.run(
-                        [*launcher, str(script), "archive-migrations", "--all", "--schema", "APP_DEV"],
+                slug = f"bundle-{name.split('.', 1)[1]}"
+                with self.subTest(entry=name, action="new"):
+                    created = subprocess.run(
+                        [*launcher, str(script), "release", "new", slug],
                         cwd=root, env=environment, capture_output=True, text=True, check=False,
-                        stdin=subprocess.DEVNULL, timeout=30,
                     )
-                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-                    self.assertIn("dry run", result.stdout)
-                    self.assertIn("migrations/APP_DEV/2026-10-01_first-family-r001", result.stdout)
-                    self.assertNotIn("APP_STAGE", result.stdout)
-                    self.assertFalse((root / "migrations-archive").exists())
+                    self.assertEqual(0, created.returncode, created.stdout + created.stderr)
+                    self.assertTrue((root / "releases" / slug / "release.json").is_file())
+                    self.assertFalse((root / ".env").exists())
+                with self.subTest(entry=name, action="list"):
+                    listed = subprocess.run(
+                        [*launcher, str(script), "release", "list", "--format", "json"],
+                        cwd=root, env=environment, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(0, listed.returncode, listed.stdout + listed.stderr)
+                    payload = json.loads(listed.stdout)
+                    self.assertIn(slug, [item["slug"] for item in payload["draft"]])
+
+    def test_bash_forwards_converted_repo_root_to_native_python_for_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = release_cli_checkout(Path(temporary))
+            bash_env = Path(temporary) / "path bridge [fake].bash"
+            bash_env.write_text(
+                "uname() { printf 'MINGW64_NT-10.0\\n'; }\n"
+                "cygpath() {\n"
+                "  printf '%s\\n' \"$*\" >> \"$CYGPATH_CAPTURE\"\n"
+                "  [ \"$1\" = '-m' ] && [ \"$2\" = '--' ] || return 2\n"
+                "  printf '%s\\n' \"$RELEASE_NATIVE_ROOT\"\n"
+                "}\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            capture = Path(temporary) / "cygpath args.log"
+            environment = dict(
+                os.environ,
+                PROJECT_ENV_FILE="/no/such/team-env",
+                BASH_ENV=str(bash_env),
+                CYGPATH_CAPTURE=str(capture),
+                RELEASE_NATIVE_ROOT=root.resolve().as_posix(),
+            )
+            result = subprocess.run(
+                [BASH, str(root / "scripts" / "team.sh"), "release", "list", "--format", "json"],
+                cwd=temporary,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual({"schemaVersion": 1, "draft": [], "deployed": []}, json.loads(result.stdout))
+            self.assertTrue(capture.exists(), result.stdout + result.stderr)
+            self.assertEqual("-m --", " ".join(capture.read_text(encoding="utf-8").strip().split(" ")[:2]))
+            self.assertTrue(capture.read_text(encoding="utf-8").strip().endswith("/" + root.name))
+
+    def test_release_collect_forwards_schema_flag_without_wrapper_stripping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = release_cli_checkout(Path(temporary))
+            (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+            fake_bin = Path(temporary) / "fake python"
+            fake_bin.mkdir()
+            captured = Path(temporary) / "python arguments.txt"
+            python = fake_bin / "python3"
+            python.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TEAM_CAPTURE_ARGS\"\n", encoding="utf-8")
+            python.chmod(0o755)
+            environment = dict(
+                os.environ,
+                PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                PROJECT_ENV_FILE=str(root / ".env"),
+                TEAM_CAPTURE_ARGS=str(captured),
+            )
+            result = subprocess.run(
+                [BASH, str(root / "scripts" / "team.sh"), "release", "collect", "my-bundle", "--from", "dev", "--schema", "APP_CODE", "--object", "PACKAGE:PKG", "--mode", "new"],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            forwarded = captured.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--schema", forwarded)
+            self.assertIn("APP_CODE", forwarded)
+
+    def test_release_run_requires_confirm_target_and_valid_env_in_both_wrappers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = release_cli_checkout(Path(temporary))
+            (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+            environment = dict(os.environ, PROJECT_ENV_FILE=str(root / ".env"))
+            entries = [("team.sh", [BASH])]
+            pwsh = _test_subprocess_safety.working_pwsh()
+            if pwsh:
+                entries.append(("team.ps1", [pwsh, "-NoProfile", "-File"]))
+            for name, launcher in entries:
+                with self.subTest(entry=name, case="missing confirm-target"):
+                    result = subprocess.run(
+                        [*launcher, str(root / "scripts" / name), "release", "run", "my-bundle", "--env", "dev"],
+                        cwd=root, env=environment, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("--confirm-target", result.stderr)
+                with self.subTest(entry=name, case="invalid env"):
+                    result = subprocess.run(
+                        [*launcher, str(root / "scripts" / name), "release", "check", "my-bundle", "--env", "production"],
+                        cwd=root, env=environment, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("invalid choice: 'production'", result.stderr)
+
+    def test_release_without_subcommand_prints_usage_in_both_wrappers(self) -> None:
+        expected = "usage: scripts/team."
+        entries = [("team.sh", [BASH, str(ROOT / "scripts" / "team.sh")])]
+        pwsh = _test_subprocess_safety.working_pwsh()
+        if pwsh:
+            entries.append(("team.ps1", [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")]))
+        for name, command in entries:
+            with self.subTest(wrapper=name):
+                result = subprocess.run([*command, "release"], text=True, capture_output=True, check=False, cwd=ROOT)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(expected, result.stdout + result.stderr)
+                self.assertIn("release <list|new|collect|check|run>", result.stdout + result.stderr)
 
     def run_bash_env_loader(self, environment: Path) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -172,10 +242,12 @@ exit 17
             "publish",
             "app-lock",
             "app-unlock",
-            "check-conflicts",
-            "migration-plan",
+            "release list",
+            "release new",
+            "release collect",
+            "release check",
+            "release run",
             "dev-test",
-            "migrate",
             "query",
             "compare-schema",
             "compare-env",
@@ -184,9 +256,10 @@ exit 17
             "deploy",
             "upgrade-template",
             "verify-local",
+            "automations",
         ):
             self.assertIn(command, result.stdout)
-        self.assertIn("--env dev|staging|prod", result.stdout)
+        self.assertIn("--env <dev|staging|prod>", result.stdout)
         self.assertIn("--pattern", result.stdout)
 
     def test_dev_test_help_is_offline_in_both_wrappers(self) -> None:
@@ -292,354 +365,6 @@ exit 17
                         captured.read_text(encoding="utf-8").splitlines(),
                     )
 
-    def test_migration_plan_help_and_offline_need_no_env(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root, environment, calls = self.migration_plan_checkout(Path(temporary))
-            for entry in ("team.sh", "team.ps1"):
-                if entry.endswith("ps1") and not _test_subprocess_safety.working_pwsh():
-                    continue
-                launcher = [BASH] if entry.endswith("sh") else [_test_subprocess_safety.working_pwsh(), "-NoProfile", "-File"]
-                script = root / "scripts" / entry
-                with self.subTest(entry=entry, mode="help"):
-                    help_result = subprocess.run(
-                        [*launcher, str(script), "migration-plan", "--help"],
-                        cwd=temporary, env=environment, capture_output=True, text=True, check=False,
-                    )
-                    self.assertEqual(0, help_result.returncode, help_result.stderr)
-                    self.assertIn("migration-plan", help_result.stdout)
-                    self.assertIn("--format", help_result.stdout)
-                with self.subTest(entry=entry, mode="offline"):
-                    result = subprocess.run(
-                        [*launcher, str(script), "migration-plan", "--format", "json"],
-                        cwd=temporary, env=environment, capture_output=True, text=True, check=False,
-                    )
-                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-                    report = json.loads(result.stdout)
-                    self.assertEqual("offline", report["mode"])
-                    self.assertEqual(0, report["summary"]["folderCount"])
-                    self.assertEqual("", result.stderr)
-            self.assertFalse(calls.exists(), "help and offline inventory must not start SQLcl or load .env")
-
-    def test_git_bash_migration_plan_converts_only_repo_root_for_native_python(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            parent = Path(temporary)
-            root = parent / "project with spaces [native path]"
-            scripts = root / "scripts"
-            scripts.mkdir(parents=True)
-            shutil.copy2(ROOT / "scripts" / "team.sh", scripts / "team.sh")
-            shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
-            fake_bin = parent / "fake-bin"
-            fake_bin.mkdir()
-            if os.name != "nt":
-                (fake_bin / "uname").write_text("#!/bin/sh\nprintf 'MINGW64_NT-10.0\\n'\n", encoding="utf-8")
-                (fake_bin / "cygpath").write_text(
-                    "#!/bin/sh\n[ \"$1\" = -m ] || exit 3\nprintf 'C:/native/project [repo]\\n'\n",
-                    encoding="utf-8",
-                )
-            captured = parent / "python-args.txt"
-            (fake_bin / "python3").write_text(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TEAM_CAPTURE_ARGS\"\n",
-                encoding="utf-8",
-            )
-            for tool in fake_bin.iterdir():
-                tool.chmod(0o755)
-            environment = dict(os.environ)
-            environment.update({
-                "PATH": str(fake_bin) + os.pathsep + environment.get("PATH", ""),
-                "TEAM_CAPTURE_ARGS": str(captured),
-            })
-
-            result = subprocess.run(
-                [BASH, str(scripts / "team.sh"), "migration-plan", "--schema", "APP", "--format", "json"],
-                cwd=parent,
-                env=environment,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-
-            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            arguments = captured.read_text(encoding="utf-8").splitlines()
-            repo_index = arguments.index("--repo-root")
-            expected_root = root.resolve().as_posix() if os.name == "nt" else "C:/native/project [repo]"
-            self.assertEqual(expected_root, arguments[repo_index + 1])
-            self.assertEqual(["--schema", "APP", "--format", "json"], arguments[repo_index + 2:])
-
-    def test_bash_forwards_converted_repo_root_to_native_python(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root, environment, calls = self.migration_plan_checkout(Path(temporary))
-            bash_env = Path(temporary) / "path bridge [fake].bash"
-            bash_env.write_text(
-                "uname() { printf 'MINGW64_NT-10.0\\n'; }\n"
-                "cygpath() {\n"
-                "  printf '%s\\n' \"$*\" >> \"$CYGPATH_CAPTURE\"\n"
-                "  [ \"$1\" = '-m' ] && [ \"$2\" = '--' ] || return 2\n"
-                "  printf '%s\\n' \"$MIGRATION_PLAN_NATIVE_ROOT\"\n"
-                "}\n",
-                encoding="utf-8",
-                newline="\n",
-            )
-            capture = Path(temporary) / "cygpath args.log"
-            environment["BASH_ENV"] = str(bash_env)
-            environment["CYGPATH_CAPTURE"] = str(capture)
-            environment["MIGRATION_PLAN_NATIVE_ROOT"] = root.resolve().as_posix()
-
-            result = subprocess.run(
-                [BASH, str(root / "scripts" / "team.sh"), "migration-plan", "--format", "json"],
-                cwd=temporary,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertEqual(0, json.loads(result.stdout)["summary"]["folderCount"])
-            self.assertTrue(
-                capture.exists(),
-                f"MSYS roots must pass through cygpath before native Python starts: {result.stdout}{result.stderr}",
-            )
-            self.assertEqual("-m --", " ".join(capture.read_text(encoding="utf-8").strip().split(" ")[:2]))
-            self.assertTrue(
-                capture.read_text(encoding="utf-8").strip().endswith("/" + root.name),
-                capture.read_text(encoding="utf-8"),
-            )
-            self.assertFalse(calls.exists(), "offline reporting must not start fake SQLcl")
-
-    def test_both_wrappers_forward_schema_and_folder_order(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root, environment, calls = self.migration_plan_checkout(Path(temporary))
-            selected = (
-                "migrations/2026-10-13_zulu-first-r001",
-                "migrations/2026-10-13_alpha-second-r001",
-            )
-            for relative in selected:
-                folder = root / relative
-                folder.mkdir(parents=True)
-                (folder / "001-step.sql").write_text("SELECT 1 FROM dual;\n", encoding="utf-8", newline="\n")
-                (folder / "checks.json").write_text(
-                    '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n',
-                    encoding="utf-8", newline="\n",
-                )
-            reports = []
-            statuses = []
-            for entry in ("team.sh", "team.ps1"):
-                if entry.endswith("ps1") and not _test_subprocess_safety.working_pwsh():
-                    continue
-                launcher = [BASH] if entry.endswith("sh") else [_test_subprocess_safety.working_pwsh(), "-NoProfile", "-File"]
-                result = subprocess.run(
-                    [*launcher, str(root / "scripts" / entry), "migration-plan", *selected, "--schema", "ALPHA", "--format", "json"],
-                    cwd=temporary, env=environment, capture_output=True, text=True, check=False,
-                )
-                with self.subTest(entry=entry):
-                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-                    self.assertEqual("", result.stderr)
-                    report = json.loads(result.stdout)
-                    self.assertEqual("explicit", report["selection"])
-                    self.assertEqual("caller-asserted", report["migrations"][0]["schemaSource"])
-                    self.assertEqual(list(selected), [item["path"] for item in report["migrations"]])
-                    self.assertTrue(all(item["schema"] == "ALPHA" for item in report["migrations"]))
-                    reports.append(report)
-                    statuses.append(result.returncode)
-            self.assertGreaterEqual(len(reports), 1)
-            self.assertTrue(all(report == reports[0] for report in reports))
-            self.assertEqual([0] * len(statuses), statuses)
-            self.assertFalse(calls.exists(), "offline reporting must not start fake SQLcl")
-
-    def test_malformed_migration_plan_options_remain_invalid_before_sqlcl(self) -> None:
-        if not _test_subprocess_safety.working_pwsh():
-            self.skipTest("PowerShell 7 is required for cross-wrapper migration-plan verification")
-        env_contents = "\n".join((
-            "PROJECT_NAME=fixture",
-            "DEVELOPER_NAME=ALICE",
-            "DB_ENVIRONMENT=development",
-            "APEX_APP_ID=100",
-            "TABLES_SCHEMA=APP",
-            "TABLES_PREFIXES=*",
-            "TABLES_SQLCL_CONNECTION=dev-app",
-            "TABLES_EXPECTED_USER=APP",
-            "CODE_SCHEMA=APP",
-            "CODE_PREFIXES=*",
-            "CODE_SQLCL_CONNECTION=dev-app",
-            "CODE_EXPECTED_USER=APP",
-            "APEX_PARSING_SCHEMA=APP",
-            "APEX_SQLCL_CONNECTION=dev-app",
-            "APEX_EXPECTED_USER=APP",
-            "",
-        ))
-        marker = "SECRET_ENV_MARKER_2R"
-        with tempfile.TemporaryDirectory() as temporary:
-            root, environment, calls = self.migration_plan_checkout(Path(temporary), env_contents=env_contents)
-            folder = root / "migrations" / "2026-10-13_option-values-r001"
-            folder.mkdir()
-            (folder / "001-step.sql").write_text("SELECT 1 FROM dual;\n", encoding="utf-8", newline="\n")
-            (folder / "checks.json").write_text(
-                '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n',
-                encoding="utf-8", newline="\n",
-            )
-            cases = (
-                ("invalid environment slash", ["migrations/2026-10-13_option-values-r001", "--live", "--env", "staging/", "--format=json"], True),
-                ("invalid abbreviated environment option", ["migrations/2026-10-13_option-values-r001", "--live", "--en", "dev/", "--format=json"], True),
-                ("invalid environment marker", ["migrations/2026-10-13_option-values-r001", "--live", "--env", marker + "/", "--format=json"], True),
-                ("invalid schema slash", ["migrations/2026-10-13_option-values-r001", "--schema", "ALPHA/", "--format=json"], True),
-                ("invalid format slash", ["migrations/2026-10-13_option-values-r001", "--format", "json/"], False),
-            )
-            wrapper_results = {"team.sh": [], "team.ps1": []}
-            for entry in ("team.sh", "team.ps1"):
-                launcher = [BASH] if entry.endswith("sh") else [_test_subprocess_safety.working_pwsh(), "-NoProfile", "-File"]
-                for label, arguments, json_output in cases:
-                    result = subprocess.run(
-                        [*launcher, str(root / "scripts" / entry), "migration-plan", *arguments],
-                        cwd=temporary,
-                        env=environment,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    with self.subTest(entry=entry, case=label):
-                        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
-                        self.assertEqual("", result.stderr)
-                        self.assertNotIn(marker, result.stdout + result.stderr)
-                        self.assertNotIn("SELECT", result.stdout + result.stderr)
-                        if json_output:
-                            report = json.loads(result.stdout)
-                            self.assertEqual(1, report["schemaVersion"])
-                            if label.startswith(("invalid environment", "invalid abbreviation")):
-                                self.assertIsNone(report["environment"])
-                        else:
-                            self.assertIn("Invalid migration-plan arguments", result.stdout)
-                        wrapper_results[entry].append((result.returncode, result.stdout))
-            self.assertEqual(wrapper_results["team.sh"], wrapper_results["team.ps1"])
-            self.assertFalse(calls.exists(), "malformed option values must not start fake SQLcl")
-
-    def test_migration_plan_powershell_classifies_only_folder_positionals(self) -> None:
-        powershell = _test_subprocess_safety.working_pwsh()
-        if not powershell:
-            self.skipTest("PowerShell 7 is required for the portable argument classifier test")
-        helper = ROOT / "scripts" / "migration_plan_args.ps1"
-        arguments = [
-            "migrations\\first\\",
-            "--live",
-            "--env",
-            "staging/",
-            "--schema=ALPHA/",
-            "--format",
-            "json/",
-            "--repo-root",
-            "C:\\repo with space [x]\\",
-            "--format=json",
-            "migrations\\second\\",
-            "--env",
-            "--format=json",
-            "migrations\\third\\",
-        ]
-        encoded_arguments = json.dumps(arguments)
-        command = (
-            "$ErrorActionPreference = 'Stop'; "
-            f". '{helper.as_posix()}'; "
-            f"$values = ConvertFrom-Json @'\n{encoded_arguments}\n'@; "
-            "$items = @(Get-MigrationPlanArgumentKinds -Values $values); "
-            "$items | ConvertTo-Json -Compress -Depth 3"
-        )
-        result = subprocess.run(
-            [powershell, "-NoProfile", "-Command", command],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        classified = json.loads(result.stdout)
-        self.assertEqual(
-            ["folder", "option", "option", "option-value", "option", "option", "option-value", "option", "option-value", "option", "folder", "option", "option", "folder"],
-            [item["kind"] for item in classified],
-        )
-        self.assertEqual(arguments, [item["value"] for item in classified])
-
-    def test_live_refuses_ambiguous_flags_before_connection(self) -> None:
-        secret = "SECRET_MARKER_FROM_ENV_6P"
-        with tempfile.TemporaryDirectory() as temporary:
-            root, environment, calls = self.migration_plan_checkout(
-                Path(temporary), env_contents=f"INVALID LINE {secret}\n"
-            )
-            cases = (
-                ("--env", "dev", "--format", "json"),
-                ("--live", "--format", "json"),
-                ("--live", "--env", "dev", "--format", "json"),
-            )
-            wrapper_results = {"team.sh": [], "team.ps1": []}
-            for entry in ("team.sh", "team.ps1"):
-                if entry.endswith("ps1") and not _test_subprocess_safety.working_pwsh():
-                    continue
-                launcher = [BASH] if entry.endswith("sh") else [_test_subprocess_safety.working_pwsh(), "-NoProfile", "-File"]
-                for arguments in cases:
-                    result = subprocess.run(
-                        [*launcher, str(root / "scripts" / entry), "migration-plan", *arguments],
-                        cwd=temporary, env=environment, capture_output=True, text=True, check=False,
-                    )
-                    with self.subTest(entry=entry, arguments=arguments):
-                        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
-                        report = json.loads(result.stdout)
-                        self.assertEqual(1, report["schemaVersion"])
-                        self.assertIsNone(report["target"])
-                        self.assertTrue(report["diagnostics"])
-                        self.assertNotIn(secret, result.stdout + result.stderr)
-                        self.assertNotIn("invalid line", result.stderr)
-                        wrapper_results[entry].append((result.returncode, report))
-            if wrapper_results["team.ps1"]:
-                self.assertEqual(wrapper_results["team.sh"], wrapper_results["team.ps1"])
-            self.assertFalse(calls.exists(), "invalid live options must refuse before SQLcl is launched")
-
-    def test_live_report_uses_fake_sqlcl_only_for_version_gate(self) -> None:
-        env_contents = "\n".join((
-            "PROJECT_NAME=fixture",
-            "DEVELOPER_NAME=ALICE",
-            "DB_ENVIRONMENT=development",
-            "APEX_APP_ID=100",
-            "TABLES_SCHEMA=APP",
-            "TABLES_PREFIXES=*",
-            "TABLES_SQLCL_CONNECTION=dev-app",
-            "TABLES_EXPECTED_USER=APP",
-            "CODE_SCHEMA=APP",
-            "CODE_PREFIXES=*",
-            "CODE_SQLCL_CONNECTION=dev-app",
-            "CODE_EXPECTED_USER=APP",
-            "APEX_PARSING_SCHEMA=APP",
-            "APEX_SQLCL_CONNECTION=dev-app",
-            "APEX_EXPECTED_USER=APP",
-            "",
-        ))
-        with tempfile.TemporaryDirectory() as temporary:
-            root, environment, calls = self.migration_plan_checkout(Path(temporary), env_contents=env_contents)
-            folder = root / "migrations" / "2026-10-13_live-version-floor-r001"
-            folder.mkdir()
-            (folder / "001-step.sql").write_text("SELECT 1 FROM dual;\n", encoding="utf-8", newline="\n")
-            (folder / "checks.json").write_text(
-                '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ready","sql":"SELECT 1 FROM dual","expected":1}]}\n',
-                encoding="utf-8", newline="\n",
-            )
-            reports = []
-            for entry in ("team.sh", "team.ps1"):
-                if entry.endswith("ps1") and not _test_subprocess_safety.working_pwsh():
-                    continue
-                launcher = [BASH] if entry.endswith("sh") else [_test_subprocess_safety.working_pwsh(), "-NoProfile", "-File"]
-                result = subprocess.run(
-                    [*launcher, str(root / "scripts" / entry), "migration-plan", "migrations/2026-10-13_live-version-floor-r001", "--live", "--env", "dev", "--format", "json"],
-                    cwd=temporary, env=environment, capture_output=True, text=True, check=False,
-                )
-                with self.subTest(entry=entry):
-                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
-                    self.assertEqual("", result.stderr)
-                    report = json.loads(result.stdout)
-                    self.assertEqual("live", report["mode"])
-                    self.assertIsNone(report["target"])
-                    self.assertIsNone(report["preflight"])
-                    self.assertIn("sqlcl-version-unavailable", [item["code"] for item in report["diagnostics"]])
-                    reports.append(report)
-            self.assertGreaterEqual(len(reports), 1)
-            self.assertTrue(all(report == reports[0] for report in reports))
-            self.assertTrue(calls.exists(), "valid live input must reach the fake SQLcl runtime gate")
-            self.assertEqual(["-V"] * len(reports), calls.read_text(encoding="utf-8").splitlines())
-
     def test_query_command_is_exposed_and_rejects_non_select_before_loading_configuration(self) -> None:
         for entry in ("team.sh", "team.ps1"):
             if entry.endswith("ps1") and not _test_subprocess_safety.working_pwsh():
@@ -721,78 +446,6 @@ exit 17
                     self.assertIn('"schemaVersion": 1', result.stdout)
                     data = json.loads(result.stdout)
                     self.assertEqual(data["schemaVersion"], 1)
-
-    def test_team_migrate_rejects_missing_duplicate_and_invalid_environment_before_loading_env(self) -> None:
-
-        for arguments, expected in (
-            (["migrations/2026-09-27_create-sample-r001"], "exactly one --env"),
-            (["migrations/2026-09-27_create-sample-r001", "--env", "dev", "--env", "prod"], "exactly one --env"),
-            (["migrations/2026-09-27_create-sample-r001", "--env", "production"], "--env must be dev, staging, or prod"),
-        ):
-            with self.subTest(arguments=arguments):
-                environment = os.environ.copy()
-                environment["PROJECT_ENV_FILE"] = "/no/such/migration-env-file"
-                result = subprocess.run(
-                    [BASH, str(ROOT / "scripts" / "team.sh"), "migrate", *arguments],
-                    cwd=ROOT,
-                    env=environment,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-                self.assertIn(expected, result.stderr)
-                self.assertNotIn("configuration file not found", result.stderr)
-
-    def test_migrate_without_a_folder_prints_the_verbose_option_in_both_wrappers(self) -> None:
-        entries = [("team.sh", [BASH, str(ROOT / "scripts" / "team.sh")])]
-        pwsh = _test_subprocess_safety.working_pwsh()
-        if pwsh:
-            entries.append(("team.ps1", [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")]))
-        for name, command in entries:
-            with self.subTest(wrapper=name):
-                result = subprocess.run([*command, "migrate"], text=True, capture_output=True, check=False, cwd=ROOT)
-                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-                self.assertIn("usage: scripts/team", result.stdout + result.stderr)
-                self.assertIn("migrate <migration-folder> [...] --env dev|staging|prod [--verbose] [--rehearse] [--report <file>]", result.stdout + result.stderr)
-
-    def test_powershell_migrate_uses_the_same_early_environment_validation(self) -> None:
-        pwsh = _test_subprocess_safety.working_pwsh()
-        if pwsh is None:
-            self.skipTest("PowerShell Core is not installed")
-        environment = os.environ.copy()
-        environment["PROJECT_ENV_FILE"] = "/no/such/migration-env-file"
-        result = subprocess.run(
-            [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/2026-09-27_create-sample-r001"],
-            cwd=ROOT,
-            env=environment,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("specify exactly one --env", result.stderr)
-        self.assertNotIn("configuration file not found", result.stderr)
-
-    def test_local_check_conflicts_command_does_not_require_database_configuration(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            folder = root / "migrations" / "2026-09-27_create-orders-r001"
-            folder.mkdir(parents=True)
-            (folder / "001-create-table.sql").write_text("CREATE TABLE ORDERS (ID NUMBER);\n", encoding="utf-8")
-            (folder / "checks.json").write_text(
-                '{"schemaVersion":1,"preconditions":[],"postconditions":[{"id":"ok","sql":"SELECT 1 FROM dual","expected":1}]}\n',
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                [BASH, str(ROOT / "scripts" / "team.sh"), "check-conflicts", f"migrations/{folder.name}", "--local", "--repo-root", str(root)],
-                cwd=ROOT,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Local selected-batch analysis only", result.stdout)
 
     def test_publish_command_routes_non_dev_targets_to_deploy(self) -> None:
         result = subprocess.run(
@@ -1024,50 +677,6 @@ exit 17
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("Usage: scripts/team.", result.stdout)
 
-    def test_feature_help_is_wired_through_both_wrappers(self) -> None:
-        entries = [[BASH, str(ROOT / "scripts" / "team.sh")]]
-        pwsh = _test_subprocess_safety.working_pwsh()
-        if pwsh:
-            entries.append([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")])
-        for command in entries:
-            with self.subTest(entry=command[-1]):
-                result = subprocess.run(
-                    [*command, "feature", "--help"],
-                    text=True, capture_output=True, check=False, cwd=ROOT,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                for operation in ("init", "capture", "diff", "freeze", "clean-capsule", "reconcile-run", "convert-plan"):
-                    self.assertIn(operation, result.stdout)
-
-    def test_feature_convert_plan_routes_through_both_wrappers_offline_in_a_unicode_glob_checkout(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="convert wrapper ") as temporary:
-            root = feature_cli_checkout(Path(temporary))
-            folder = "migrations/APP_CODE/2026-01-05_wrapper-r001"
-            (root / folder).mkdir(parents=True)
-            (root / folder / "001-table.sql").write_text("CREATE TABLE wrapper_t (id NUMBER);\n", encoding="utf-8", newline="\n")
-            checks = {"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "after", "sql": "SELECT 1 FROM dual", "expected": 1}]}
-            (root / folder / "checks.json").write_text(json.dumps(checks) + "\n", encoding="utf-8", newline="\n")
-            entries = [("team.sh", [BASH, str(root / "scripts" / "team.sh")])]
-            pwsh = _test_subprocess_safety.working_pwsh()
-            if pwsh:
-                entries.append(("team.ps1", [pwsh, "-NoProfile", "-File", str(root / "scripts" / "team.ps1")]))
-            for name, launcher in entries:
-                with self.subTest(wrapper=name):
-                    result = subprocess.run(
-                        [*launcher, "feature", "convert-plan", folder, "--feature", "wrapper-demo", "--format", "json"],
-                        cwd=root,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        env=dict(os.environ, PROJECT_ENV_FILE="/no/such/team-env"),
-                    )
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    report = json.loads(result.stdout)
-                    self.assertEqual("convertible", report["folders"][0]["verdict"])
-                    self.assertEqual([folder], report["archive"])
-                    self.assertFalse((root / ".env").exists())
-
-
     def test_team_sh_refuses_a_bash_older_than_4_4_with_one_line_and_status_2(self) -> None:
         # No Bash 3.2 is installed here, so the guard is tested as a function fed the version parts that BASH_VERSINFO
         # would hold. The real top-level call still runs under the Bash that runs this test.
@@ -1096,19 +705,6 @@ exit 17
         running = subprocess.run([BASH, str(ROOT / "scripts" / "team.sh"), "--help"], text=True, capture_output=True, check=False, cwd=ROOT)
         self.assertEqual(0, running.returncode, running.stderr)
 
-    def test_new_migration_is_listed_and_needs_arguments_in_both_wrappers(self) -> None:
-        entries = [[BASH, str(ROOT / "scripts" / "team.sh")]]
-        pwsh = _test_subprocess_safety.working_pwsh()
-        if pwsh:
-            entries.append([pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1")])
-        for command in entries:
-            with self.subTest(entry=command[-1]):
-                help_text = subprocess.run([*command, "--help"], text=True, capture_output=True, check=False, cwd=ROOT).stdout
-                self.assertIn("new-migration <name> --source TYPE:NAME [...] --env dev", help_text)
-                usage = subprocess.run([*command, "new-migration"], text=True, capture_output=True, check=False, cwd=ROOT)
-                self.assertNotEqual(usage.returncode, 0)
-                self.assertIn("new-migration <name> --source TYPE:NAME", usage.stderr)
-
     def test_no_command_lists_only_everyday_commands_and_help_lists_all(self) -> None:
         entries = [[BASH, str(ROOT / "scripts" / "team.sh")]]
         pwsh = _test_subprocess_safety.working_pwsh()
@@ -1119,7 +715,7 @@ exit 17
                 short = subprocess.run(command, text=True, capture_output=True, check=False, cwd=ROOT)
                 self.assertEqual(short.returncode, 0, short.stderr)
                 self.assertIn("Everyday commands:", short.stdout)
-                for everyday in ("doctor", "export <app_id>", "migrate <folder>", "revise <folder>", "backup-db"):
+                for everyday in ("doctor", "export <app_id>", "release list", "release check <bundle> --env dev", "release run <bundle> --env dev", "backup-db"):
                     self.assertIn(everyday, short.stdout)
                 self.assertNotIn("compare-env", short.stdout)
                 self.assertIn("--help for every command", short.stdout)
@@ -1127,35 +723,6 @@ exit 17
                 self.assertEqual(full.returncode, 0, full.stderr)
                 self.assertIn("compare-env", full.stdout)
                 self.assertNotIn("Everyday commands:", full.stdout)
-
-    def test_team_wrappers_expose_baseline_and_compare_env_with_offline_help(self) -> None:
-        environment = dict(os.environ, PROJECT_ENV_FILE="/no/such/team-env")
-        entries = [("team.sh", [BASH])]
-        pwsh = _test_subprocess_safety.working_pwsh()
-        if pwsh:
-            entries.append(("team.ps1", [pwsh, "-NoProfile", "-File"]))
-
-        for name, launcher in entries:
-            script = ROOT / "scripts" / name
-            with self.subTest(entry=name, command="help"):
-                help_result = subprocess.run(
-                    [*launcher, str(script), "--help"], cwd=ROOT, env=environment,
-                    capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=30,
-                )
-                self.assertEqual(0, help_result.returncode, help_result.stderr)
-                self.assertIn("compare-env", help_result.stdout)
-                self.assertIn("baseline export-source", help_result.stdout)
-
-            for command in ("baseline", "compare-env"):
-                with self.subTest(entry=name, command=command):
-                    result = subprocess.run(
-                        [*launcher, str(script), command, "--help"], cwd=ROOT, env=environment,
-                        capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL, timeout=30,
-                    )
-                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-                    expected = "export-source" if command == "baseline" else "Compare environment catalog"
-                    self.assertIn(expected, result.stdout)
-                    self.assertNotIn("configuration file", result.stderr)
 
     def targets_wrappers(self):
         entries = [("team.sh", [BASH])]
@@ -1311,7 +878,7 @@ exit 17
             ["export"], ["export", "bad"], ["export", "1", "2"],
             ["doctor", "extra"], ["doctor", "--schema"], ["doctor", "--schema", "lowercase"],
             ["publish"], ["publish", "1", "--env"], ["publish", "1", "--env", "prod"],
-            ["check-conflicts"], ["migrate"], ["compare-schema"], ["deploy"],
+            ["release"], ["compare-schema"], ["deploy"],
             ["backup-db", "extra"], ["no-such-command"],
         ):
             with self.subTest(arguments=arguments):
@@ -1385,7 +952,11 @@ exit 17
                 while not started.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertTrue(started.exists(), "the helper never started")
-                _test_subprocess_safety.interrupt_process_group(process)
+                # The marker is written just before the helper blocks. Let PowerShell's
+                # native-process wait settle before broadcasting SIGINT to the whole group;
+                # an interrupt during process startup can abort pwsh instead of exercising
+                # team.ps1's finally block.
+                _test_subprocess_safety.interrupt_process_group(process, settle=0.1)
                 stdout, stderr = process.communicate(timeout=60)
             finally:
                 if process.poll() is None:
@@ -1452,8 +1023,8 @@ exit 17
 
     @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Windows twin: test_ctrl_c_in_a_windows_console_waits_for_python_and_passes_its_status_on")
     def test_powershell_passes_on_the_status_a_helper_chose_when_it_was_interrupted(self) -> None:
-        # migrate reports "interrupted and may be partially applied" with status 2,
-        # not 130; the wrapper must not flatten that into a plain interrupt.
+        # release run reports status 2 when interrupted during apply, not 130;
+        # the wrapper must not flatten that into a plain interrupt.
         pwsh = _test_subprocess_safety.working_pwsh()
         if pwsh is None:
             self.skipTest("PowerShell Core is not installed")
@@ -1465,7 +1036,7 @@ exit 17
                 f"#!/bin/sh\ntrap 'exit 2' INT\n: > '{started}'\nsleep 30\n", encoding="utf-8")
             fake_bash.chmod(0o755)
             process = subprocess.Popen(
-                [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/x", "--env", "dev"],
+                [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "release", "run", "my-bundle", "--env", "dev", "--confirm-target", "DEVDB"],
                 cwd=ROOT, env={**os.environ, "TEAM_BASH": str(fake_bash)},
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
@@ -1475,7 +1046,11 @@ exit 17
                 while not started.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertTrue(started.exists(), "the helper never started")
-                _test_subprocess_safety.interrupt_process_group(process)
+                # The marker is written just before the helper blocks. Let PowerShell's
+                # native-process wait settle before broadcasting SIGINT to the whole group;
+                # an interrupt during process startup can abort pwsh instead of exercising
+                # team.ps1's finally block.
+                _test_subprocess_safety.interrupt_process_group(process, settle=0.1)
                 stdout, stderr = process.communicate(timeout=60)
             finally:
                 if process.poll() is None:
@@ -1484,7 +1059,7 @@ exit 17
             self.assertEqual(process.returncode, 2, f"stdout: {stdout}\nstderr: {stderr}")
 
     def test_yes_and_confirm_target_reach_their_helpers_and_both_usage_screens_list_them(self) -> None:
-        # Production refusals come from the helpers before any connection; the wrappers must pass the flags through.
+        # Production refusals come from deploy before any connection; the wrappers must pass the flags through.
         pwsh = _test_subprocess_safety.working_pwsh()
         entries = [("team.sh", [BASH, str(ROOT / "scripts" / "team.sh")])]
         if pwsh:
@@ -1496,8 +1071,6 @@ exit 17
             environment["PROJECT_ENV_FILE"] = str(env_file)
             for name, command in entries:
                 for argv in (
-                    ["migrate", "migrations/none", "--env", "prod", "-y"],
-                    ["rollout", "rollout/none.json", "--env", "prod", "-y"],
                     ["deploy", "100", "--env", "prod", "-y"],
                 ):
                     with self.subTest(wrapper=name, command=argv[0]):
@@ -1509,8 +1082,7 @@ exit 17
         for name, command in entries:
             with self.subTest(usage=name):
                 usage = subprocess.run([*command, "--help"], text=True, capture_output=True, check=False, cwd=ROOT).stdout
-                for option in ("migrate", "rollout", "deploy"):
-                    self.assertIn("[--yes|-y]", usage.split(f"  {option} ", 1)[1].split("\n\n", 1)[0] + usage.split(f"  {option} ", 1)[1][:400])
+                self.assertIn("[--yes|-y]", usage.split("  deploy ", 1)[1].split("\n\n", 1)[0] + usage.split("  deploy ", 1)[1][:400])
                 self.assertIn("[--confirm-target <db_unique_name>]", usage)
 
     def test_the_two_usage_screens_match_apart_from_the_script_name(self) -> None:
@@ -1576,21 +1148,19 @@ exit 17
             self.assertEqual(seen[1:], ["--env", "dev", "--object", "CUSTOMERS"])
 
             for command, flag, path in (
-                ("apply", "--checks", r"features\inventory\APP_CODE\checks\ready.json"),
-                ("apply", "--execute-plan", r"scratch\feature-dev\prepare-test\plan.json"),
-                ("reconcile-run", "--evidence", r"scratch\evidence.json"),
+                ("run", "--report", r"scratch\release-reports\report.md"),
             ):
                 with self.subTest(command=command, flag=flag):
                     result = subprocess.run(
                         [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"),
-                         "feature", command, flag, path],
+                         "release", command, "my-bundle", flag, path],
                         cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
                     )
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     seen = record.read_text(encoding="utf-8").splitlines()
                     self.assertEqual(seen[0], str(ROOT / "scripts" / "team.sh"))
                     expected = path.replace("\\", "/") if os.name == "nt" else path
-                    self.assertEqual(seen[1:], ["feature", command, flag, expected])
+                    self.assertEqual(seen[1:], ["release", command, "my-bundle", flag, expected])
 
     @unittest.skipUnless(os.name == "nt", "the signal status is Git Bash's convention on Windows")
     def test_powershell_reports_git_bash_signal_statuses_as_bash_does(self) -> None:
@@ -1631,7 +1201,7 @@ exit 17
                 for name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"):
                     set_environment_value(environment, name, str(empty))
             result = subprocess.run(
-                [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "migrate", "migrations/x", "--env", "dev"],
+                [pwsh, "-NoProfile", "-File", str(ROOT / "scripts" / "team.ps1"), "release", "check", "releases/x", "--env", "dev"],
                 cwd=ROOT, env=environment, text=True, capture_output=True, check=False,
             )
         self.assertNotEqual(result.returncode, 0)
@@ -1736,60 +1306,10 @@ exit 17
             self.assertEqual(process.returncode, 130)
             self.assertEqual(sorted(path.name for path in (root / "scratch").glob("sqlcl-doctor.*")), [])
 
-    @unittest.skipIf(os.name == "nt", "needs POSIX process groups and signals (preexec_fn, os.killpg); Windows twin: test_ctrl_c_in_a_windows_console_ends_a_live_preflight_and_everything_it_started")
-    def test_interrupting_a_live_preflight_reports_that_nothing_changed_and_exits_130(self) -> None:
-        # check-conflicts --env only reads, so Ctrl-C while SQLcl runs ends it with
-        # one line, status 130, no traceback and no scratch directory.
-        pwsh = _test_subprocess_safety.working_pwsh()
-        wrappers = [[BASH, "team.sh"]] + ([[pwsh, "-NoProfile", "-File", "team.ps1"]] if pwsh else [])
-        for wrapper in wrappers:
-            with self.subTest(wrapper=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
-                shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
-                (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
-                folder = root / "migrations" / "2026-10-02_interrupt-r001"
-                folder.mkdir(parents=True)
-                (folder / "001-create.sql").write_text("CREATE TABLE ZZ_INTERRUPT (ID NUMBER);\n", encoding="utf-8")
-                (folder / "checks.json").write_text(
-                    json.dumps({"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}]}) + "\n",
-                    encoding="utf-8",
-                )
-                fake_bin = root / "bin"
-                fake_bin.mkdir()
-                started = root / "sql-started"
-                fake_sql = fake_bin / "sql"
-                fake_sql.write_text(f"#!/bin/sh\n: > '{started}'\nsleep 30\n", encoding="utf-8")
-                fake_sql.chmod(0o755)
-                fake_sqlcl.add_launcher(fake_bin)
-                environment = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", "PROJECT_ENV_FILE": str(root / ".env")}
-                command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "check-conflicts", "migrations/2026-10-02_interrupt-r001", "--env", "dev"]
-                process = subprocess.Popen(
-                    command, cwd=root, env=environment,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
-                    # A background job in a non-interactive shell inherits SIGINT as ignored.
-                    preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
-                )
-                try:
-                    deadline = time.monotonic() + 60
-                    while not started.exists() and time.monotonic() < deadline:
-                        time.sleep(0.05)
-                    self.assertTrue(started.exists(), "SQLcl never started")
-                    _test_subprocess_safety.interrupt_process_group(process)
-                    stdout, stderr = process.communicate(timeout=60)
-                finally:
-                    if process.poll() is None:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.communicate()
-                self.assertEqual(process.returncode, 130, f"stdout: {stdout}\nstderr: {stderr}")
-                self.assertEqual(stderr.strip(), "preflight interrupted; it only reads, so nothing was changed")
-                self.assertEqual(sorted(path.name for path in (root / "scratch").glob("*")), [])
-
-    @unittest.skipIf(os.name == "nt", "on Windows Python runs as a child on purpose: Git Bash ends itself on Ctrl-C (see check_conflicts.sh)")
+    @unittest.skipIf(os.name == "nt", "on Windows Python runs as a child on purpose: Git Bash ends itself on Ctrl-C")
     def test_helper_scripts_hand_their_process_to_python_off_windows(self) -> None:
         # With exec Python keeps the script's PID, so a signal sent to the script alone (timeout, kill,
-        # a supervisor that signals its child only) reaches it. As a child it would be orphaned and carry
-        # on: a migration that was "stopped" would go on applying.
+        # a supervisor that signals its child only) reaches it instead of orphaning it.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shutil.copytree(ROOT / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
@@ -1807,16 +1327,9 @@ exit 17
                 "PROJECT_ENV_FILE": str(root / ".env"),
                 "PYTHON_PID_FILE": str(record),
             }
-            folder = "migrations/2026-10-02_exec-r001"
             for script, arguments in (
-                ("check_conflicts.sh", [folder, "--local"]),
-                ("check_conflicts.sh", [folder, "--env", "dev"]),
-                ("migrate.sh", [folder, "--env", "dev"]),
                 ("compare_schema.sh", []),
-                # team.sh hands its process on too, or a signal sent to team.sh alone
-                # would leave the helper (and its migration) running.
-                ("team.sh", ["check-conflicts", folder, "--local"]),
-                ("team.sh", ["migrate", folder, "--env", "dev"]),
+                ("team.sh", ["release", "list"]),
                 ("team.sh", ["compare-schema", "--env", "dev", "--object", "X"]),
             ):
                 with self.subTest(script=script, arguments=arguments):
@@ -1846,99 +1359,6 @@ exit 17
         shutil.copy2(ROOT / "template-manifest.json", root / "template-manifest.json")
         (root / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
 
-    @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; the POSIX twin is above")
-    def test_ctrl_c_in_a_windows_console_ends_a_live_preflight_and_everything_it_started(self) -> None:
-        # The keypress reaches every process on the console, but Python waits for its
-        # child where the keypress cannot interrupt it, and the Git Bash processes
-        # below it do not take it. The preflight used to run on, with SQLcl under it,
-        # until SQLcl ended by itself.
-        for wrapper in self.windows_wrappers():
-            with self.subTest(wrapper=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                self.make_windows_interrupt_checkout(root)
-                folder = root / "migrations" / "2026-10-02_interrupt-r001"
-                folder.mkdir(parents=True)
-                (folder / "001-create.sql").write_text("CREATE TABLE ZZ_INTERRUPT (ID NUMBER);\n", encoding="utf-8")
-                (folder / "checks.json").write_text(
-                    json.dumps({"schemaVersion": 1, "preconditions": [], "postconditions": [{"id": "ok", "sql": "SELECT 1 FROM dual", "expected": 1}]}) + "\n",
-                    encoding="utf-8",
-                )
-                started = root / "sql-started"
-                sql_pid = root / "sql-pid"
-                # /proc/$$/winpid is the Windows process id of the script that stands for SQLcl.
-                fake_bin = fake_sqlcl.install(
-                    root / "bin", f"cat /proc/$$/winpid > '{sql_pid.as_posix()}'\n: > '{started.as_posix()}'\nsleep 60\n"
-                )
-                environment = fake_sqlcl.environment(fake_bin, PROJECT_ENV_FILE=str(root / ".env"))
-                command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "check-conflicts", "migrations/2026-10-02_interrupt-r001", "--env", "dev"]
-                process, screen, sql_survived = _console_ctrl_c.interrupt(command, root, environment, started, sql_pid)
-                self.assertEqual(process.returncode, 130, screen)
-                self.assertEqual(screen.strip(), "preflight interrupted; it only reads, so nothing was changed")
-                self.assertFalse(sql_survived, "SQLcl was still running after the preflight ended")
-                self.assertEqual(sorted(path.name for path in (root / "scratch").glob("*")), [])
-
-    @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console")
-    def test_ctrl_c_in_a_windows_console_waits_for_python_and_passes_its_status_on(self) -> None:
-        # Python needs a moment after Ctrl-C to say what it left and to clean up, and
-        # migrate chooses status 2 ("interrupted and may be partially applied") over 130.
-        # A Bash that had exec'd Python is a bare stand-in that the keypress ends at once
-        # with a status of its own (512): the prompt came back first, Python's last words
-        # appeared after it, and the status it chose was lost.
-        for wrapper in self.windows_wrappers():
-            with self.subTest(wrapper=Path(wrapper[0]).name), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                self.make_windows_interrupt_checkout(root)
-                started = root / "python-started"
-                # A python3 that waits for Ctrl-C, takes a moment to finish and exits 2, as
-                # scripts.migrate does when it is interrupted inside an apply.
-                _console_ctrl_c.write_python_command(
-                    root / "bin", "python3",
-                    "import sys\nimport time\nfrom pathlib import Path\n"
-                    'if sys.argv[1:2] == ["-c"]:\n'
-                    "    exec(sys.argv[2])  # team.ps1 asks whether this is Python 3.10 or newer\n"
-                    "    raise SystemExit(0)\n"
-                    f"Path({str(started)!r}).write_text('started')\n"
-                    "try:\n    time.sleep(60)\nexcept KeyboardInterrupt:\n"
-                    "    print('python is cleaning up', flush=True)\n    time.sleep(1.5)\n"
-                    "    print('python is done', flush=True)\n    raise SystemExit(2)\n",
-                )
-                environment = fake_sqlcl.environment(root / "bin", PROJECT_ENV_FILE=str(root / ".env"))
-                command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "migrate", "migrations/2026-10-02_interrupt-r001", "--env", "dev"]
-                process, screen, _ = _console_ctrl_c.interrupt(command, root, environment, started)
-                self.assertEqual(process.returncode, 2, screen)
-                self.assertEqual(screen.strip().splitlines(), ["python is cleaning up", "python is done"])
-
-    @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; off Windows Python takes over the process (exec)")
-    def test_ctrl_c_in_a_windows_console_passes_on_the_status_of_a_python_that_exits_at_once(self) -> None:
-        # Git Bash reports 130 for a native child that ends within a moment of the Ctrl-C,
-        # whatever status it chose: an interrupted apply (scripts.migrate exits 2 at once,
-        # "may be partially applied") came out as a clean 130 most of the time. Python
-        # also writes its status to MIGRATE_STATUS_FILE; repeat, since it is a race.
-        for wrapper in self.windows_wrappers():
-            for attempt in range(3):
-                with self.subTest(wrapper=Path(wrapper[0]).name, attempt=attempt), tempfile.TemporaryDirectory() as temporary:
-                    root = Path(temporary)
-                    self.make_windows_interrupt_checkout(root)
-                    started = root / "python-started"
-                    # A python3 that waits for Ctrl-C and exits 2 at once, recording the status
-                    # where scripts.migrate does.
-                    _console_ctrl_c.write_python_command(
-                        root / "bin", "python3",
-                        "import os\nimport sys\nimport time\nfrom pathlib import Path\n"
-                        'if sys.argv[1:2] == ["-c"]:\n'
-                        "    exec(sys.argv[2])  # team.ps1 asks whether this is Python 3.10 or newer\n"
-                        "    raise SystemExit(0)\n"
-                        f"Path({str(started)!r}).write_text('started')\n"
-                        "try:\n    time.sleep(60)\nexcept KeyboardInterrupt:\n"
-                        "    Path(os.environ['MIGRATE_STATUS_FILE']).write_text('2\\n')\n"
-                        "    raise SystemExit(2)\n",
-                    )
-                    environment = fake_sqlcl.environment(root / "bin", PROJECT_ENV_FILE=str(root / ".env"))
-                    command = [*wrapper[:-1], str(root / "scripts" / wrapper[-1]), "migrate", "migrations/2026-10-02_interrupt-r001", "--env", "dev"]
-                    process, screen, _ = _console_ctrl_c.interrupt(command, root, environment, started)
-                    self.assertEqual(process.returncode, 2, screen)
-                    self.assertEqual(list((root / "scratch").glob("migrate-status.*")), [], "the status file is removed")
-
     @unittest.skipUnless(os.name == "nt", "presses Ctrl-C in a Windows console; the POSIX twin is test_interrupting_doctor_removes_its_working_directory")
     def test_ctrl_c_in_a_windows_console_ends_doctor_and_removes_its_working_directory(self) -> None:
         for wrapper in self.windows_wrappers():
@@ -1963,7 +1383,7 @@ exit 17
         for name in (
             "deploy.sh",
             "publish_app.sh",
-            "publish_app.sql", "deployment_descriptor.py", "apex_compatibility.py", "sqlcl_version.py", "verify_apex_release.sql", "application_lifecycle.py", "application_lifecycle.sql", "db_targets.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py",
+            "publish_app.sql", "deployment_descriptor.py", "apex_compatibility.py", "sqlcl_version.py", "verify_apex_release.sql", "application_lifecycle.py", "application_lifecycle.sql", "db_targets.py", "local_config.py", "template_release.py", "sqlcl_session.py", "sqlcl_session.sh", "windows_job.py",
             "sqlcl_safe.sh",
             "load_env.sh",
             "export_apps.sql", "verify_deployment_state.sql",

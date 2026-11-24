@@ -2,7 +2,8 @@
 
 `compare-env` captures selected schema catalogs from two environments and
 reports a deployment readiness view. It reuses `scripts/compare_schema.py` and
-does not write to either database.
+does not write to either database. Live comparisons require SQLcl 26.3.0.0 or
+newer.
 
 ```bash
 scripts/team.sh compare-env --from dev --to staging
@@ -58,11 +59,10 @@ and is never executed.
 | `versions` | Database and APEX versions. |
 
 The capture's `identity` records `database_version` as `DBMS_DB_VERSION` reports
-it, for example `23.0`. The migration checks and the feature-release preflight
-record the same value, so a capture from this version compares cleanly with
-them. Captures made before this change stored the internal version string
-(`23.0.0.0.0`) in that field. Take a fresh capture before comparing those with
-a feature-release preflight.
+it, for example `23.0`. Release bundle preflights record the same value, so
+captures from this version compare cleanly across environments. Captures made
+before this change stored the internal version string (`23.0.0.0.0`) in that
+field.
 
 Each record is matched by its section key and then compared field by field.
 Reports classify records as `missing on target`, `different`, or `only on
@@ -115,11 +115,8 @@ Without a DBA alias, an owner login captures object grants from
 `ALL_TAB_PRIVS`. A login that acts as the selected schema reads `DBA_TAB_PRIVS`
 instead, because `ALL_TAB_PRIVS` hides grants whose grantor, grantee and owner
 are all other users; that login needs `SELECT` on `DBA_TAB_PRIVS` (for example
-through `SELECT_CATALOG_ROLE`). The feature synonym-access section follows the
-same rule. When that view cannot be read, both sections are marked
-unavailable, and a feature prepare refuses with that reason. A configured DBA
-alias supplies the complete sections; if that capture also fails, the
-comparison remains blocked.
+through `SELECT_CATALOG_ROLE`). A configured DBA alias supplies the complete
+sections; if that capture also fails, the comparison remains blocked.
 
 ## DBA script output
 
@@ -129,8 +126,8 @@ identified by the captured source/target gap. The script is a review artifact,
 not an automatic apply. It does not revoke or drop privileges, change default
 role settings, create tables or code, or copy ORDS modules, templates or handler
 source. It is written only when the comparison has complete evidence.
-Review it and the selected target before adding it as a `sql-script` step in a
-rollout manifest.
+Review it and the selected target before adding it to `01-ddl/` in a release
+bundle.
 
 ## Output and exit codes
 
@@ -167,17 +164,17 @@ end.
   optimizer statistics, and exact source bytes are not compared. Source hashes
   use Oracle `ORA_HASH`, which can collide; the first source line is omitted to
   ignore generated headers. Qualify Oracle catalog behavior on the target
-  database versions before using the report for a production rollout.
+  database versions before using the report for a production release.
 - Oracle catalog columns and ORDS metadata views vary by database/ORDS release.
   Unsupported or unreadable sections are blockers, not identical results.
 - Environments must have distinct database identities. compare-env reports an
   `identity` blocker. Its message is "source and target resolve to the same observed
   database, container, schema, and edition scope." The command exits 2.
   `compare-schema` reports `SELF_COMPARISON` for the same case. Containers built
-  from the same Oracle Free image all report `FREE` and `FREEPDB1`, so a rehearsal
+  from the same Oracle Free image all report `FREE` and `FREEPDB1`, so testing
   across them cannot be compared.
   Give each environment its own `DB_UNIQUE_NAME`. The same limit applies to a release
   guard: when identities match, nothing in the identity can tell a mis-pointed
   connection from the right one, so connection names and profiles carry that check.
 - A source hash identifies changed stored logic but is not a source export.
-  Use an exact source baseline and review the deployment migration separately.
+  Use `release collect` and review the bundle diff separately.

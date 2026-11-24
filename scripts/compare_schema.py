@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -19,7 +20,6 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from . import migration_runtime
 from .db_targets import Target, TargetResolutionError, resolve_target
 from .template_release import is_apex_26_2
 from .schema_catalog import (
@@ -41,7 +41,8 @@ from .schema_normalization import (
     normalization_coverage,
 )
 from . import sqlcl_pool
-from .sqlcl_session import driver_epilogue, run_sqlcl, safe_rmtree
+from .sqlcl_session import bash_command, driver_epilogue, run_sqlcl, safe_rmtree
+from .sqlcl_version import CompatibilityError, parse_sqlcl_version, require_sqlcl_version
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1470,6 +1471,38 @@ def _write_dba_script(path_value: str, script: str) -> Path:
     return path
 
 
+_VERSION_BRIDGE = (
+    'REPO_ROOT=$1; source "$1/scripts/sqlcl_safe.sh"; '
+    'invoke_sqlcl_safe "$2" -V < "$2/.sqlcl-stdin"'
+)
+
+
+def require_sqlcl_26_3(*, runner: Callable = subprocess.run) -> None:
+    """Require the SQLcl 26.3 floor without opening a database connection."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="compare-env-sqlcl-version-") as temporary:
+            work_dir = Path(temporary)
+            (work_dir / ".sqlcl-stdin").write_text("", encoding="utf-8")
+            command = [
+                bash_command(),
+                "-c",
+                _VERSION_BRIDGE,
+                "compare-env-runtime",
+                ROOT.as_posix(),
+                work_dir.as_posix(),
+            ]
+            result = runner(command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError("could not run the SQLcl version check; SQLcl 26.3.0.0 or newer is required") from None
+    if result.returncode != 0:
+        raise RuntimeError("SQLcl version check failed; SQLcl 26.3.0.0 or newer is required")
+    output = result.stdout if isinstance(result.stdout, str) else ""
+    try:
+        require_sqlcl_version(parse_sqlcl_version(output))
+    except CompatibilityError:
+        raise RuntimeError("SQLcl 26.3.0.0 or newer is required for compare-env") from None
+
+
 @sqlcl_pool.with_deployment_sessions
 def main_compare_env(
     argv: Sequence[str] | None = None,
@@ -1499,10 +1532,10 @@ def main_compare_env(
         print(f"compare-env error: {error}", file=sys.stderr)
         return 2
 
-    # 26.1 refuses compare-env below the SQLcl 26.3 migration floor. The 26.2 template has no call here and keeps none.
+    # 26.1 refuses compare-env below the SQLcl 26.3 floor. The 26.2 template has no call here and keeps none.
     if not APEX_26_2:
         try:
-            migration_runtime.require_migration_sqlcl_version()
+            require_sqlcl_26_3()
         except RuntimeError as error:
             print(f"compare-env error: {error}", file=sys.stderr)
             return 2

@@ -575,8 +575,7 @@ def _run_project_cleanup_checks(
     runner: Callable,
 ) -> list[dict[str, Any]]:
     from scripts.dev_test_bindings import render_object_tokens
-    from scripts.migration_checks import run_checks
-    from scripts.migration_manifest import QueryCheck
+    from scripts.dev_test_checks import QueryCheck, run_checks
 
     context = RenderContext(
         target.schema,

@@ -26,17 +26,13 @@ from scripts.sqlcl_session import run_sqlcl
 BUILTIN_SCENARIO_IDS: tuple[str, ...] = (
     "datatype-roundtrip",
     "compiler-settings",
-    "sqlcl-delivery",
-    "migration-success",
-    "migration-refusal",
-    "invalid-view",
 )
 
 ROOT: Path = Path(__file__).resolve().parent.parent
 
 
 def _build_builtin_scenario(sc_id: str) -> Scenario:
-    """Build a frozen Scenario descriptor for one of the six built-in scenarios."""
+    """Build a frozen Scenario descriptor for one of the built-in scenarios."""
     create_table_check = MappingProxyType({
         "id": "req-create-table",
         "sql": (
@@ -67,7 +63,7 @@ def _build_builtin_scenario(sc_id: str) -> Scenario:
         desc = (
             "Create a small source fixture with BOOLEAN, NUMBER(10,2), NUMBER(*,3), "
             "FLOAT(63), VARCHAR2 CHAR semantics and RAW; capture through the production "
-            "catalog path; generate and execute a second definition through baseline code."
+            "catalog path; generate and execute a second definition."
         )
         req_checks = (create_table_check,)
         fix_objects = (
@@ -79,55 +75,11 @@ def _build_builtin_scenario(sc_id: str) -> Scenario:
     elif sc_id == "compiler-settings":
         desc = (
             "Create a minimal stored unit, capture its actual settings and execute "
-            "the production-generated settings query against Oracle."
+            "the generated settings query against Oracle."
         )
         req_checks = (create_proc_check,)
         fix_objects = (
             MappingProxyType({"binding": "unit", "suffix": "CS_PROC", "type": "PROCEDURE"}),
-        )
-        txn = "ddl"
-
-    elif sc_id == "sqlcl-delivery":
-        desc = (
-            "Seed a two-row fixture, run an UPDATE containing a blank line before "
-            "WHERE through the actual rollout path."
-        )
-        req_checks = (create_table_check,)
-        fix_objects = (
-            MappingProxyType({"binding": "table", "suffix": "SD_TAB", "type": "TABLE"}),
-        )
-        txn = "mixed"
-
-    elif sc_id == "migration-success":
-        desc = (
-            "Generate a nullable-column structure change and apply it through "
-            "the actual migration path."
-        )
-        req_checks = (create_table_check,)
-        fix_objects = (
-            MappingProxyType({"binding": "table", "suffix": "MS_TAB", "type": "TABLE"}),
-        )
-        txn = "mixed"
-
-    elif sc_id == "migration-refusal":
-        desc = (
-            "Apply a deliberately incorrect fixture definition with a reviewed failing "
-            "postcondition, then exercise the guarded retry."
-        )
-        req_checks = (create_table_check,)
-        fix_objects = (
-            MappingProxyType({"binding": "table", "suffix": "MR_TAB", "type": "TABLE"}),
-        )
-        txn = "mixed"
-
-    elif sc_id == "invalid-view":
-        desc = (
-            "Create a fixture table/view, verify VALID, then mutate the fixture dependency."
-        )
-        req_checks = (create_table_check,)
-        fix_objects = (
-            MappingProxyType({"binding": "table", "suffix": "IV_TAB", "type": "TABLE"}),
-            MappingProxyType({"binding": "view", "suffix": "IV_VIEW", "type": "VIEW"}),
         )
         txn = "ddl"
 
@@ -227,12 +179,4 @@ def run_builtin(
         from scripts.dev_test_core_types import run_compiler_settings
         return run_compiler_settings(target, context, run, runner=runner)
 
-    from scripts import dev_test_core_migrations
-
-    adapters = {
-        "sqlcl-delivery": dev_test_core_migrations.run_sqlcl_delivery,
-        "migration-success": dev_test_core_migrations.run_migration_success,
-        "migration-refusal": dev_test_core_migrations.run_migration_refusal,
-        "invalid-view": dev_test_core_migrations.run_invalid_view,
-    }
-    return adapters[id](target, context, run, runner=runner)
+    raise ValueError(f"Unknown built-in scenario id: {id!r}")

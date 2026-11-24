@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import _test_subprocess_safety  # noqa: F401
-from scripts import migrate, terminal_confirm
+from scripts import terminal_confirm
 
 
 class FakeStream:
@@ -69,13 +69,6 @@ class TerminalConfirmTests(unittest.TestCase):
             self.assertFalse(terminal_confirm.may_read_yes_no())
         self.assertEqual(stderr.getvalue().strip(), terminal_confirm.YES_REFUSAL)
         self.assertIn("--yes", terminal_confirm.YES_REFUSAL)
-
-    def test_redirected_input_refused_for_yes_no_prompt(self):
-        stderr = io.StringIO()
-        with patch.dict(os.environ, {"TEAM_ACK_FROM_STDIN": "1"}), patch.object(terminal_confirm, "stdin_is_terminal", return_value=False), \
-                patch("builtins.input", side_effect=AssertionError("a piped answer must not be read")), contextlib.redirect_stderr(stderr):
-            self.assertFalse(migrate._confirm_from_terminal("Migrating to PROD. Proceed? [y/N]"))
-        self.assertIn("refused", stderr.getvalue())
 
     def test_redirected_input_refused_for_acknowledgment_even_with_retired_environment_variable(self):
         # TEAM_ACK_FROM_STDIN is retired: no code reads it, so setting it changes nothing.

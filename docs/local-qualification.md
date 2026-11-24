@@ -111,6 +111,13 @@ Linux Bash or PowerShell tests cannot establish native Windows behavior. APEX
 26.1 performance changes require separate qualification on its own client/database
 pair. Staging and production runtime behavior must be qualified separately.
 
+## Lean release bundle disposable-target qualification checklist
+
+Before signing off on live release-bundle changes against an authorized disposable target (with a temporary branch or scratch checkout for `--env prod` Git-tag verification):
+
+- [ ] **Mixed-schema SQL + ORDS + APEX end-to-end run:** Create a bundle under `releases/<slug>/` containing multi-schema `01-ddl/`, `02-code/` (`new`, `replace`, and `patch`), `03-ords/` (with explicit `objects` backup entries), `04-verify/`, and a disposable numeric app in `apps`. Run `scripts/team.sh release check <slug> --env staging` and `scripts/team.sh release run <slug> --env staging --confirm-target <db_unique_name>`, then confirm `backup-manifest.json` lists both `expectedObjects` and backed-up `objects`, all `01-ddl/` ran before any `02-code/` and all `02-code/` ran before `03-ords/`, in-session `-20901` / `-20902` guards passed, `04-verify/` succeeded, and the app deployed.
+- [ ] **Failure-after-SQL-apply phase report check:** Re-run a disposable mixed-schema + app bundle where SQL apply (`01-ddl/` / `02-code/` / `03-ords/` / `04-verify/`) succeeds and Step 5 (`apps` deploy) fails (for example, an unavailable/invalid deployment descriptor or forced `deploy.sh` failure). Verify `release run` exits non-zero **and still writes** `scratch/release-reports/<slug>-<env>-<YYYYMMDDTHHMMSSZ>.md` containing `- **Outcome:** FAILED`, `- **Error:** ...`, `- **Backup:** scratch/backups/...`, `- **Completed phases:** preflight, backup, apply, verify`, and per-phase timings.
+
 ## Deployment-speedup qualification on 2026-10-11
 
 The root task separately qualified the deployment tooling against local
@@ -119,30 +126,28 @@ and SQLcl 26.3.0.0. The complete outcome is summarized in ignored local evidence
 at `scratch/deployment-review-live-20261011/qualification-summary.json`; the
 referenced reports and SQLcl output remain in that ignored directory.
 
-The current command interfaces are:
+The current command interfaces for read-only database checks and release bundles are:
 
 ```bash
 scripts/team.sh query --env dev --connection tables --schema DEMO2 "SELECT table_name FROM user_tables"
-scripts/team.sh verify migrations/DEMO2/2026-10-11_release-r001 --env dev --phase pre
-scripts/team.sh migrate migrations/DEMO2/2026-10-11_release-r001 --env dev --rehearse \
-  --report scratch/rehearsal.json
 scripts/team.sh compare-env --from dev --to staging --format markdown
-scripts/team.sh baseline export-source --from dev
-scripts/team.sh rollout release/rollout.json --env dev --dry-run
-scripts/team.sh rollout release/rollout.json --env dev --report scratch/rollout
+scripts/team.sh release list
+scripts/team.sh release new <slug>
+scripts/team.sh release collect <slug> --from dev --schema DEMO2 --object "PACKAGE_BODY:PKG" --mode patch --target-env staging
+scripts/team.sh release check <slug> --env staging
+scripts/team.sh release run <slug> --env staging --confirm-target <db_unique_name>
 ```
 
-Replace example paths and profiles with configured local values. `query`, `verify`,
-`compare-env`, and `baseline export-source` are read-only. `migrate
---rehearse` executes eligible DML on the selected real database and attempts a
-transaction rollback; it is not an offline test. `rollout --dry-run` validates
-and hashes local inputs without executing the manifest. The offline suite uses
+Replace example paths and profiles with configured local values. `query`,
+`compare-env`, and `release check` are read-only. `release run` performs
+backup, apply, invalid-object delta checks, verification, optional `staging`/`prod`
+app deployment, and reporting against the confirmed target. The offline suite uses
 fakes and recorded fixtures for command flow and refusal boundaries; it cannot
 establish Oracle behavior by itself.
 
-Baseline export commands take their schema scope from `PROJECT_SCHEMA` when it
-is configured; otherwise they use the schema list in `baseline.json`. They do
-not accept `--schema`; that option is supported by `baseline build`.
+(Historical note: the 2026-10-11 native observations below were recorded under the
+earlier migration/baseline/rollout commands before their replacement by the Lean
+6-Step Release Bundle workflow in [release-workflow.md](release-workflow.md).)
 
 The native run observed these scoped results:
 

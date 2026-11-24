@@ -8,15 +8,6 @@
 /.codex/config.toml
 .sync-state/
 scratch/
-/releases/.local-state.json
-/releases/.local-state.lock
-/releases/.target-writer-*.lock
-/releases/.staging-coordination.lock
-/releases/.local-state-history/
-/releases/.dev-apply-attempts/
-migrations/**/attempt-event.*.json
-# archive-migrations moves folders here; their attempt events stay local too.
-migrations-archive/**/attempt-event.*.json
 dist/
 
 # Local worktree/developer caches

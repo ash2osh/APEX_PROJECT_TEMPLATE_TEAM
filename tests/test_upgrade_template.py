@@ -1399,6 +1399,45 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertFalse((self.project / "docs/migration-rules.md").exists())
         self.assertNotIn("docs/migration-rules.md", self.lock()["files"])
 
+    def test_missing_local_manifest_recovers_from_locked_commit_and_blocks_unverified_deletes(self) -> None:
+        self.adopt()
+        retired_manifest = {
+            **MANIFEST,
+            "upstream": str(self.template),
+            "templateOwned": ["AGENTS.md", "scripts/**", "template-manifest.json"],
+        }
+        self.release_v2(
+            {"template-manifest.json": json.dumps(retired_manifest)},
+            removed=("docs/migration-rules.md",),
+        )
+        # Case 1: local template-manifest.json removed, but lock["commit"] resolves in template history.
+        (self.project / "template-manifest.json").unlink()
+        data = self.lock()
+        data["files"].pop("template-manifest.json", None)
+        write(self.project, {".template-lock.json": json.dumps(data)})
+        commit_all(self.project, "remove local manifest while keeping real commit")
+
+        recovered = self.upgrade("--dry-run")
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        self.assertIn("DELETE docs/migration-rules.md", recovered.stdout)
+
+        # Case 2: unresolvable commit + missing local manifest must refuse DELETE / unverified paths.
+        write(self.project, {"PROJECT.md": "downstream notes\n"})
+        data["commit"] = "0" * 40
+        write(self.project, {".template-lock.json": json.dumps(data)})
+        commit_all(self.project, "unresolvable commit in lock")
+        refused_retired = self.upgrade("--dry-run")
+        self.assertEqual(refused_retired.returncode, 2)
+        self.assertIn("cannot be verified without local template-manifest.json", refused_retired.stderr)
+
+        # Case 3: unresolvable commit + missing local manifest also protects PROJECT.md even if listed in lock.
+        data["files"] = {"AGENTS.md": data["files"]["AGENTS.md"], "PROJECT.md": "a" * 64}
+        write(self.project, {".template-lock.json": json.dumps(data)})
+        commit_all(self.project, "poisoned PROJECT.md lock entry")
+        refused_project = self.upgrade("--dry-run")
+        self.assertEqual(refused_project.returncode, 2)
+        self.assertIn("protected project data", refused_project.stderr)
+
     @unittest.skipIf(os.name == "nt", "symbolic links need privileges on Windows")
     def test_symbolic_link_in_template_is_refused(self) -> None:
         (self.template / "scripts/link.sh").symlink_to("tool.sh")

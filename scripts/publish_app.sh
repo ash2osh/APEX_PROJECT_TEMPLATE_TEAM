@@ -220,6 +220,8 @@ if [ "$PROJECT_MULTI_SCHEMA" = true ]; then
   esac
 fi
 
+python3 "$REPO_ROOT/scripts/validate_app_source.py" "$REPO_ROOT" "$app_dir" --for-import || exit 2
+
 if [ "$describe" = true ]; then
   # Internal read-only interface for deploy.sh to show the selected descriptor
   # before it asks the operator to confirm or prints a DBA runbook.
@@ -231,7 +233,6 @@ fi
 if [ "$app_environment" = dev ] && [ -z "${APEX_WORKSPACE_USERNAME:-}" ]; then
   fail "set APEX_WORKSPACE_USERNAME to the existing Builder developer/admin login"
 fi
-python3 "$REPO_ROOT/scripts/validate_app_source.py" "$REPO_ROOT" "$app_dir" --for-import || exit 2
 
 if [ -z "$sqlcl_connection" ] || [ -z "$expected_user" ]; then
   case "$app_environment" in

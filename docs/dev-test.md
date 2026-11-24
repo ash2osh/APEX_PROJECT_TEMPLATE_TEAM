@@ -9,15 +9,16 @@ production-derived records, so use synthetic run-tagged fixtures and inspect the
 observed target before every run.
 
 Planning is read-only. Running a suite performs its declared DDL and DML. The
-default built-in suite checks six template behaviors. A project suite under
+default built-in suite checks two template behaviors (`datatype-roundtrip` and
+`compiler-settings`). A project suite under
 `dev-tests/` lets a team exercise its own behavior on explicitly named,
 run-tagged fixtures. The runner keeps each run's input, intent, output and
-verification evidence under `scratch/dev-test/<run-id>/`, outside the
-application's migration folders.
+verification evidence under `scratch/dev-test/<run-id>/`, outside release
+bundle folders.
 
 ## Start with a plan
 
-Configure the DEV migration profile (or the existing DEV fallback profile)
+Configure the DEV release/migration profile (or the existing DEV code/tables fallback)
 with a saved SQLcl connection that logs in as the schema owner. Never put
 credentials in `.env`. For one configured schema, `--schema` may be omitted;
 for multiple schemas, select the intended owner explicitly.
@@ -34,7 +35,7 @@ planned fixture names and coverage. Review it before choosing `--run`. A run
 rechecks its target and prerequisites and freezes its own source; it does not
 trust an earlier plan as permission to write.
 
-The default run selects the complete six-scenario built-in suite. To run a
+The default run selects the two-scenario built-in suite. To run a
 project suite, provide it explicitly:
 
 ```bash

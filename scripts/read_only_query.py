@@ -19,8 +19,45 @@ from collections.abc import Mapping, Sequence
 from .dev_test_bindings import validate_bindings
 from .db_targets import Target, TargetResolutionError, looks_like_production_identity, resolve_target, split_list
 from .local_config import ConfigError, read_project_env
-from .migration_manifest import SAFE_FUNCTIONS, SAFE_SQL_FORMS
 from .sqlcl_session import SqlclError, driver_epilogue, run_sqlcl
+
+
+SAFE_FUNCTIONS = {
+    "avg",
+    "cast",
+    "chr",
+    "coalesce",
+    "count",
+    "decode",
+    "instr",
+    "length",
+    "lengthb",
+    "listagg",
+    "lpad",
+    "ltrim",
+    "max",
+    "min",
+    "nullif",
+    "nvl",
+    "ora_hash",
+    "rpad",
+    "replace",
+    "rtrim",
+    "regexp_like",
+    "standard_hash",
+    "substr",
+    "sum",
+    "sys_context",
+    "to_char",
+    "to_date",
+    "to_number",
+    "to_timestamp",
+    "to_timestamp_tz",
+    "trim",
+    "upper",
+    "lower",
+}
+SAFE_SQL_FORMS = {"as", "exists", "filter", "in", "over", "within"}
 
 
 DEFAULT_TIMEOUT_SECONDS = 60

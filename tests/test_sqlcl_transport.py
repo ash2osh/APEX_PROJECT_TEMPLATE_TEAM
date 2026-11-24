@@ -1,9 +1,5 @@
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
-from scripts.migrate import MigrationApplyError, _preflight_transport
-from scripts.migration_manifest import MigrationFile
 from scripts.sqlcl_transport import generated_clob_assembly, lint_sqlcl_transport
 
 
@@ -45,20 +41,6 @@ class SqlclTransportTests(unittest.TestCase):
             lint_sqlcl_transport("select 1 from dual", "guess")
 
         self.assertEqual(lint_sqlcl_transport("v_text := 'unterminated", "direct"), ())
-
-    def test_proven_direct_hazard_refuses_before_migration_apply_launch(self):
-        file = MigrationFile(
-            sequence=1,
-            name="001-create-table.sql",
-            path=Path("001-create-table.sql"),
-            source=b"BEGIN\n  v_text := 'value-\nnext';\nEND;\n/\n",
-            sha256="a" * 64,
-        )
-        with patch("scripts.migrate.run_sqlcl") as run_sqlcl:
-            with self.assertRaisesRegex(MigrationApplyError, "SQLcl transport preflight refused"):
-                _preflight_transport((file,), announce=False)
-
-        run_sqlcl.assert_not_called()
 
 
 if __name__ == "__main__":

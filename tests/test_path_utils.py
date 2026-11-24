@@ -48,6 +48,23 @@ class RelativeToRootTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 relative_to_root(outside, root)
 
+    def test_rejects_intermediate_symlink_under_root_even_on_lexical_match(self) -> None:
+        from scripts.path_utils import PathReparseError
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            root.mkdir()
+            outside = Path(temporary) / "outside"
+            outside.mkdir()
+            (outside / "secret.sql").write_text("SELECT 1 FROM DUAL;\n", encoding="utf-8")
+            link_dir = root / "linked"
+            try:
+                link_dir.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+            with self.assertRaises(PathReparseError):
+                relative_to_root(link_dir / "secret.sql", root)
+
 
 if __name__ == "__main__":
     unittest.main()

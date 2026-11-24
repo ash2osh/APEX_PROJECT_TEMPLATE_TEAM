@@ -8,12 +8,13 @@ import os
 import re
 import secrets
 from collections.abc import Callable, Mapping, Sequence
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from scripts import baseline
 from scripts.db_targets import ORACLE_IDENTIFIER, Target, looks_like_production_identity
 from scripts.dev_test_bindings import RenderContext
+from scripts.dev_test_checks import QueryCheck, run_checks, validate_check_query
 from scripts.dev_test_core import builtin_suite
 from scripts.dev_test_evidence import (
     RunEvidence,
@@ -28,7 +29,6 @@ from scripts.dev_test_runtime import (
     execute_step,
     read_rows,
 )
-from scripts.migration_checks import QueryCheck, run_checks
 from scripts.schema_catalog import (
     CatalogError,
     ObjectDefinition,
@@ -40,6 +40,356 @@ from scripts.schema_catalog import (
     same_database_scope,
 )
 from scripts.sqlcl_session import run_sqlcl
+
+
+_TRUE_FLAG_VALUES = frozenset({"Y", "YES", "TRUE"})
+_FALSE_FLAG_VALUES = frozenset({"N", "NO", "FALSE"})
+_Q_DELIMITERS = (
+    ("~", "~"), ("!", "!"), ("^", "^"), ("#", "#"), ("$", "$"), ("%", "%"),
+    ("&", "&"), ("*", "*"), ("-", "-"), ("+", "+"), ("=", "="), ("?", "?"),
+    (":", ":"), (";", ";"), ("@", "@"), ("_", "_"), (",", ","), (".", "."),
+    ("/", "/"), ("[", "]"), ("{", "}"), ("(", ")"), ("<", ">"),
+)
+
+
+def _sql_identifier(value: str) -> str:
+    if not isinstance(value, str) or not value or any(character in value for character in "\r\n\x00"):
+        raise ValueError("catalog returned an unsafe empty identifier")
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _q_literal(value: str) -> str:
+    for opening, closing in _Q_DELIMITERS:
+        if closing + "'" not in value:
+            return f"q'{opening}{value}{closing}'"
+    return _sql_literal(value)
+
+
+def _safe_check_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-") or "object"
+    return slug[:39].rstrip("-") + "-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+
+
+def _check(check_id: str, sql: str) -> dict[str, Any]:
+    validate_check_query(sql)
+    return {"id": check_id, "sql": sql, "expected": 1}
+
+
+def _metadata_integer(value: object, description: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str, float, Decimal)):
+        raise ValueError(f"{description} is not an integer: {value!r}")
+    try:
+        parsed = int(value)
+    except (ValueError, TypeError, OverflowError) as error:
+        raise ValueError(f"{description} is not an integer: {value!r}") from error
+    if isinstance(value, (float, Decimal)) and value != parsed:
+        raise ValueError(f"{description} is not an integer: {value!r}")
+    return parsed
+
+
+def _column_flag(row: Mapping, key: str, where: str) -> bool | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if text in _TRUE_FLAG_VALUES:
+        return True
+    if text in _FALSE_FLAG_VALUES:
+        return False
+    raise ValueError(f"{where} has an unrecognised {key} flag: {value!r}")
+
+
+def _is_hidden_user_column(row: Mapping) -> bool:
+    where = f"column {row.get('table_name')}.{row.get('name')}"
+    return _column_flag(row, "hidden", where) is True and _column_flag(row, "user_generated", where) is True
+
+
+def _is_invisible(row: Mapping) -> bool:
+    where = f"column {row.get('table_name')}.{row.get('name')}"
+    return (
+        _column_flag(row, "hidden", where) is True
+        and _column_flag(row, "user_generated", where) is True
+        and _column_flag(row, "virtual", where) is not True
+    )
+
+
+def _type_owner(row: Mapping, source_schema: str | None, target_schema: str | None) -> str | None:
+    owner = row.get("data_type_owner")
+    if owner is None or owner == "":
+        return None
+    if not isinstance(owner, str):
+        raise ValueError(f"column {row.get('table_name')}.{row.get('name')} has invalid data_type_owner: {owner!r}")
+    if target_schema is not None and owner in {"<CONFIGURED_SCHEMA>", source_schema}:
+        return target_schema
+    return owner
+
+
+def _table_column_type(row: Mapping) -> str:
+    data_type = row.get("data_type")
+    col_name = row.get("name", "?")
+    if isinstance(data_type, bool) or not isinstance(data_type, str):
+        raise ValueError(f"unsupported column data type in catalog: {data_type!r}")
+    value = data_type.upper()
+    if re.fullmatch(r"[A-Z][A-Z0-9_ ]*(?:\([0-9]+(?:,[0-9]+)?\))?(?: WITH (?:LOCAL )?TIME ZONE)?", value, re.ASCII) is None:
+        raise ValueError(f"unsupported column data type in catalog: {data_type!r}")
+    if value.startswith("NUMBER"):
+        precision_raw = row.get("data_precision")
+        scale_raw = row.get("data_scale")
+        if isinstance(precision_raw, bool) or isinstance(scale_raw, bool):
+            raise ValueError(f"column {col_name} has invalid boolean numeric attribute")
+        parsed_precision: int | None = None
+        if precision_raw is not None:
+            parsed_precision = _metadata_integer(precision_raw, f"column {col_name} NUMBER precision")
+            if parsed_precision < 1 or parsed_precision > 38:
+                raise ValueError(f"column {col_name} NUMBER precision {parsed_precision} out of range 1..38")
+        parsed_scale: int | None = None
+        if scale_raw is not None:
+            parsed_scale = _metadata_integer(scale_raw, f"column {col_name} NUMBER scale")
+            if parsed_scale < -84 or parsed_scale > 127:
+                raise ValueError(f"column {col_name} NUMBER scale {parsed_scale} out of range -84..127")
+        if parsed_precision is not None and parsed_scale is not None:
+            value = f"NUMBER({parsed_precision},{parsed_scale})"
+        elif parsed_precision is not None:
+            value = f"NUMBER({parsed_precision})"
+        elif parsed_scale is not None:
+            value = f"NUMBER(*,{parsed_scale})"
+        else:
+            value = "NUMBER"
+    elif value.startswith("FLOAT"):
+        precision_raw = row.get("data_precision")
+        scale_raw = row.get("data_scale")
+        if isinstance(precision_raw, bool) or isinstance(scale_raw, bool):
+            raise ValueError(f"column {col_name} has invalid boolean FLOAT attribute")
+        if scale_raw is not None:
+            raise ValueError(f"column {col_name} FLOAT does not support scale: {scale_raw!r}")
+        if precision_raw is not None:
+            parsed_precision = _metadata_integer(precision_raw, f"column {col_name} FLOAT precision")
+            if parsed_precision < 1 or parsed_precision > 126:
+                raise ValueError(f"column {col_name} FLOAT precision {parsed_precision} out of range 1..126")
+            value = f"FLOAT({parsed_precision})"
+        else:
+            value = "FLOAT"
+    elif value in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR", "RAW"}:
+        length_raw = row.get("char_length") if value in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"} else row.get("data_length")
+        if length_raw is None:
+            length_raw = row.get("data_length")
+        if length_raw is None or isinstance(length_raw, bool):
+            raise ValueError(f"column {col_name} has no usable length")
+        length = _metadata_integer(length_raw, f"column {col_name} length")
+        if length < 1:
+            raise ValueError(f"column {col_name} has no usable length")
+        if value in {"VARCHAR2", "CHAR"}:
+            semantics = "CHAR" if row.get("char_used") == "C" else "BYTE"
+            value = f"{value}({length} {semantics})"
+        else:
+            value = f"{value}({length})"
+    return value
+
+
+def _column_sql(row: Mapping, source_schema: str | None = None, target_schema: str | None = None, *, invisible: bool | None = None) -> str:
+    owner = _type_owner(row, source_schema, target_schema)
+    if owner is None:
+        definition = f"{_sql_identifier(str(row['name']))} {_table_column_type(row)}"
+    else:
+        type_name = row.get("data_type")
+        if not isinstance(type_name, str) or not type_name:
+            raise ValueError(f"column {row.get('table_name')}.{row.get('name')} has invalid data_type: {type_name!r}")
+        definition = f"{_sql_identifier(str(row['name']))} {_sql_identifier(owner)}.{_sql_identifier(type_name)}"
+    if (_is_invisible(row) if invisible is None else invisible):
+        definition += " INVISIBLE"
+    return definition
+
+
+def _column_definition_check(schema: str, row: Mapping, source_schema: str | None = None) -> dict[str, Any]:
+    table_name = str(row["table_name"])
+    column_name = str(row["name"])
+    data_type_raw = row.get("data_type")
+    if isinstance(data_type_raw, bool) or not isinstance(data_type_raw, str):
+        raise ValueError(f"column {table_name}.{column_name} has invalid data_type: {data_type_raw!r}")
+    data_type = data_type_raw.upper()
+    type_owner = _type_owner(row, source_schema, schema)
+    predicates = [
+        f"OWNER = {_sql_literal(schema)}",
+        f"TABLE_NAME = {_sql_literal(table_name)}",
+        f"COLUMN_NAME = {_sql_literal(column_name)}",
+    ]
+    if type_owner is not None:
+        predicates.append(f"DATA_TYPE = {_sql_literal(data_type_raw)}")
+        predicates.append(f"DATA_TYPE_OWNER = {_sql_literal(type_owner)}")
+    elif data_type.startswith("NUMBER"):
+        predicates.append("DATA_TYPE = 'NUMBER'")
+        precision = row.get("data_precision")
+        scale = row.get("data_scale")
+        if isinstance(precision, bool) or isinstance(scale, bool):
+            raise ValueError(f"column {table_name}.{column_name} has invalid boolean numeric attribute")
+        if precision is not None:
+            p_val = _metadata_integer(precision, f"column {table_name}.{column_name} precision")
+            if p_val < 1 or p_val > 38:
+                raise ValueError(f"column {table_name}.{column_name} precision {p_val} out of range 1..38")
+            predicates.append(f"DATA_PRECISION = {p_val}")
+        else:
+            predicates.append("DATA_PRECISION IS NULL")
+        if scale is not None:
+            s_val = _metadata_integer(scale, f"column {table_name}.{column_name} scale")
+            if s_val < -84 or s_val > 127:
+                raise ValueError(f"column {table_name}.{column_name} scale {s_val} out of range -84..127")
+            predicates.append(f"DATA_SCALE = {s_val}")
+        else:
+            predicates.append("DATA_SCALE IS NULL")
+    elif data_type.startswith("FLOAT"):
+        predicates.append("DATA_TYPE = 'FLOAT'")
+        precision = row.get("data_precision")
+        scale = row.get("data_scale")
+        if isinstance(precision, bool) or isinstance(scale, bool):
+            raise ValueError(f"column {table_name}.{column_name} has invalid boolean FLOAT attribute")
+        if scale is not None:
+            raise ValueError(f"column {table_name}.{column_name} FLOAT cannot have scale: {scale!r}")
+        if precision is not None:
+            p_val = _metadata_integer(precision, f"column {table_name}.{column_name} precision")
+            if p_val < 1 or p_val > 126:
+                raise ValueError(f"column {table_name}.{column_name} FLOAT precision {p_val} out of range 1..126")
+            predicates.append(f"DATA_PRECISION = {p_val}")
+        else:
+            predicates.append("DATA_PRECISION IS NULL")
+        predicates.append("DATA_SCALE IS NULL")
+    elif data_type in {"VARCHAR2", "CHAR"}:
+        predicates.append(f"DATA_TYPE = {_sql_literal(data_type)}")
+        if row.get("char_used") == "C":
+            char_length = row.get("char_length")
+            if char_length is None or isinstance(char_length, bool):
+                raise ValueError(f"column {table_name}.{column_name} has no usable char_length for CHAR semantics")
+            cl_val = _metadata_integer(char_length, f"column {table_name}.{column_name} char_length")
+            if cl_val < 1:
+                raise ValueError(f"column {table_name}.{column_name} invalid char_length: {char_length!r}")
+            predicates.append("CHAR_USED = 'C'")
+            predicates.append(f"CHAR_LENGTH = {cl_val}")
+        else:
+            data_length = row.get("data_length")
+            if data_length is None:
+                data_length = row.get("char_length")
+            if data_length is None or isinstance(data_length, bool):
+                raise ValueError(f"column {table_name}.{column_name} has no usable data_length for BYTE semantics")
+            dl_val = _metadata_integer(data_length, f"column {table_name}.{column_name} data_length")
+            if dl_val < 1:
+                raise ValueError(f"column {table_name}.{column_name} invalid data_length: {data_length!r}")
+            predicates.append("(CHAR_USED = 'B' OR CHAR_USED IS NULL)")
+            predicates.append(f"DATA_LENGTH = {dl_val}")
+    elif data_type in {"NVARCHAR2", "NCHAR"}:
+        predicates.append(f"DATA_TYPE = {_sql_literal(data_type)}")
+        char_length = row.get("char_length")
+        if char_length is None:
+            char_length = row.get("data_length")
+        if char_length is None or isinstance(char_length, bool):
+            raise ValueError(f"column {table_name}.{column_name} has no usable char_length")
+        cl_val = _metadata_integer(char_length, f"column {table_name}.{column_name} char_length")
+        if cl_val < 1:
+            raise ValueError(f"column {table_name}.{column_name} invalid char_length: {char_length!r}")
+        predicates.append(f"CHAR_LENGTH = {cl_val}")
+    elif data_type == "RAW":
+        predicates.append("DATA_TYPE = 'RAW'")
+        data_length = row.get("data_length")
+        if data_length is None or isinstance(data_length, bool):
+            raise ValueError(f"column {table_name}.{column_name} RAW has no usable data_length")
+        dl_val = _metadata_integer(data_length, f"column {table_name}.{column_name} data_length")
+        if dl_val < 1:
+            raise ValueError(f"column {table_name}.{column_name} invalid data_length: {data_length!r}")
+        predicates.append(f"DATA_LENGTH = {dl_val}")
+    else:
+        predicates.append(f"DATA_TYPE = {_sql_literal(data_type)}")
+    if _column_flag(row, "virtual", f"column {table_name}.{column_name}") is True:
+        predicates.append("VIRTUAL_COLUMN = 'YES'")
+        if _is_hidden_user_column(row):
+            predicates.append("HIDDEN_COLUMN = 'YES'")
+    elif _is_invisible(row):
+        predicates.append("HIDDEN_COLUMN = 'YES'")
+    where_clause = " AND ".join(predicates)
+    sql = f"SELECT CASE WHEN EXISTS (SELECT 1 FROM ALL_TAB_COLS WHERE {where_clause}) THEN 1 ELSE 0 END FROM DUAL"
+    return _check(f"column-def-{_safe_check_slug(table_name + '-' + column_name)}", sql)
+
+
+def _setting_row(settings: Sequence[Mapping], name: str, object_type: str) -> dict[str, Any]:
+    rows = [row for row in settings if row.get("name") == name and row.get("type") == object_type]
+    if len(rows) != 1:
+        raise ValueError(f"expected exactly one compiler-settings row for {object_type} {name}; found {len(rows)}")
+    row = rows[0]
+    fields = (
+        "plsql_optimize_level", "plsql_code_type", "plsql_debug", "plsql_warnings",
+        "plsql_ccflags", "nls_length_semantics", "plscope_settings",
+    )
+    missing = [field for field in fields if field not in row]
+    if missing:
+        raise ValueError(f"compiler settings for {object_type} {name} are incomplete: {', '.join(missing)}")
+    optimize = str(row["plsql_optimize_level"])
+    code_type = str(row["plsql_code_type"]).upper()
+    debug = str(row["plsql_debug"]).upper()
+    nls = str(row["nls_length_semantics"]).upper()
+    if optimize not in {"0", "1", "2", "3"} or code_type not in {"INTERPRETED", "NATIVE"} or debug not in {"TRUE", "FALSE"} or nls not in {"BYTE", "CHAR"}:
+        raise ValueError(f"compiler settings for {object_type} {name} contain unsupported values")
+    return {field: row[field] for field in fields}
+
+
+def _session_settings_sql(settings: Mapping) -> str:
+    return "\n".join((
+        f"ALTER SESSION SET PLSQL_OPTIMIZE_LEVEL = {settings['plsql_optimize_level']};",
+        f"ALTER SESSION SET PLSQL_CODE_TYPE = {settings['plsql_code_type']};",
+        f"ALTER SESSION SET PLSQL_DEBUG = {settings['plsql_debug']};",
+        f"ALTER SESSION SET PLSQL_WARNINGS = {_sql_literal(str(settings['plsql_warnings']))};",
+        f"ALTER SESSION SET PLSQL_CCFLAGS = {_sql_literal(str(settings['plsql_ccflags'] or ''))};",
+        f"ALTER SESSION SET NLS_LENGTH_SEMANTICS = {settings['nls_length_semantics']};",
+        f"ALTER SESSION SET PLSCOPE_SETTINGS = {_sql_literal(str(settings['plscope_settings'] or ''))};",
+    ))
+
+
+def _exact_settings_check(settings: Mapping, name: str, object_type: str, schema: str, *, before: bool = False) -> dict[str, Any]:
+    collation = " COLLATE BINARY" if before else ""
+    catalog = "SYS.ALL_PLSQL_OBJECT_SETTINGS" if before else "ALL_PLSQL_OBJECT_SETTINGS"
+    dual = "SYS.DUAL" if before else "DUAL"
+    fields = (
+        "plsql_optimize_level", "plsql_code_type", "plsql_debug", "plsql_warnings",
+        "nls_length_semantics", "plscope_settings", "plsql_ccflags",
+    )
+    clauses = []
+    for field in fields:
+        value = settings[field]
+        column = "S." + field.upper()
+        if value is None or value == "":
+            clauses.append(f"{column} IS NULL")
+        else:
+            comparison = "" if field == "plsql_optimize_level" else collation
+            clauses.append(f"{column}{comparison} = {_sql_literal(str(value))}")
+    query = (
+        f"SELECT CASE WHEN EXISTS (SELECT 1 FROM {catalog} S "
+        f"WHERE S.OWNER{collation} = {_sql_literal(schema)} AND S.NAME{collation} = {_sql_literal(name)} "
+        f"AND S.TYPE{collation} = {_sql_literal(object_type)} AND "
+        + " AND ".join(clauses) + f") THEN 1 ELSE 0 END FROM {dual}"
+    )
+    prefix = "before-settings" if before else "settings"
+    return _check(f"{prefix}-{_safe_check_slug(name + '-' + object_type)}", query)
+
+
+def _build_copy_table_bundle(target_schema: str, copy_table: str, projected_columns: Sequence[Mapping[str, Any]]) -> tuple[dict[str, str], dict[str, Any]]:
+    raw_copy_ddl = (
+        f'CREATE TABLE "{target_schema}"."{copy_table}" (\n  '
+        + ",\n  ".join(_column_sql(column) for column in projected_columns)
+        + "\n)"
+    )
+    where = f"ALL_TABLES WHERE OWNER = {_sql_literal(target_schema)} AND TABLE_NAME = {_sql_literal(copy_table)}"
+    guarded = (
+        "DECLARE\n  l_count NUMBER;\nBEGIN\n"
+        f"  SELECT COUNT(*) INTO l_count FROM {where};\n"
+        "  IF l_count = 0 THEN\n"
+        f"    EXECUTE IMMEDIATE {_q_literal(raw_copy_ddl)};\n"
+        "  END IF;\nEND;\n/\n"
+    )
+    post = _check(
+        f"table-{_safe_check_slug(copy_table)}",
+        f"SELECT CASE WHEN (SELECT COUNT(*) FROM {where}) = 1 THEN 1 ELSE 0 END FROM DUAL",
+    )
+    return {"001-create-copy-table.sql": guarded}, {"postconditions": [post]}
 
 
 # These are the requested source-fixture types. Copy DDL and postconditions are
@@ -456,10 +806,10 @@ def _column_rows(definition: ObjectDefinition, table_name: str) -> list[dict[str
 
 def _validate_datatype_columns(rows: Sequence[Mapping[str, Any]], table_name: str) -> None:
     expected = {
-        str(column["name"]): baseline._table_column_type(column)
+        str(column["name"]): _table_column_type(column)
         for column in DATATYPE_COLUMNS
     }
-    actual = {str(row["name"]): baseline._table_column_type(row) for row in rows}
+    actual = {str(row["name"]): _table_column_type(row) for row in rows}
     if actual != expected:
         details = [
             f"{name}: expected {expected.get(name, '<absent>')}, observed {actual.get(name, '<absent>')}"
@@ -682,7 +1032,7 @@ def _datatype_checks(
         for item in generated_postconditions
     ]
     for column in copied_columns:
-        generated = baseline._column_definition_check(
+        generated = _column_definition_check(
             target.schema,
             _row_for_table_check(target.schema, copy_table, column),
         )
@@ -702,7 +1052,7 @@ def _datatype_checks(
         if base is None:
             raise CatalogError(f"captured copy metadata is missing required column {column_name}")
         wrong = {**base, "table_name": copy_table, **wrong_attributes}
-        generated = baseline._column_definition_check(target.schema, wrong)
+        generated = _column_definition_check(target.schema, wrong)
         checks.append(QueryCheck(generated["id"] + "-mismatch", generated["sql"], 0))
 
     # The built-in creates empty fixtures and never inserts business data.
@@ -802,7 +1152,7 @@ def run_datatype_roundtrip(
         checks.extend(requirement_records)
 
         source_column_definitions = [
-            f'"{column["name"]}" {baseline._table_column_type(column)}'
+            f'"{column["name"]}" {_table_column_type(column)}'
             for column in DATATYPE_COLUMNS
         ]
         create_source_sql = (
@@ -838,49 +1188,11 @@ def run_datatype_roundtrip(
         # definition. Project those captured rows onto the copy fixture name.
         projected_columns = [dict(column, table_name=copy_table) for column in source_columns]
         projected_columns.sort(key=lambda column: int(column.get("column_id", 0)))
-        raw_copy_ddl = (
-            f'CREATE TABLE "{target.schema}"."{copy_table}" (\n  '
-            + ",\n  ".join(baseline._column_sql(column) for column in projected_columns)
-            + "\n)"
-        )
-        projected_key = ObjectKey(target.schema, copy_table, "TABLE")
-        projected_definition = ObjectDefinition(
-            projected_key,
-            {**source_definition.attributes, "columns": projected_columns},
-            raw_copy_ddl,
-            (),
-            True,
-        )
-        projected_snapshot = SchemaSnapshot(
-            source_snapshot.identity,
-            {projected_key: {"owner": target.schema, "name": copy_table, "type": "TABLE", "status": "VALID"}},
-            {projected_key: projected_definition},
-            source_snapshot.coverage,
-            source_snapshot.started_at,
-            source_snapshot.completed_at,
-        )
-        source_catalog = {
-            "sections": {
-                "tables": [{"name": copy_table}],
-                "columns": projected_columns,
-                "constraints": [],
-                "indexes": [],
-                "sequences": [],
-                "identity-columns": [],
-            }
-        }
-        target_catalog = {
-            "sections": {
-                "tables": [], "columns": [], "constraints": [], "indexes": [],
-                "sequences": [], "identity-columns": [],
-            }
-        }
-        config = {"schemas": [target.schema], "prefixes": [run.object_prefix], "excludedObjects": []}
-        generated_steps, generated_checks = baseline._structure_bundle(
-            config, target.schema, target.schema, source_catalog, target_catalog, projected_snapshot,
+        generated_steps, generated_checks = _build_copy_table_bundle(
+            target.schema, copy_table, projected_columns,
         )
         if len(generated_steps) != 1:
-            return _outcome(scenario, "UNKNOWN", steps=steps, error="Baseline generator did not return exactly one copy-table step")
+            return _outcome(scenario, "UNKNOWN", steps=steps, error="Copy-table generator did not return exactly one step")
         copy_sql = next(iter(generated_steps.values()))
 
         # Recheck the latest complete owner inventory before the second write.
@@ -904,9 +1216,9 @@ def run_datatype_roundtrip(
         copied_columns = _column_rows(copy_definition, copy_table)
         _validate_datatype_columns(copied_columns, copy_table)
         if {
-            column["name"]: baseline._table_column_type(column) for column in source_columns
+            column["name"]: _table_column_type(column) for column in source_columns
         } != {
-            column["name"]: baseline._table_column_type(column) for column in copied_columns
+            column["name"]: _table_column_type(column) for column in copied_columns
         }:
             return _outcome(scenario, "FAILED", steps=steps, error="Captured copy definition differs from the captured source definition")
 
@@ -1026,7 +1338,7 @@ def _read_compiler_settings(
         "plsql_ccflags": ccflags,
     }
     try:
-        return baseline._setting_row([values], proc_name, "PROCEDURE")
+        return _setting_row([values], proc_name, "PROCEDURE")
     except Exception as error:
         raise _ScenarioProblem("UNKNOWN", f"Captured compiler settings are invalid or unsupported: {error}") from error
 
@@ -1040,7 +1352,7 @@ def _compiler_check_set(
     include_all_wrong_settings: bool,
 ) -> tuple[QueryCheck, ...]:
     checks: list[QueryCheck] = []
-    exact = baseline._exact_settings_check(settings, proc_name, "PROCEDURE", schema)
+    exact = _exact_settings_check(settings, proc_name, "PROCEDURE", schema)
     checks.append(QueryCheck(f"{exact['id']}-{prefix}-exact", exact["sql"], 1))
 
     wrong_scope = (
@@ -1049,7 +1361,7 @@ def _compiler_check_set(
         ("wrong-type", schema, proc_name, "FUNCTION"),
     )
     for suffix, owner, name, object_type in wrong_scope:
-        generated = baseline._exact_settings_check(settings, name, object_type, owner)
+        generated = _exact_settings_check(settings, name, object_type, owner)
         checks.append(QueryCheck(f"{generated['id']}-{prefix}-{suffix}", generated["sql"], 0))
 
     if include_all_wrong_settings:
@@ -1066,7 +1378,7 @@ def _compiler_check_set(
         }
         for setting_name, wrong_value in wrong_values.items():
             wrong_settings = {**settings, setting_name: wrong_value}
-            generated = baseline._exact_settings_check(wrong_settings, proc_name, "PROCEDURE", schema)
+            generated = _exact_settings_check(wrong_settings, proc_name, "PROCEDURE", schema)
             checks.append(QueryCheck(
                 f"{generated['id']}-{prefix}-mismatch-{setting_name.replace('_', '-')}",
                 generated["sql"],
@@ -1074,7 +1386,7 @@ def _compiler_check_set(
             ))
 
     opposite_flags = {**settings, "plsql_ccflags": "DEVTEST_FLAG:TRUE" if settings["plsql_ccflags"] is None else None}
-    generated_flags = baseline._exact_settings_check(opposite_flags, proc_name, "PROCEDURE", schema)
+    generated_flags = _exact_settings_check(opposite_flags, proc_name, "PROCEDURE", schema)
     checks.append(QueryCheck(f"{generated_flags['id']}-{prefix}-mismatch-ccflags", generated_flags["sql"], 0))
     return tuple(checks)
 
@@ -1082,7 +1394,7 @@ def _compiler_check_set(
 def _recompile_sql(target: Target, proc_name: str, settings: Mapping[str, Any], desired_ccflags: str | None) -> str:
     # Reuse the exact captured settings for every compiler switch, changing only
     # CCFLAGS for this isolated fixture. An empty Oracle string represents NULL.
-    session_settings = baseline._session_settings_sql(settings)
+    session_settings = _session_settings_sql(settings)
     ccflags_value = "''" if desired_ccflags is None else "'" + desired_ccflags.replace("'", "''") + "'"
     return (
         session_settings

@@ -36,8 +36,7 @@ from scripts.dev_test_report import (
     new_report,
     validate_report,
 )
-from scripts.migration_checks import OBSERVED_IDENTITY_FIELDS, run_checks
-from scripts.migration_manifest import QueryCheck
+from scripts.dev_test_checks import OBSERVED_IDENTITY_FIELDS, QueryCheck, run_checks
 from scripts.sqlcl_session import SqlclResult, driver_epilogue, run_sqlcl
 from scripts.sqlcl_version import CompatibilityError, parse_sqlcl_version
 

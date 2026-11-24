@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from scripts import baseline
+from scripts import dev_test_core_types
 from scripts.db_targets import Target
 from scripts.dev_test_bindings import RenderContext
 from scripts.dev_test_core import (
@@ -175,10 +175,6 @@ class DevTestCoreTypesTests(unittest.TestCase):
         expected_ids = (
             "datatype-roundtrip",
             "compiler-settings",
-            "sqlcl-delivery",
-            "migration-success",
-            "migration-refusal",
-            "invalid-view",
         )
         self.assertEqual(BUILTIN_SCENARIO_IDS, expected_ids)
         self.assertEqual(tuple(s.id for s in suite.scenarios), expected_ids)
@@ -199,12 +195,12 @@ class DevTestCoreTypesTests(unittest.TestCase):
             )
 
     def test_builtin_scenarios_declare_create_table_procedure_and_fixtures(self) -> None:
-        """Verify declared CREATE TABLE/PROCEDURE requirements and 30-byte fixtures for all six."""
+        """Verify declared CREATE TABLE/PROCEDURE requirements and 30-byte fixtures for built-ins."""
         suite = builtin_suite()
         scenarios_by_id = {sc.id: sc for sc in suite.scenarios}
 
         # Check requirements for each scenario
-        for sc_id in ("datatype-roundtrip", "sqlcl-delivery", "migration-success", "migration-refusal", "invalid-view"):
+        for sc_id in ("datatype-roundtrip",):
             sc = scenarios_by_id[sc_id]
             req_checks = sc.requirements["checks"]
             has_table_priv = any(
@@ -255,10 +251,10 @@ class DevTestCoreTypesTests(unittest.TestCase):
 
     def test_select_scenarios_preserves_builtin_order(self) -> None:
         suite = builtin_suite()
-        selected = select_scenarios(suite, ["invalid-view", "datatype-roundtrip"])
+        selected = select_scenarios(suite, ["compiler-settings", "datatype-roundtrip"])
         self.assertEqual(
             tuple(s.id for s in selected),
-            ("datatype-roundtrip", "invalid-view"),
+            ("datatype-roundtrip", "compiler-settings"),
         )
 
     # -----------------------------------------------------------------------
@@ -285,10 +281,10 @@ class DevTestCoreTypesTests(unittest.TestCase):
             ("COL_RAW", "RAW", {"data_length": 16}),
         ]
 
-        # 1. Check production _table_column_type formatter
+        # 1. Check _table_column_type formatter
         for name, dtype, attrs in expected_types:
             row = {"name": name, "data_type": dtype, **attrs}
-            formatted = baseline._table_column_type(row)
+            formatted = dev_test_core_types._table_column_type(row)
             if dtype == "BOOLEAN":
                 self.assertEqual(formatted, "BOOLEAN")
             elif dtype == "NUMBER" and attrs.get("data_precision") == 10:
@@ -331,7 +327,7 @@ class DevTestCoreTypesTests(unittest.TestCase):
 
             for name, dtype, attrs in expected_types:
                 row = {"name": name, "data_type": dtype, "table_name": table_name, **attrs}
-                check = baseline._column_definition_check(schema, row)
+                check = dev_test_core_types._column_definition_check(schema, row)
                 # Exact definition accepts 1
                 cur = conn.execute(check["sql"])
                 self.assertEqual(cur.fetchone()[0], 1, f"Exact check failed for {name}")
@@ -350,7 +346,7 @@ class DevTestCoreTypesTests(unittest.TestCase):
             for col_name, wrong_attrs in mismatches:
                 base = next(e for e in expected_types if e[0] == col_name)
                 wrong_row = {"name": col_name, "table_name": table_name, **base[2], **wrong_attrs}
-                wrong_check = baseline._column_definition_check(schema, wrong_row)
+                wrong_check = dev_test_core_types._column_definition_check(schema, wrong_row)
                 cur = conn.execute(wrong_check["sql"])
                 self.assertEqual(cur.fetchone()[0], 0, f"Deliberately wrong check should return 0 for {col_name}")
 
@@ -377,7 +373,7 @@ class DevTestCoreTypesTests(unittest.TestCase):
         self.assertLessEqual(len(proc_name.encode("utf-8")), 30)
 
         # Check conjunction repair: SQL must contain 'AND' between TYPE and clauses
-        chk = baseline._exact_settings_check(settings, proc_name, object_type, schema)
+        chk = dev_test_core_types._exact_settings_check(settings, proc_name, object_type, schema)
         self.assertIn("S.TYPE = 'PROCEDURE' AND S.PLSQL_OPTIMIZE_LEVEL", chk["sql"])
 
         columns = ["OWNER", "NAME", "TYPE", *(key.upper() for key in settings)]
@@ -393,14 +389,14 @@ class DevTestCoreTypesTests(unittest.TestCase):
             )
 
             # 1. Null CCFLAGS: exact accepts 1
-            query = baseline._exact_settings_check(settings, proc_name, object_type, schema)["sql"]
+            query = dev_test_core_types._exact_settings_check(settings, proc_name, object_type, schema)["sql"]
             self.assertEqual(conn.execute(query).fetchone()[0], 1)
 
             # 2. Non-null CCFLAGS: exact accepts 1
             settings_with_flags = dict(settings)
             settings_with_flags["plsql_ccflags"] = "APP_FLAG:TRUE"
             conn.execute("UPDATE ALL_PLSQL_OBJECT_SETTINGS SET PLSQL_CCFLAGS = 'APP_FLAG:TRUE'")
-            query_with_flags = baseline._exact_settings_check(settings_with_flags, proc_name, object_type, schema)["sql"]
+            query_with_flags = dev_test_core_types._exact_settings_check(settings_with_flags, proc_name, object_type, schema)["sql"]
             self.assertEqual(conn.execute(query_with_flags).fetchone()[0], 1)
 
             # Query with null CCFLAGS expectation now rejects 0
@@ -408,15 +404,15 @@ class DevTestCoreTypesTests(unittest.TestCase):
 
             # 3. Wrong scope: wrong owner, wrong name, wrong type
             for wrong_owner in ("OTHER_SCHEMA", "SYS"):
-                q = baseline._exact_settings_check(settings_with_flags, proc_name, object_type, wrong_owner)["sql"]
+                q = dev_test_core_types._exact_settings_check(settings_with_flags, proc_name, object_type, wrong_owner)["sql"]
                 self.assertEqual(conn.execute(q).fetchone()[0], 0)
 
             for wrong_name in ("OTHER_PROC", "DT_DIFFERENT"):
-                q = baseline._exact_settings_check(settings_with_flags, wrong_name, object_type, schema)["sql"]
+                q = dev_test_core_types._exact_settings_check(settings_with_flags, wrong_name, object_type, schema)["sql"]
                 self.assertEqual(conn.execute(q).fetchone()[0], 0)
 
             for wrong_type in ("FUNCTION", "PACKAGE"):
-                q = baseline._exact_settings_check(settings_with_flags, proc_name, wrong_type, schema)["sql"]
+                q = dev_test_core_types._exact_settings_check(settings_with_flags, proc_name, wrong_type, schema)["sql"]
                 self.assertEqual(conn.execute(q).fetchone()[0], 0)
 
             # 4. Each wrong setting expectation rejected
@@ -432,7 +428,7 @@ class DevTestCoreTypesTests(unittest.TestCase):
             for setting_key, wrong_val in wrong_setting_cases:
                 bad_settings = dict(settings_with_flags)
                 bad_settings[setting_key] = wrong_val
-                bad_q = baseline._exact_settings_check(bad_settings, proc_name, object_type, schema)["sql"]
+                bad_q = dev_test_core_types._exact_settings_check(bad_settings, proc_name, object_type, schema)["sql"]
                 self.assertEqual(
                     conn.execute(bad_q).fetchone()[0],
                     0,
@@ -779,15 +775,14 @@ class DevTestCoreTypesTests(unittest.TestCase):
             patch("scripts.dev_test_core_types.capture_snapshot", side_effect=[source_snapshot, copy_snapshot]) as snapshots,
             patch("scripts.dev_test_core_types.run_checks", side_effect=report),
             patch("scripts.dev_test_core_types.execute_step", side_effect=step),
-            patch("scripts.dev_test_core_types.baseline._structure_bundle", wraps=baseline._structure_bundle) as structure,
+            patch("scripts.dev_test_core_types._build_copy_table_bundle", wraps=dev_test_core_types._build_copy_table_bundle) as structure,
         ):
             result = run_datatype_roundtrip(self.target, self.context, self.run)
 
         self.assertEqual(result["status"], "PASSED")
         self.assertEqual(inventories.call_count, 3)
         self.assertEqual(snapshots.call_count, 2)
-        source_catalog = structure.call_args.args[3]
-        projected = source_catalog["sections"]["columns"]
+        projected = structure.call_args.args[2]
         self.assertEqual(len(projected), len(captured_columns))
         for observed, captured in zip(projected, captured_columns, strict=True):
             self.assertEqual(observed["column_id"], captured["column_id"])

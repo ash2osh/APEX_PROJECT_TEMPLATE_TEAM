@@ -82,8 +82,7 @@ when the login has the needed privileges and the live checks pass.
 
 | Command | Behavior when login differs from schema |
 | --- | --- |
-| `migrate` | Runs after verifying the login, selecting the target schema, and passing live migration preflight. |
-| `check-conflicts` | Runs a read-only live preflight. It refuses if neither `SELECT ANY DICTIONARY` nor `SELECT_CATALOG_ROLE` validates metadata visibility, with `enabled metadata-reader privileges were not validated`. |
+| `release check` / `release run` | Runs preflight or release steps after verifying login identity and issuing `ALTER SESSION SET CURRENT_SCHEMA = <SCHEMA>` when login differs from the target schema. |
 | `export` | Runs the APEX application export using the selected parsing-schema profile and its identity checks. |
 | `publish` | Runs the APEX import after its identity and drift checks. The banner identifies the login and schema; staging and production still require the `[y/N]` confirmation. |
 | `compare-env` | Runs a read-only environment comparison when catalog visibility is validated for the selected profiles. |
@@ -121,9 +120,8 @@ statements matters.
 Check the active target schema with
 `SYS_CONTEXT('USERENV','CURRENT_SCHEMA')`. Do not use `SESSION_USER` to check
 the target: it remains the authenticated login, such as `APP_LOGIN`, so a
-project-written `SESSION_USER` check can return `0` in this mode. The generated
-`*-owner-session` check already uses `CURRENT_SCHEMA`, and `new-migration`
-continues to generate that check.
+project-written `SESSION_USER` query can return the login name instead of the
+acting schema in this mode.
 
 ## Reading the doctor output
 

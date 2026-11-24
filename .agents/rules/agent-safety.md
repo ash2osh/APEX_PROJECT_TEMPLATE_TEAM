@@ -17,66 +17,42 @@
 - Treat export as a read from shared Builder that refreshes tracked local
   source. Do not export unless requested, and review the result before
   committing it.
-- Do not run migrations, APEX imports, or deployments unless the user asked
+- Do not run `release run`, APEX imports, or deployments unless the user asked
   for that database write. Coordinate with teammates before importing into a
   shared DEV app, except an eligible explicit `--no-team-notice` page-only
   publish under `docs/partial-publish.md`. Builder locks must precede baseline
   capture/edits; all ownership, salt, cutoff and verification gates apply.
   Ambiguous writes require team recovery communication. Git branches do not
   protect shared database state.
-- Store migration SQL in numbered files under
-  `migrations/YYYY-MM-DD_<name>-rNNN/`; do not add a developer-name path.
-  When several schemas are configured, use
-  `migrations/<SCHEMA>/YYYY-MM-DD_<name>-rNNN/` instead: one migration changes
-  one schema, and a flat folder is refused.
-  Require `checks.json`, preflight selected folders, and apply only with an
-  explicit `--env`. Independent repositories' pending files cannot be seen by
-  the conflict checker. Treat a write attempt without a verified receipt as
-  requiring live reconciliation before retry. See
-  `docs/migration-rules.md`.
-- Use `features/<slug>/<SCHEMA>/` as the default source for stored code.
-  Capture from DEV, check ownership and drift, and review the source diff.
-  Coordinate shared DEV writes and require explicit authorization for the
-  selected target and units. Use read-only `feature apply --prepare`, then
-  use `--execute-plan FILE` for the authorized DEV write. Preserve pending
-  markers and evidence when the outcome needs reconciliation. Use dated
-  migrations for one-time changes and required intermediate definitions.
-- For feature capsules, select each final definition once, together with the
-  required migrations in dependency order. Replace the scaffold check and
-  commit every selected input and the schema-version 2 manifest before
-  freezing. Use the same frozen capsule
-  for staging and production; production requires a verified staging report.
-  Treat an interrupted/unknown checkpoint as unresolved until reconciled, and
-  describe only the selected feature-checkpoint and migrate-step budget, not
-  whole-deployment duration. See `docs/feature-releases.md`. An agent may pass `--yes` to `reconcile-migration`,
-  `feature reconcile-run` and the rollout recovery so the command finishes without a person. `--yes` replaces the
-  typed acknowledgment only: the outcome and the evidence file must come from checks the agent actually ran (read-only),
-  the evidence file says who established the outcome, and the record shows `acknowledgedBy: --yes` so a reviewer can
-  tell it was not typed. Without `--yes` the acknowledgment is still typed at a terminal. An agent may pass `--yes` to
+- Store each schema, stored-code, ORDS, verification, and app release bundle
+  under `releases/<slug>/` (`release.json`, `01-ddl/`, `02-code/`, `03-ords/`,
+  `04-verify/`). Run read-only `scripts/team.sh release check <bundle> --env <env>`
+  before executing `release run`. `release` commands have zero interactive
+  `[y/N]` prompts; `release run` requires explicit `--confirm-target <db_unique_name>`
+  and user authorization for the write. For DEV, staging or a disposable/test target,
+  an agent passes `--confirm-target` only when the developer asked in this conversation
+  to run that write, using the `db_unique_name` read from that same target in that run
+  via a read-only query; production requires the exact name typed by the developer for
+  that run. `release` refuses `deployed` bundles and refuses `patch` entries whose
+  `baseSha256` disagrees with live target source. See `docs/release-workflow.md`.
+- An agent may pass `--yes` to
   `automations enable|disable|run-once` so the command finishes without a person; `--yes` replaces the typed confirmation only;
   the target and action lines are still printed, the native-lock, status and identity rechecks still run, the report shows
   `acknowledgedBy: --yes`; on production it also needs `--confirm-target <db_unique_name>` and the agent supplies that name only
   when the developer typed it for the run.
-- `-y` / `--yes` answers a staging or production `[y/N]` prompt only when the developer asked in the
-  conversation for that run to be unattended. Production also needs `--confirm-target` with the name the
-  developer typed for the run. For DEV, staging or a disposable/test target, an agent may also pass
-  `--confirm-target`, but only with the `db_unique_name` it read from that same target in that run with a
-  read-only query, and only when the developer asked for that run to be unattended (see `AGENTS.md`). The
+- For standalone `deploy` and `staging-neutralize`, `-y` / `--yes` answers a staging or production `[y/N]` prompt only when the developer asked in the conversation for that run to be unattended. Production also needs `--confirm-target` with the name the developer typed for the run. For DEV, staging or a disposable/test target, an agent may also pass `--confirm-target`, but only with the `db_unique_name` it read from that same target in that run with a read-only query, and only when the developer asked for that run to be unattended (see `AGENTS.md`). The
   `TEAM_ACK_FROM_STDIN` variable is retired and ignored; piped or redirected acknowledgments stay refused, and `--yes` is the recorded route.
 - Use `scripts/team.sh compare-schema` with exact names or object prefixes for
-  read-only live drift reports. Receipts and resulting DDL cannot reliably
-  identify one unique migration file.
+  read-only live drift reports. Catalog shape cannot reliably prove which
+  historical release changed an object.
 - `scripts/team.sh deploy` requires confirmation for staging and production.
   `--manual` prints a runbook and makes no connection. Do not describe the
   manual output as an executed deployment.
 - Do not claim a live check passed unless it actually ran. Report unavailable
   checks as unknown.
-- Use `scripts/team.sh verify` for declared read-only checks and
+- Use `scripts/team.sh release check` for bundle preflight and
   `scripts/team.sh query` with a named configured profile for ad-hoc shared-
-  target reads. `migrate --rehearse` executes eligible DML on the real selected
-  target; run it only when that target and the DML are authorized. Its scalar
-  rollback checks do not prove sequence/identity counters, autonomous work,
-  external effects, or DDL were undone. Keep reviewed assertions intact; never
+  target reads. Keep reviewed assertions intact; never
   weaken a check to obtain a green result. The documented disposable-fixture
   qualification path remains available only for its explicitly approved
   local target and cleanup.

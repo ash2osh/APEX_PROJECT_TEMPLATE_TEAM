@@ -186,9 +186,12 @@ def _synonym_rows(rows: object, owner: str) -> tuple[SynonymDefinition, ...]:
             raise CatalogError("catalog synonym target-type evidence conflicts with an absent target")
         key = (synonym_owner, name)
         if key in synonyms:
+            kept = synonyms[key]
+            if synonym_owner == "PUBLIC" and (kept.table_owner, kept.table_name, kept.db_link) == (table_owner, table_name, db_link):
+                continue
             # Oracle maintains one PUBLIC synonym twice on some Autonomous Database containers: once for SYS and
             # once for C##CLOUD$SERVICE. Keep the SYS row; any other repeat is still an inventory error.
-            kept_owner = synonyms[key].table_owner
+            kept_owner = kept.table_owner
             if not (synonym_owner == "PUBLIC" and {table_owner, kept_owner} == {"SYS", "C##CLOUD$SERVICE"}):
                 raise CatalogError(f"catalog repeats synonym {synonym_owner}.{name}")
             if table_owner != "SYS":

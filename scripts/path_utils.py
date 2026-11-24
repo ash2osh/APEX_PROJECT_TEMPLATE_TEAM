@@ -42,9 +42,12 @@ def relative_to_root(path: Path | str, root: Path | str) -> Path:
     candidate = Path(os.path.abspath(path))
     base = Path(os.path.abspath(root))
     try:
-        return candidate.relative_to(base)
+        rel = candidate.relative_to(base)
     except ValueError as lexical_error:
         outside_error = lexical_error
+    else:
+        _reject_reparse_points_under(candidate, base)
+        return rel
 
     suffix: list[str] = []
     ancestor = candidate

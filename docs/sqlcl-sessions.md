@@ -1,6 +1,6 @@
 # Persistent SQLcl sessions
 
-A deployment command (`rollout`, `migrate`, `feature` prepare, capture, apply and `doctor --live`,
+A deployment or verification command (`release check`, `release run`, `doctor --live`,
 `compare-schema` and `compare-env`) generates many small SQLcl scripts: checks, catalog captures and
 applies. Earlier versions started SQLcl once per script. Against a remote database each start cost about
 6.5 s, mostly SQLcl's own connect-time settings replay, so start-up was most of a release's time.
@@ -65,7 +65,7 @@ staging-proof validation.
 | `SQLCL_POOL_MAX_READERS` | `2` | Read-only processes per connection, 1 to 4 |
 
 An explicit process environment value overrides the root `.env` for these two settings. For example,
-`SQLCL_PERSISTENT_SESSIONS=0 scripts/team.sh rollout ...` disables pooling for that invocation.
+`SQLCL_PERSISTENT_SESSIONS=0 scripts/team.sh release run ...` disables pooling for that invocation.
 
 ## Limits
 
