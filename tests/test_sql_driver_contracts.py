@@ -188,7 +188,8 @@ class SqlDriverContractTests(unittest.TestCase):
             contents = release._render_apply_driver(target, [step])
         self.assertIn("SET SQLBLANKLINES ON", contents)
         self.assertIn("ALTER SESSION SET CURRENT_SCHEMA = APP;", contents)
-        self.assertIn("WHENEVER SQLERROR EXIT SQL.SQLCODE", contents)
+        self.assertIn("WHENEVER SQLERROR EXIT FAILURE ROLLBACK", contents)
+        self.assertNotIn("SQL.SQLCODE", contents)
         self.assertNotIn("PLSQL_CODE_TYPE", contents)
         self.assertLess(contents.index("SET SQLBLANKLINES ON"), contents.index("RELEASE_STEP_START:01-ddl/001-update.sql"))
 

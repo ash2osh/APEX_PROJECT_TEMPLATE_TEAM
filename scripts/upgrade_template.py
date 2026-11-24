@@ -277,14 +277,10 @@ def _manifest_string_list(manifest: dict, key: str, *, pattern: bool) -> list[st
     return normalized
 
 
-def load_manifest(template_root: Path) -> dict:
-    path = template_root / MANIFEST_NAME
-    info = _lstat(path)
-    if info is not None and _is_link_or_reparse(info):
-        raise UpgradeError("template manifest cannot be a symbolic link")
+def _parse_manifest_text(raw_text: str) -> dict:
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
         raise UpgradeError(f"template manifest is missing or invalid: {exc}") from exc
     if not isinstance(manifest, dict) or type(manifest.get("schemaVersion")) is not int:
         raise UpgradeError("template manifest must be an object with integer schemaVersion")
@@ -321,6 +317,28 @@ def load_manifest(template_root: Path) -> dict:
     manifest["_templateOnlyPatterns"] = only_patterns
     manifest["_projectOwnedPaths"] = project_paths
     return manifest
+
+
+def load_manifest(template_root: Path) -> dict:
+    path = template_root / MANIFEST_NAME
+    info = _lstat(path)
+    if info is not None and _is_link_or_reparse(info):
+        raise UpgradeError("template manifest cannot be a symbolic link")
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise UpgradeError(f"template manifest is missing or invalid: {exc}") from exc
+    return _parse_manifest_text(raw_text)
+
+
+def _load_manifest_from_commit(template_root: Path, commit: object) -> dict | None:
+    if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
+        return None
+    try:
+        raw_text = run_git(template_root, "show", f"{commit}:{MANIFEST_NAME}")
+        return _parse_manifest_text(raw_text)
+    except UpgradeError:
+        return None
 
 
 def tracked_template_files(template_root: Path) -> dict[str, str]:
@@ -828,15 +846,43 @@ def main(argv: list[str] | None = None) -> int:
             if release or args.apex_release or lock.get("apexRelease"):
                 metadata["apexRelease"] = release or args.apex_release or lock.get("apexRelease")
             template_owned, placeholders = classify(template_root, manifest)
-            # Validate the existing lock against the project's local manifest (if present) so paths retired by
-            # the incoming template can still be removed cleanly, then verify new_lock against the incoming manifest.
+            # Validate the existing lock against the project's local manifest (if present), or failing that
+            # against the template manifest at lock["commit"], so paths retired by the incoming template can
+            # still be removed cleanly while failing closed when no prior manifest verifies ownership.
+            prior_manifest: dict | None = None
             if (project_root / MANIFEST_NAME).is_file():
-                validate_lock_ownership(lock, load_manifest(project_root))
+                prior_manifest = load_manifest(project_root)
             else:
-                for path in lock.get("files", {}):
-                    if protected_project_path(path):
-                        raise UpgradeError(f"{LOCK_NAME} path is protected project data: {path}")
+                prior_manifest = _load_manifest_from_commit(template_root, lock.get("commit"))
+            if prior_manifest is not None:
+                validate_lock_ownership(lock, prior_manifest)
+            else:
+                lock_files = lock.get("files", {})
+                if lock_files:
+                    incoming_patterns = manifest["_templateOwnedPatterns"]
+                    protected_placeholders = set(placeholders) | {
+                        "PROJECT.md",
+                        "AGENTS.project.md",
+                        ".agents/rules/project.md",
+                        ".agents/styles/personal.md",
+                        ".agent-skills.json",
+                        "TODO.md",
+                    }
+                    for path in lock_files:
+                        if protected_project_path(path) or path in protected_placeholders:
+                            raise UpgradeError(f"{LOCK_NAME} path is protected project data: {path}")
+                        if not any(pattern.match(path) for pattern in incoming_patterns):
+                            raise UpgradeError(
+                                f"{LOCK_NAME} path cannot be verified without local {MANIFEST_NAME} "
+                                f"or template commit {lock.get('commit', '<unknown>')}: {path}"
+                            )
             actions, new_lock = plan_upgrade(project_root, template_root, template_owned, placeholders, lock)
+            if prior_manifest is None and any(action.kind == "DELETE" for action in actions):
+                retired = ", ".join(action.path for action in actions if action.kind == "DELETE")
+                raise UpgradeError(
+                    f"cannot delete retired {LOCK_NAME} paths without local {MANIFEST_NAME} "
+                    f"or template commit {lock.get('commit', '<unknown>')}: {retired}"
+                )
             validate_lock_ownership({"files": new_lock}, manifest)
             for action in actions:
                 print(f"{action.kind} {action.path}")

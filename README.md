@@ -331,7 +331,7 @@ for the privilege and command limits.
 | `backup-ords` | Exports each ORDS schema (`ORDS_SCHEMA`, optional) to `database/<SCHEMA>/ords/schema.sql` and replaces only that folder. `--schema` narrows the run; an ORDS-only schema is selectable. |
 | `publish <id>` | Imports to shared DEV only (`scripts/team.sh publish <id> [--env dev]` or `--file ...`). Requires the app folder, descriptor, and live app parsing schema to agree and be listed, then uses that schema's connection. Full mode keeps the app-wide drift guard; selected-page mode verifies a fresh merged snapshot. Promotion to staging or production uses `deploy`. |
 | `deploy <id> --env staging\|prod` | Confirms promotion to staging or production or prints a DBA runbook (`--manual`). The descriptor's `parsingSchema` selects the same-named staging or production entry. Confirmation shows the schema and connection; imports restore previously active automations. |
-| `release` (`collect`, `check`, `run`) | Each entry in `release.json` (`ddl`, `code`, `ords`, `verify`) names its target schema; `release check` and `release run` open 1 SQLcl session per schema. |
+| `release` (`collect`, `check`, `run`) | Each entry in `release.json` (`ddl`, `code`, `ords`, `verify`) names its target schema; single-schema applies run in 1 SQLcl session, while multi-schema applies execute phase-ordered (`01-ddl/` -> `02-code/` -> `03-ords/`) consecutive same-schema batches. |
 | `compare-schema` | Requires `--schema` when more than one schema is configured and compares that schema across the selected environments. |
 | `compare-env` | Requires `--schema` when more than one schema is configured and compares that schema's full catalog across the selected environments. |
 
@@ -403,7 +403,8 @@ releases/2026-11-24-order-fixes/
 4. **Execute zero-prompt:** `scripts/team.sh release run <bundle> --env <dev|staging|prod> --confirm-target <db_unique_name>`
    requires `--confirm-target` matching live `DB_UNIQUE_NAME` with **zero stdin
    prompts**, backs up existing touched objects into `scratch/backups/`,
-   applies `01-ddl/` -> `02-code/` -> `03-ords/` in 1 SQLcl session per schema,
+   applies `01-ddl/` -> `02-code/` -> `03-ords/` in phase order (1 session for
+   single-schema bundles; consecutive same-schema batches for multi-schema),
    checks before/after invalid objects (failing only on *new* invalids), runs
    `04-verify/`, deploys listed `apps` via `scripts/deploy.sh --yes --confirm-target`,
    writes a markdown report to `scratch/release-reports/`, and locks `release.json`

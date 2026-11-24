@@ -214,7 +214,7 @@ def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path
             outputs.append(output)
             ran = RAN_SUMMARY.search(output)
             outcome = OUTCOME_SUMMARY.search(output)
-            if ran:
+            if ran and outcome:
                 reported_modules += 1
                 tests_run += int(ran.group(1))
             if outcome:
@@ -236,6 +236,8 @@ def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path
         f"errors={errors}; incomplete_modules={incomplete}",
         flush=True,
     )
+    if incomplete > 0 and code in (0, 1):
+        code = 2
     return code, "".join(outputs)
 
 

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "b6c2fb30f65ed31359d03e8593c1da49b51aff51",
+  "coreCommit": "bd6d69f279bf37d17625fa1ecc9005969fe1982e",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -44,7 +44,7 @@
     },
     {
       "path": "scripts/ci_run_tests.py",
-      "sha256": "62dca518b5e3bbf5ef0b176e6c00c10f3d71b78fda7c6609ebd7d41004447357",
+      "sha256": "1d9ba3ef63f0dffad374342a9fe0ace95dab7cd7df186ddd83038d476302d4f1",
       "executable": false
     },
     {
@@ -214,7 +214,7 @@
     },
     {
       "path": "scripts/path_utils.py",
-      "sha256": "a8e4d9516687643631a4c632c3bf1e128a90c7347dd115bcb9741a3753e337a9",
+      "sha256": "3655b672106630dcf8a428574803edaa4bf4a08457b03be490119c427df398a4",
       "executable": false
     },
     {
@@ -239,7 +239,7 @@
     },
     {
       "path": "scripts/release.py",
-      "sha256": "cb7b019eb94bfc4fff4c5702a0ba9419a71c554ebc78bc4233297af10191bb75",
+      "sha256": "c7a470dde6ebee2491f5cd4ef7ad0a632d081122e99c6cc2309822432f8c7bbe",
       "executable": false
     },
     {
@@ -264,7 +264,7 @@
     },
     {
       "path": "scripts/show_targets.py",
-      "sha256": "d6969178286fd6f780650f111d63c80786fd0e3a972ed73e0bc9c08a54ab88b8",
+      "sha256": "308bc170e184f40fb387f661209c0ada214ac3ac7aadc837ddc49c9a05029a0a",
       "executable": false
     },
     {
@@ -479,7 +479,7 @@
     },
     {
       "path": "tests/test_ci_run_tests.py",
-      "sha256": "e361e455d54bbe86254be2c9518c8afe8f19c1e1fb28c37b4cc80d3c7fff79fa",
+      "sha256": "cbfdf1911accc64a1b2c852daf36b301abe875458f4029f1e451a01e523aba72",
       "executable": false
     },
     {
@@ -659,7 +659,7 @@
     },
     {
       "path": "tests/test_path_utils.py",
-      "sha256": "9287fa559d49e9befc6f8b295354048865811885bf932d12d312f9636af8ca03",
+      "sha256": "eadcf42b246a323fd5e24479a61501e19069da11e72bd8288a8bd0bd7f74858a",
       "executable": false
     },
     {
@@ -689,7 +689,7 @@
     },
     {
       "path": "tests/test_release.py",
-      "sha256": "3cb39267a84fc7dd99e6a4571a5d9d7998b6882f71cb90df49ed89879f476e64",
+      "sha256": "973eccad74ec4a179aa5c094853bc739ff5402b66c0b562f377ad8c9746135bf",
       "executable": false
     },
     {
@@ -709,12 +709,12 @@
     },
     {
       "path": "tests/test_show_targets.py",
-      "sha256": "d2822226ccef02f1ab18aab8910868744901e2272d0d211e8c8655af35ef4c15",
+      "sha256": "8a58f02150bb6e65e4d4c1e092ed7a7caad46ac64e4eaf28c9eea8c36f593df5",
       "executable": false
     },
     {
       "path": "tests/test_sql_driver_contracts.py",
-      "sha256": "59a19f87620b61fe329dd7e8d0eb1acef8ae946a23fbc7292d2ce9996bcf0c16",
+      "sha256": "84f804c2048d23fe85e489315c0c1f2938a4385de8635f29ac91e7408af72c6e",
       "executable": false
     },
     {

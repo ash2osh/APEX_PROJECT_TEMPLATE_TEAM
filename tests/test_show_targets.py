@@ -55,11 +55,11 @@ class ShowTargetsTests(unittest.TestCase):
         self.assertEqual(1, len(report["notes"]))
         self.assertIn("APPCODE is in CODE_SCHEMA but not in the dev migration profile", report["notes"][0])
         self.assertIn(
-            "DEV reads work, but `migrate` applies as the migration owner, so `new-migration` and "
-            "`migrate` refuse a migration folder for APPCODE.",
+            "DEV reads work, but `release` applies as the migration owner, so `release check` and "
+            "`release run` refuse a release bundle for APPCODE.",
             report["notes"][0],
         )
-        self.assertNotIn("new-migration cannot start a folder", str(report["notes"]))
+        self.assertNotIn("new-migration", str(report["notes"]))
 
         text = show_targets.render_text(report)
         self.assertIn("REFUSED: schema APPCODE is not listed in MIGRATION_SCHEMA for dev", text)

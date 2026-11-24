@@ -36,7 +36,7 @@ Commands:
                                               Export live source into 02-code/ and update release.json
   release check <bundle> --env <dev|staging|prod> [--format text|json] [--allow-existing]
                                               Read-only preflight, patch SHA-256 check, and plan preview
-  release run <bundle> --env <dev|staging|prod> --confirm-target <db_unique_name> [--allow-existing] [--skip-backup] [--report <path>]
+  release run <bundle> --env <dev|staging|prod> --confirm-target <db_unique_name> [--allow-existing] [--skip-backup] [--allow-unbacked-ords] [--report <path>]
                                               Zero-prompt 6-step backup, apply, invalid-delta check, verify, app deploy, report & prod lock
   dev-test [--plan|--run|--report RUN_ID|--cleanup RUN_ID] [--env dev] [--schema NAME]
            [--suite FILE] [--scenario ID ...] [--format text|json|markdown]

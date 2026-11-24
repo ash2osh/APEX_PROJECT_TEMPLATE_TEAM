@@ -108,7 +108,7 @@ class TeamPowerShellReleaseCommandTests(unittest.TestCase):
         for option in (
             "release list", "release new <slug>", "release collect <bundle>",
             "release check <bundle>", "release run <bundle>", "--confirm-target <db_unique_name>",
-            "--report <path>",
+            "--allow-unbacked-ords", "--report <path>",
         ):
             with self.subTest(shell="bash", option=option):
                 self.assertIn(option, bash_result.stdout)
@@ -129,7 +129,7 @@ class TeamPowerShellReleaseCommandTests(unittest.TestCase):
                 for option in (
                     "release list", "release new <slug>", "release collect <bundle>",
                     "release check <bundle>", "release run <bundle>", "--confirm-target <db_unique_name>",
-                    "--report <path>",
+                    "--allow-unbacked-ords", "--report <path>",
                 ):
                     self.assertIn(option, result.stdout)
 

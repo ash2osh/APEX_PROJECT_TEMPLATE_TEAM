@@ -281,7 +281,7 @@ class ParallelRunTests(unittest.TestCase):
         console = io.TextIOWrapper(captured, encoding="cp1252", errors="strict")
         try:
             with contextlib.redirect_stdout(console):
-                code, output = run_parallel(1, lambda _modules: (0, "captured: \ufffd\n"), self.tests)
+                code, output = run_parallel(1, lambda _modules: (0, "captured: \ufffd\nRan 1 test in 0.0s\nOK\n"), self.tests)
                 console.flush()
         except UnicodeEncodeError as error:
             self.fail(f"parallel runner leaked a console encoding error: {error}")
@@ -289,6 +289,17 @@ class ParallelRunTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("captured: \ufffd", output)
         self.assertIn(b"captured: \\ufffd", captured.getvalue())
+
+    def test_parallel_run_fails_when_a_module_exits_zero_without_unittest_outcome(self):
+        def module_runner(modules):
+            if modules == ["test_mid"]:
+                return 0, "no unittest summary\n"
+            return 0, "ok\nRan 1 test in 0.1s\nOK\n"
+
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            code, _ = run_parallel(2, module_runner, self.tests)
+        self.assertEqual(code, 2)
+        self.assertIn("incomplete_modules=1", printed.getvalue())
 
     def test_main_runs_in_parallel_only_for_a_whole_run_with_more_than_one_job(self):
         calls = []
