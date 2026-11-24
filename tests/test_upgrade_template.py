@@ -1379,6 +1379,26 @@ class UpgradeTemplateTests(unittest.TestCase):
         self.assertIn("not template-owned", result.stderr)
         self.assertEqual(outside.read_text(encoding="utf-8"), "keep me\n")
 
+    def test_retired_template_owned_paths_in_old_lock_upgrade_cleanly(self) -> None:
+        self.adopt()
+        self.assertIn("docs/migration-rules.md", self.lock()["files"])
+        retired_manifest = {
+            **MANIFEST,
+            "upstream": str(self.template),
+            "templateOwned": ["AGENTS.md", "scripts/**", "template-manifest.json"],
+        }
+        self.release_v2(
+            {"template-manifest.json": json.dumps(retired_manifest)},
+            removed=("docs/migration-rules.md",),
+        )
+
+        result = self.upgrade()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("DELETE docs/migration-rules.md", result.stdout)
+        self.assertFalse((self.project / "docs/migration-rules.md").exists())
+        self.assertNotIn("docs/migration-rules.md", self.lock()["files"])
+
     @unittest.skipIf(os.name == "nt", "symbolic links need privileges on Windows")
     def test_symbolic_link_in_template_is_refused(self) -> None:
         (self.template / "scripts/link.sh").symlink_to("tool.sh")
