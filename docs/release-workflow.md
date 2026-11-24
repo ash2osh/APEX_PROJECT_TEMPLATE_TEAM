@@ -91,12 +91,13 @@ scripts/team.sh release check 2026-11-24-order-fixes --env prod --format json
 - Verifies target identity (`DB_UNIQUE_NAME`, `CON_NAME`, `USER`) per schema, honoring optional `.env` `MIGRATION_*` / `STAGING_MIGRATION_*` / `PROD_MIGRATION_*` override triples when set.
 - Checks `ALL_OBJECTS` for `mode: "new"` entries (refuses if object already exists unless `--allow-existing`).
 - Fetches live `ALL_SOURCE` normalized SHA-256 for `mode: "patch"` entries and refuses on mismatch, saving a unified diff under `scratch/release-diffs/`.
-- When `apps` is non-empty, refuses `--env dev` (use `scripts/team.sh publish <app_id> --env dev` for DEV) and verifies `scripts/deploy.sh` and `apps/*/<app_id>/deployments/<env>.json` exist for `staging` / `prod`.
+- When `apps` is non-empty, refuses `--env dev` (use `scripts/team.sh publish <app_id> --env dev` for DEV), verifies `scripts/deploy.sh` and `apps/*/<app_id>/deployments/<env>.json` exist for `staging` / `prod`, and runs `scripts/publish_app.sh <app_id> --env <env> --describe` offline to validate the deployment descriptor before any SQL runs.
+- Warns clearly when any `03-ords/` step lacks declared schema `objects` that exist on the target (reporting `unbackedOrdsSteps` and `ordsBackupCoverage: "unbacked"` in `--format json`).
 - Prints the ordered execution plan.
 
 ### Steps 3–6 — Execute (`release run`)
 
-`release run` executes **with zero interactive prompts** (`--confirm-target <db_unique_name>` is always required and checked case-insensitively against live `DB_UNIQUE_NAME` before any write; for `--env prod`, it also verifies before any backup or SQL runs that `releases/<slug>/release.json` is tracked in Git and `releases/<slug>/` has a clean working tree with a 40-character `HEAD` SHA):
+`release run` executes **with zero interactive prompts** (`--confirm-target <db_unique_name>` is always required and checked case-insensitively against live `DB_UNIQUE_NAME` before any write; for `--env prod`, it also verifies before any backup or SQL runs that `releases/<slug>/release.json` and every referenced step file are tracked in Git at a 40-character `HEAD` SHA with no modified, untracked, or Git-ignored paths under `releases/<slug>/`, and executes strictly the bytes pinned at that `HEAD` commit so post-check disk edits cannot slip into the tagged release):
 
 ```bash
 scripts/team.sh release run 2026-11-24-order-fixes \
@@ -106,14 +107,26 @@ scripts/team.sh release run 2026-11-24-order-fixes \
 ```
 
 Execution sequence:
-- **Step 3 — Backup target objects:** unless `--skip-backup` is passed, uses 1 SQLcl session per schema to export `DBMS_METADATA.GET_DDL` / `ALL_SOURCE` for existing touched objects (`02-code/`, explicit `objects` on `01-ddl/` and `03-ords/`, and auto-extracted `01-ddl/` references) into `scratch/backups/<slug>-<env>-<YYYYMMDDTHHMMSSZ>/`, recording both `expectedObjects` and backed-up `objects` in `backup-manifest.json`. Fails closed before apply if any existing object returns empty DDL/source.
+- **Step 3 — Backup target objects:** unless `--skip-backup` is passed, uses 1 SQLcl session per schema to export `DBMS_METADATA.GET_DDL` / `ALL_SOURCE` for existing touched objects (`02-code/`, explicit `objects` on `01-ddl/` and `03-ords/`, and auto-extracted `01-ddl/` references) into `scratch/backups/<slug>-<env>-<YYYYMMDDTHHMMSSZ>/`, verifying the backup session's live `DB_UNIQUE_NAME`, `CON_NAME`, `USER`, and `CURRENT_SCHEMA` match preflight before writing any backup files, and recording `expectedObjects`, `objects`, `ordsBackupCoverage`, and `unbackedOrdsSteps` in `backup-manifest.json`. Fails closed before apply if any existing object returns empty DDL/source, or if any `03-ords/` step has no backed-up object coverage (unless `--allow-unbacked-ords` is passed, in which case `ordsBackupCoverage: "unbacked"` is recorded explicitly in `backup-manifest.json` and the markdown report).
 - **Step 4 — Apply & invalid-object delta:** records `ALL_OBJECTS WHERE status <> 'VALID'` for every touched schema before any DDL runs. Every apply session begins with an in-session PL/SQL target guard (`DB_UNIQUE_NAME`, `CON_NAME`, `USER`, `CURRENT_SCHEMA`, raising `-20901` on mismatch), and every `mode: "patch"` step runs an in-session PL/SQL live-source guard immediately before its SQL executes (raising `-20902` if the target object changed between preflight and apply). Executes **all `01-ddl/` across all schemas before any `02-code/`, and all `02-code/` before any `03-ords/`**. Within each phase (`01-ddl/` -> `02-code/` -> `03-ords/`), steps execute in exact `release.json` order and consecutive same-schema steps share 1 SQLcl session (`ALTER SESSION SET CURRENT_SCHEMA = <SCHEMA>` when login differs from schema). After all apply phases finish, `ALL_ERRORS` and post-apply invalid objects are checked per schema (so cross-schema invalidations resolved by a later `02-code/` compile do not false-fail, while genuine new invalids still fail); runs `04-verify/` smoke scripts if present.
 - **Step 5 — Optional APEX app deploy:** for each numeric app ID in `"apps"` (`staging` and `prod` only), invokes `scripts/deploy.sh <app_id> --env <env> --yes --confirm-target <db_unique_name>` non-interactively.
-- **Step 6 — Report & prod lock:** writes a markdown report to `scratch/release-reports/<slug>-<env>-<YYYYMMDDTHHMMSSZ>.md` (or `--report <path>`), including on failures after preflight starts (`Outcome: FAILED`, error, backup path, completed phases, and timings). When `--env prod` succeeds, creates Git tag `release/<slug>` at the verified `HEAD` release commit before updating `release.json` to `"status": "deployed"` with `deployedAt`, `deployedTarget`, and `deployedCommit`.
+- **Step 6 — Report & prod lock:** writes a markdown report to `scratch/release-reports/<slug>-<env>-<YYYYMMDDTHHMMSSZ>.md` (or `--report <path>`), including `ordsBackupCoverage`, `unbackedOrdsSteps` (if any), and failure details when an error occurs after preflight starts (`Outcome: FAILED`, error, backup path, completed phases, and timings). When `--env prod` succeeds, creates Git tag `release/<slug>` at the verified `HEAD` release commit before updating `release.json` to `"status": "deployed"` with `deployedAt`, `deployedTarget`, and `deployedCommit`.
 
 ## Upgrading existing downstream projects
 
-Existing downstream projects created from pre-Lean-Release template locks (with retired migration/rollout paths in `.template-lock.json`) must upgrade in **two steps**:
+Existing 26.2 downstream projects created from pre-Lean-Release template locks (with retired migration/rollout paths in `.template-lock.json`) must upgrade in **two steps** using the published bridge commit `70dd338` (`70dd338c46c24b6265e6feca5f2cd65a5bdac423`, PR #142):
 
-1. First upgrade to the template commit/tag that includes the retired-lock-path upgrader compatibility fix (`scripts/upgrade_template.py`).
-2. Once the local upgrader is updated, run `scripts/team.sh upgrade-template` again to upgrade to the Lean 6-step release bundle release.
+1. First upgrade to bridge commit `70dd338` so your local `scripts/upgrade_template.py` validates retired lock paths against your local manifest:
+
+   ```bash
+   scripts/team.sh upgrade-template --ref 70dd338c46c24b6265e6feca5f2cd65a5bdac423 --apex-release 26.2 --dry-run
+   scripts/team.sh upgrade-template --ref 70dd338c46c24b6265e6feca5f2cd65a5bdac423 --apex-release 26.2
+   ```
+
+   Review and commit the bridge upgrade (resolving any `.template-new` files).
+2. Once the local upgrader is updated, upgrade to `main` for the Lean 6-step release bundle release:
+
+   ```bash
+   scripts/team.sh upgrade-template --ref main --apex-release 26.2 --dry-run
+   scripts/team.sh upgrade-template --ref main --apex-release 26.2
+   ```

@@ -114,6 +114,21 @@ class BundleStep:
     objects: tuple[tuple[str, str], ...] = ()
 
 
+@dataclass(frozen=True)
+class PreflightResult:
+    manifest: dict[str, Any]
+    steps: list[BundleStep]
+    schemas: list[str]
+    apps: list[int]
+    targets: dict[str, Target]
+    identities: dict[str, dict[str, str]]
+    fetched_by_schema: dict[str, dict[tuple[str, str], dict[str, Any]]]
+    failures: list[str]
+    pinned_step_texts: dict[str, str] | None
+    ords_backup_coverage: str
+    unbacked_ords_steps: list[str]
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -286,12 +301,10 @@ def _write_json_lf(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
-def _read_json_object(path: Path, label: str) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise ReleaseError(f"{label} is missing or not a regular file: {path}")
+def _parse_json_object_bytes(raw_bytes: bytes, label: str) -> dict[str, Any]:
     try:
-        raw = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        raw = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise ReleaseError(f"cannot read {label}: {exc}") from exc
     if raw.startswith("\ufeff"):
         raise ReleaseError(f"{label} must not contain a UTF-8 BOM")
@@ -302,6 +315,16 @@ def _read_json_object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ReleaseError(f"{label} must be a JSON object")
     return data
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise ReleaseError(f"{label} is missing or not a regular file: {path}")
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        raise ReleaseError(f"cannot read {label}: {exc}") from exc
+    return _parse_json_object_bytes(raw_bytes, label)
 
 
 def _safe_bundle_dir(repo_root: Path, slug: str) -> Path:
@@ -318,7 +341,13 @@ def _safe_bundle_dir(repo_root: Path, slug: str) -> Path:
     return candidate
 
 
-def _resolve_section_file(bundle_dir: Path, subdir: str, raw_file: str) -> tuple[str, Path]:
+def _resolve_section_file(
+    bundle_dir: Path,
+    subdir: str,
+    raw_file: str,
+    *,
+    require_on_disk: bool = True,
+) -> tuple[str, Path]:
     if not isinstance(raw_file, str) or not raw_file.strip() or "\\" in raw_file or raw_file.startswith("/"):
         raise ReleaseError(f"invalid relative bundle file path: {raw_file!r}")
     norm = raw_file.strip()
@@ -336,7 +365,9 @@ def _resolve_section_file(bundle_dir: Path, subdir: str, raw_file: str) -> tuple
         rel = relative_to_root(candidate, section_root)
     except (PathReparseError, ValueError) as exc:
         raise ReleaseError(f"file path escapes {subdir}/: {raw_file!r}") from exc
-    if candidate.is_symlink() or not candidate.is_file():
+    if candidate.is_symlink():
+        raise ReleaseError(f"referenced bundle file cannot be a symlink: {subdir}/{rel.as_posix()}")
+    if require_on_disk and not candidate.is_file():
         raise ReleaseError(f"referenced bundle file is missing or not a regular file: {subdir}/{rel.as_posix()}")
     return f"{subdir}/{rel.as_posix()}", candidate
 
@@ -361,6 +392,13 @@ def compute_source_sha256(text: str) -> str:
     return hashlib.sha256(normalize_source_for_hash(text).encode("utf-8")).hexdigest()
 
 
+def _resolve_env_file(repo_root: Path, environ: Mapping[str, str] | None) -> Path | None:
+    if environ is not None:
+        return None
+    env_override = os.environ.get("PROJECT_ENV_FILE")
+    return Path(env_override) if env_override else repo_root / ".env"
+
+
 def _load_env(repo_root: Path, environ: Mapping[str, str] | None) -> dict[str, str]:
     if environ is not None:
         return dict(environ)
@@ -381,9 +419,19 @@ def _resolve_schema_target(values: Mapping[str, str], environment: str, schema: 
         raise ReleaseUsageError(str(exc)) from exc
 
 
-def _load_and_validate_manifest(bundle_dir: Path, expected_slug: str) -> tuple[dict[str, Any], list[BundleStep], list[str], list[int], list[str]]:
+def _load_and_validate_manifest(
+    bundle_dir: Path,
+    expected_slug: str,
+    *,
+    manifest_override: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[BundleStep], list[str], list[int], list[str]]:
     manifest_path = bundle_dir / "release.json"
-    manifest = _read_json_object(manifest_path, f"releases/{expected_slug}/release.json")
+    if manifest_override is not None:
+        manifest = manifest_override
+        require_on_disk = False
+    else:
+        manifest = _read_json_object(manifest_path, f"releases/{expected_slug}/release.json")
+        require_on_disk = True
     if type(manifest.get("schemaVersion")) is not int or manifest["schemaVersion"] != SCHEMA_VERSION:
         raise ReleaseError(f"release.json schemaVersion must be {SCHEMA_VERSION}")
     slug = manifest.get("slug")
@@ -442,7 +490,7 @@ def _load_and_validate_manifest(bundle_dir: Path, expected_slug: str) -> tuple[d
             if not isinstance(schema, str) or ORACLE_IDENTIFIER.fullmatch(schema) is None:
                 raise ReleaseError(f"release.json '{section}[{idx}].schema' must be an uppercase Oracle identifier")
             raw_file = entry.get("file")
-            rel_file, file_path = _resolve_section_file(bundle_dir, subdir, str(raw_file or ""))
+            rel_file, file_path = _resolve_section_file(bundle_dir, subdir, str(raw_file or ""), require_on_disk=require_on_disk)
             if rel_file in seen_files:
                 raise ReleaseError(f"duplicate bundle file reference in release.json: {rel_file}")
             seen_files.add(rel_file)
@@ -496,12 +544,22 @@ def _matches_pattern(candidate: str, pattern: str) -> bool:
     return upper.startswith(pattern)
 
 
-def _check_bundle_contents(steps: Sequence[BundleStep], forbidden_patterns: Sequence[str]) -> None:
+def _check_bundle_contents(
+    steps: Sequence[BundleStep],
+    forbidden_patterns: Sequence[str],
+    *,
+    step_texts: Mapping[str, str] | None = None,
+) -> None:
     for step in steps:
-        try:
-            sql_text = step.path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ReleaseError(f"cannot read {step.rel_file} as UTF-8: {exc}") from exc
+        if step_texts is not None:
+            if step.rel_file not in step_texts:
+                raise ReleaseError(f"missing commit-pinned content for {step.rel_file}")
+            sql_text = step_texts[step.rel_file]
+        else:
+            try:
+                sql_text = step.path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ReleaseError(f"cannot read {step.rel_file} as UTF-8: {exc}") from exc
         if PLSQL_CODE_TYPE_ANY_RE.search(sql_text):
             raise ReleaseError(
                 f"{step.rel_file} contains ALTER SESSION SET PLSQL_CODE_TYPE = INTERPRETED; "
@@ -565,6 +623,36 @@ def _verify_live_identity(identity: Mapping[str, Any], target: Target) -> dict[s
             f"but --env is {target.environment}"
         )
     return observed
+
+
+def _assert_matching_session_identity(
+    observed: Mapping[str, str],
+    expected: Mapping[str, str],
+    *,
+    schema: str,
+    phase: str,
+    confirm_target: str | None = None,
+) -> None:
+    for key, label in (
+        ("db_unique_name", "DB_UNIQUE_NAME"),
+        ("con_name", "CON_NAME"),
+        ("session_user", "USER"),
+        ("current_schema", "CURRENT_SCHEMA"),
+    ):
+        obs_val = str(observed.get(key, "")).strip()
+        exp_val = str(expected.get(key, "")).strip()
+        if obs_val.upper() != exp_val.upper():
+            raise ReleaseError(
+                f"Target {label} mismatch in {phase} session for schema {schema} "
+                f"(expected {exp_val!r}, observed {obs_val!r})"
+            )
+    if confirm_target is not None:
+        obs_db = str(observed.get("db_unique_name", "")).strip()
+        if obs_db.casefold() != confirm_target.strip().casefold():
+            raise ReleaseError(
+                f"--confirm-target {confirm_target!r} does not match {phase} session DB_UNIQUE_NAME "
+                f"{obs_db!r} for schema {schema}"
+            )
 
 
 def _plsql_emit_clob_lines(var_name: str, marker: str) -> list[str]:
@@ -809,76 +897,145 @@ def _default_code_filename(schema: str, object_type: str, object_name: str) -> s
     return f"{schema.lower()}_{object_name.lower()}_{type_slug}.sql"
 
 
-def _git_head_sha(repo_root: Path) -> str:
+def _git_run(repo_root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
+    return subprocess.run(
+        ["git", "-C", str(repo_root), "-c", "core.quotepath=false", *args],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        env=env,
+        check=False,
+        timeout=10,
+    )
+
+
+def _is_git_repo(repo_root: Path) -> bool:
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=env,
-            check=False,
-            timeout=10,
-        )
+        return _git_run(repo_root, "rev-parse", "--git-dir").returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _git_head_sha(repo_root: Path) -> str:
+    try:
+        proc = _git_run(repo_root, "rev-parse", "HEAD")
     except (OSError, subprocess.SubprocessError):
         return "unknown"
-    if proc.returncode == 0 and proc.stdout.strip():
-        return proc.stdout.strip()
+    out = proc.stdout.decode("utf-8", "replace").strip()
+    if proc.returncode == 0 and out:
+        return out
     return "unknown"
 
 
+def _git_cat_file_blob(repo_root: Path, commit: str, repo_rel: str) -> bytes:
+    proc = _git_run(repo_root, "cat-file", "blob", f"{commit}:{repo_rel}")
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip() or f"exit {proc.returncode}"
+        raise ReleaseError(f"cannot read {repo_rel} from Git commit {commit[:12]}: {detail}")
+    return proc.stdout
+
+
+def _git_ignored_bundle_paths(repo_root: Path, slug: str, rel_paths: Sequence[str] = ()) -> list[str]:
+    ignored: list[str] = []
+    status_proc = _git_run(
+        repo_root,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignored=matching",
+        "--",
+        f"releases/{slug}",
+    )
+    if status_proc.returncode == 0:
+        for line in status_proc.stdout.decode("utf-8", "replace").splitlines():
+            if line.startswith("!! "):
+                path_text = line[3:].strip()
+                if path_text and path_text not in ignored:
+                    ignored.append(path_text)
+    for rel_path in rel_paths:
+        chk = _git_run(repo_root, "check-ignore", "-q", "--no-index", "--", rel_path)
+        if chk.returncode == 0 and rel_path not in ignored:
+            ignored.append(rel_path)
+    return ignored
+
+
 def _verify_prod_git_clean(repo_root: Path, slug: str) -> str:
-    env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
     try:
-        check_repo = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "--git-dir"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=env,
-            check=False,
-            timeout=10,
-        )
-        if check_repo.returncode != 0:
+        if not _is_git_repo(repo_root):
             raise ReleaseError("--env prod requires a Git repository with a committed release bundle")
         head_sha = _git_head_sha(repo_root)
         if re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None:
             raise ReleaseError(f"--env prod requires a valid 40-character Git HEAD commit SHA, got {head_sha!r}")
         rel_manifest = f"releases/{slug}/release.json"
-        tracked = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "--", rel_manifest],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=env,
-            check=False,
-            timeout=10,
-        )
+        tracked = _git_run(repo_root, "ls-files", "--error-unmatch", "--", rel_manifest)
         if tracked.returncode != 0:
             raise ReleaseError(f"--env prod requires {rel_manifest} to be tracked in Git before release")
-        status_proc = subprocess.run(
-            ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all", "--", f"releases/{slug}"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=env,
-            check=False,
-            timeout=10,
+        in_commit = _git_run(repo_root, "cat-file", "-e", f"{head_sha}:{rel_manifest}")
+        if in_commit.returncode != 0:
+            raise ReleaseError(f"--env prod requires {rel_manifest} to be committed at HEAD ({head_sha[:12]})")
+        status_proc = _git_run(
+            repo_root,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored=matching",
+            "--",
+            f"releases/{slug}",
         )
         if status_proc.returncode != 0:
-            detail = status_proc.stderr.strip() or f"exit {status_proc.returncode}"
+            detail = status_proc.stderr.decode("utf-8", "replace").strip() or f"exit {status_proc.returncode}"
             raise ReleaseError(f"git status failed for releases/{slug}: {detail}")
-        if status_proc.stdout.strip():
+        status_out = status_proc.stdout.decode("utf-8", "replace")
+        if status_out.strip():
             raise ReleaseError(
-                f"--env prod requires a clean Git working tree for releases/{slug}; "
-                f"commit or discard changes first:\n{status_proc.stdout.rstrip()}"
+                f"--env prod requires a clean Git working tree for releases/{slug} "
+                f"(no modified, untracked, or Git-ignored files); commit or remove changes first:\n{status_out.rstrip()}"
+            )
+        ignored = _git_ignored_bundle_paths(repo_root, slug, [rel_manifest])
+        if ignored:
+            raise ReleaseError(
+                f"--env prod refuses Git-ignored paths in releases/{slug}: {', '.join(ignored)}"
             )
         return head_sha
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReleaseError(f"Git verification for --env prod failed: {exc}") from exc
+
+
+def _load_pinned_prod_bundle(
+    repo_root: Path,
+    bundle_dir: Path,
+    slug: str,
+    release_commit: str,
+) -> tuple[dict[str, Any], list[BundleStep], list[str], list[int], list[str], dict[str, str]]:
+    rel_manifest = f"releases/{slug}/release.json"
+    try:
+        ignored = _git_ignored_bundle_paths(repo_root, slug, [rel_manifest])
+        if ignored:
+            raise ReleaseError(f"--env prod refuses Git-ignored paths in releases/{slug}: {', '.join(ignored)}")
+        manifest_bytes = _git_cat_file_blob(repo_root, release_commit, rel_manifest)
+        pinned_manifest = _parse_json_object_bytes(manifest_bytes, f"{release_commit[:12]}:{rel_manifest}")
+        manifest, steps, schemas, apps, forbidden_patterns = _load_and_validate_manifest(
+            bundle_dir, slug, manifest_override=pinned_manifest
+        )
+        step_repo_paths = [f"releases/{slug}/{step.rel_file}" for step in steps]
+        ignored_steps = _git_ignored_bundle_paths(repo_root, slug, step_repo_paths)
+        if ignored_steps:
+            raise ReleaseError(
+                f"--env prod refuses Git-ignored bundle files: {', '.join(ignored_steps)}"
+            )
+        pinned_step_texts: dict[str, str] = {}
+        for step in steps:
+            repo_rel = f"releases/{slug}/{step.rel_file}"
+            if _git_run(repo_root, "ls-files", "--error-unmatch", "--", repo_rel).returncode != 0:
+                raise ReleaseError(f"--env prod requires {repo_rel} to be tracked in Git before release")
+            if _git_run(repo_root, "cat-file", "-e", f"{release_commit}:{repo_rel}").returncode != 0:
+                raise ReleaseError(f"--env prod requires {repo_rel} to be committed at HEAD ({release_commit[:12]})")
+            raw_bytes = _git_cat_file_blob(repo_root, release_commit, repo_rel)
+            try:
+                pinned_step_texts[step.rel_file] = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ReleaseError(f"cannot decode {repo_rel} at {release_commit[:12]} as UTF-8: {exc}") from exc
+        return manifest, steps, schemas, apps, forbidden_patterns, pinned_step_texts
     except (OSError, subprocess.SubprocessError) as exc:
         raise ReleaseError(f"Git verification for --env prod failed: {exc}") from exc
 
@@ -1171,6 +1328,49 @@ def cmd_collect(
     return 0
 
 
+def _validate_basic_app_descriptor(path: Path, expected_app_id: int) -> None:
+    data = _read_json_object(path, path.as_posix())
+    workspace = data.get("workspace")
+    ws_name = workspace.get("name") if isinstance(workspace, dict) else None
+    if not isinstance(ws_name, str) or not ws_name.strip() or any(c in ws_name for c in "\t\r\n"):
+        raise ReleaseError("deployment workspace.name must be a non-empty single-line string")
+    app = data.get("app")
+    if not isinstance(app, dict):
+        raise ReleaseError("deployment app object is required")
+    app_id = app.get("id")
+    if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id != expected_app_id:
+        raise ReleaseError(f"deployment app.id must equal {expected_app_id}, got {app_id!r}")
+    db_sess = app.get("databaseSession")
+    parsing_schema = db_sess.get("parsingSchema") if isinstance(db_sess, dict) else None
+    if not isinstance(parsing_schema, str) or ORACLE_IDENTIFIER.fullmatch(parsing_schema) is None:
+        raise ReleaseError("deployment app.databaseSession.parsingSchema must be an uppercase Oracle identifier")
+
+
+def _write_preflight_env_file(work_dir: Path, values: Mapping[str, str]) -> Path:
+    work_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    env_path = work_dir / "preflight.env"
+    lines: list[str] = []
+    for key, val in values.items():
+        if re.fullmatch(r"[A-Z][A-Z0-9_]*", str(key)) is None:
+            continue
+        text = str(val)
+        if "\n" in text or "\r" in text:
+            continue
+        lines.append(f"{key}={text}")
+    descriptor = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(("\n".join(lines) + "\n") if lines else "")
+    return env_path
+
+
+def _step_text(step: BundleStep, step_texts: Mapping[str, str] | None) -> str:
+    if step_texts is not None:
+        if step.rel_file not in step_texts:
+            raise ReleaseError(f"missing commit-pinned content for {step.rel_file}")
+        return step_texts[step.rel_file]
+    return step.path.read_text(encoding="utf-8")
+
+
 def _preflight_bundle(
     repo_root: Path,
     slug: str,
@@ -1182,19 +1382,33 @@ def _preflight_bundle(
     runner: Callable,
     work_dir: Path,
     require_deployer: bool = True,
-) -> tuple[dict[str, Any], list[BundleStep], list[str], list[int], dict[str, Target], dict[str, dict[str, str]], dict[str, dict[tuple[str, str], dict[str, Any]]], list[str]]:
+    pinned_commit: str | None = None,
+    env_file_path: Path | None = None,
+) -> PreflightResult:
     bundle_dir = _safe_bundle_dir(repo_root, slug)
     if not bundle_dir.is_dir():
         raise ReleaseError(f"release bundle not found: releases/{slug}")
-    manifest, steps, schemas, apps, forbidden_patterns = _load_and_validate_manifest(bundle_dir, slug)
+    if pinned_commit is not None:
+        manifest, steps, schemas, apps, forbidden_patterns, pinned_step_texts = _load_pinned_prod_bundle(
+            repo_root, bundle_dir, slug, pinned_commit
+        )
+    else:
+        manifest, steps, schemas, apps, forbidden_patterns = _load_and_validate_manifest(bundle_dir, slug)
+        pinned_step_texts = None
     if manifest.get("status") == "deployed":
         raise ReleaseError(f"release bundle '{slug}' is already deployed and locked")
-    _check_bundle_contents(steps, forbidden_patterns)
+    _check_bundle_contents(steps, forbidden_patterns, step_texts=pinned_step_texts)
 
     targets: dict[str, Target] = {}
     identities: dict[str, dict[str, str]] = {}
     fetched_by_schema: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
     failures: list[str] = []
+
+    if env == "prod" and pinned_commit is None and _is_git_repo(repo_root):
+        rel_paths = [f"releases/{slug}/release.json", *(f"releases/{slug}/{s.rel_file}" for s in steps)]
+        ignored = _git_ignored_bundle_paths(repo_root, slug, rel_paths)
+        if ignored:
+            failures.append(f"--env prod refuses Git-ignored paths in releases/{slug}: {', '.join(ignored)}")
 
     items_by_schema: dict[str, list[tuple[str, str]]] = {schema: [] for schema in schemas}
     for step in steps:
@@ -1208,7 +1422,7 @@ def _preflight_bundle(
                     if pair not in items_by_schema[step.schema]:
                         items_by_schema[step.schema].append(pair)
             elif step.section == "ddl":
-                sql_text = step.path.read_text(encoding="utf-8")
+                sql_text = _step_text(step, pinned_step_texts)
                 for cand_schema, cand_type, cand_name in _extract_ddl_candidate_objects(sql_text, step.schema):
                     if cand_schema in items_by_schema:
                         pair = (cand_type, cand_name)
@@ -1262,7 +1476,7 @@ def _preflight_bundle(
                     diff_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
                     type_slug = step.object_type.lower().replace(" ", "_")
                     diff_path = diff_dir / f"{slug}-{env}-{schema}-{type_slug}-{step.object_name}.diff"
-                    proposed_text = step.path.read_text(encoding="utf-8")
+                    proposed_text = _step_text(step, pinned_step_texts)
                     diff_lines = difflib.unified_diff(
                         normalize_source_for_hash(live_text).splitlines(keepends=True),
                         normalize_source_for_hash(proposed_text).splitlines(keepends=True),
@@ -1274,6 +1488,23 @@ def _preflight_bundle(
                         f"patch baseSha256 mismatch for {schema}.{step.object_name} ({step.object_type}): "
                         f"expected {step.base_sha256[:12]}..., live {live_sha[:12]}... (diff: {diff_path.relative_to(repo_root).as_posix()})"
                     )
+
+    ords_steps = [s for s in steps if s.section == "ords"]
+    unbacked_ords_steps: list[str] = []
+    for step in ords_steps:
+        schema_fetched = fetched_by_schema.get(step.schema, {})
+        has_backed = any(
+            (schema_fetched.get(pair) or {}).get("exists") is True
+            for pair in step.objects
+        )
+        if not has_backed:
+            unbacked_ords_steps.append(step.rel_file)
+    if not ords_steps:
+        ords_backup_coverage = "not-applicable"
+    elif unbacked_ords_steps:
+        ords_backup_coverage = "unbacked"
+    else:
+        ords_backup_coverage = "covered"
 
     if apps:
         if env == "dev":
@@ -1288,20 +1519,78 @@ def _preflight_bundle(
                     + ", ".join(str(a) for a in apps)
                 )
             apps_dir = repo_root / "apps"
-            if apps_dir.is_dir():
+            publish_app_sh = repo_root / "scripts" / "publish_app.sh"
+            describe_env_file = env_file_path
+            if require_deployer and publish_app_sh.is_file() and describe_env_file is None:
+                describe_env_file = _write_preflight_env_file(work_dir, values)
+            if apps_dir.is_dir() or require_deployer:
                 for app_id in apps:
-                    matches = [
-                        p
-                        for p in apps_dir.glob(f"*/{app_id}/deployments/{env}.json")
-                        if p.is_file() and not p.is_symlink()
-                    ]
+                    matches: list[Path] = []
+                    if apps_dir.is_dir():
+                        matches = [
+                            p
+                            for p in (*apps_dir.glob(f"*/{app_id}/deployments/{env}.json"), apps_dir / str(app_id) / "deployments" / f"{env}.json")
+                            if p.is_file() and not p.is_symlink()
+                        ]
                     if not matches:
                         failures.append(
                             f"APEX app {app_id} deployment descriptor not found under "
                             f"apps/*/{app_id}/deployments/{env}.json"
                         )
+                        continue
+                    if not require_deployer:
+                        continue
+                    if publish_app_sh.is_file():
+                        child_env = {**os.environ, **{k: str(v) for k, v in values.items()}}
+                        if describe_env_file is not None:
+                            child_env["PROJECT_ENV_FILE"] = str(describe_env_file)
+                        proc = subprocess.run(
+                            [bash_command(), publish_app_sh.as_posix(), str(app_id), "--env", env, "--describe"],
+                            cwd=repo_root,
+                            env=child_env,
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=30,
+                            check=False,
+                        )
+                        if proc.returncode != 0:
+                            detail = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
+                            failures.append(f"APEX app {app_id} descriptor validation failed for --env {env}: {detail}")
+                            continue
+                        desc_lines = proc.stdout.splitlines()
+                        if len(desc_lines) != 6:
+                            failures.append(
+                                f"APEX app {app_id} --describe returned {len(desc_lines)} lines, expected 6"
+                            )
+                        elif not desc_lines[3].strip() or not desc_lines[4].strip():
+                            failures.append(
+                                f"APEX app {app_id} target connection/user is not configured for --env {env}"
+                            )
+                    else:
+                        for match_path in matches:
+                            try:
+                                _validate_basic_app_descriptor(match_path, app_id)
+                            except ReleaseError as exc:
+                                failures.append(
+                                    f"APEX app {app_id} descriptor validation failed for --env {env}: {exc}"
+                                )
 
-    return manifest, steps, schemas, apps, targets, identities, fetched_by_schema, failures
+    return PreflightResult(
+        manifest=manifest,
+        steps=steps,
+        schemas=schemas,
+        apps=apps,
+        targets=targets,
+        identities=identities,
+        fetched_by_schema=fetched_by_schema,
+        failures=failures,
+        pinned_step_texts=pinned_step_texts,
+        ords_backup_coverage=ords_backup_coverage,
+        unbacked_ords_steps=unbacked_ords_steps,
+    )
 
 
 def cmd_check(
@@ -1316,10 +1605,11 @@ def cmd_check(
 ) -> int:
     slug = _parse_bundle_slug(bundle_arg)
     values = _load_env(repo_root, environ)
+    env_file_path = _resolve_env_file(repo_root, environ)
     scratch_root = repo_root / "scratch"
     scratch_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="release-check-", dir=scratch_root) as tmp_dir:
-        _, steps, schemas, apps, targets, identities, _, failures = _preflight_bundle(
+        pre = _preflight_bundle(
             repo_root,
             slug,
             env,
@@ -1328,7 +1618,14 @@ def cmd_check(
             values=values,
             runner=runner,
             work_dir=Path(tmp_dir),
+            env_file_path=env_file_path,
         )
+    steps = pre.steps
+    schemas = pre.schemas
+    apps = pre.apps
+    targets = pre.targets
+    identities = pre.identities
+    failures = pre.failures
     plan = {
         "schemaVersion": SCHEMA_VERSION,
         "slug": slug,
@@ -1354,6 +1651,8 @@ def cmd_check(
             for s in steps
         ],
         "apps": apps,
+        "ordsBackupCoverage": pre.ords_backup_coverage,
+        "unbackedOrdsSteps": pre.unbacked_ords_steps,
         "failures": failures,
     }
     if fmt == "json":
@@ -1372,6 +1671,12 @@ def cmd_check(
             print(f"    - {s.schema}: {s.rel_file}{extra}")
         for app_id in apps:
             print(f"    - APEX app deploy: {app_id}")
+        if pre.unbacked_ords_steps:
+            print(
+                "  WARNING: ORDS backup coverage: unbacked steps: "
+                + ", ".join(pre.unbacked_ords_steps)
+                + " (release run requires --allow-unbacked-ords unless covered)"
+            )
         if failures:
             print("  FAILURES:")
             for msg in failures:
@@ -1600,13 +1905,14 @@ def _sql_step_lines(
     section_steps: Sequence[BundleStep],
     *,
     patch_sources: Mapping[tuple[str, str], str] | None = None,
+    step_texts: Mapping[str, str] | None = None,
 ) -> list[str]:
     lines: list[str] = []
     for step in section_steps:
         if step.section == "code" and step.mode == "patch" and step.object_type and step.object_name:
             if patch_sources is not None and (step.object_type, step.object_name) in patch_sources:
                 lines.extend(_patch_base_guard_lines(target, step, patch_sources[(step.object_type, step.object_name)]))
-        text = step.path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        text = _step_text(step, step_texts).replace("\r\n", "\n").replace("\r", "\n")
         lines.extend([
             "SET DEFINE OFF",
             "SET SQLBLANKLINES ON",
@@ -1671,6 +1977,7 @@ def _render_apply_driver(
     confirm_target: str | None = None,
     preflight_con_name: str | None = None,
     patch_sources: Mapping[tuple[str, str], str] | None = None,
+    step_texts: Mapping[str, str] | None = None,
 ) -> str:
     """Render 1 SQLcl driver for single-schema bundles: target guard, before-invalids, 01-ddl -> 02-code -> 03-ords, ALL_ERRORS, after-invalids."""
     ddl_steps = [s for s in schema_steps if s.section == "ddl"]
@@ -1681,11 +1988,11 @@ def _render_apply_driver(
     lines.extend(_target_identity_guard_lines(target, confirm_target=confirm_target, preflight_con_name=preflight_con_name))
     lines.extend(_before_invalids_lines(target))
     if ddl_steps:
-        lines.extend(_sql_step_lines(target, ddl_steps, patch_sources=patch_sources))
+        lines.extend(_sql_step_lines(target, ddl_steps, patch_sources=patch_sources, step_texts=step_texts))
     if code_steps:
-        lines.extend(_sql_step_lines(target, code_steps, patch_sources=patch_sources))
+        lines.extend(_sql_step_lines(target, code_steps, patch_sources=patch_sources, step_texts=step_texts))
     if ords_steps:
-        lines.extend(_sql_step_lines(target, ords_steps, patch_sources=patch_sources))
+        lines.extend(_sql_step_lines(target, ords_steps, patch_sources=patch_sources, step_texts=step_texts))
     lines.extend(_post_apply_lines(target, code_steps))
     lines.extend([driver_epilogue(True), ""])
     return "\n".join(lines)
@@ -1707,11 +2014,12 @@ def _render_batch_apply_driver(
     confirm_target: str | None = None,
     preflight_con_name: str | None = None,
     patch_sources: Mapping[tuple[str, str], str] | None = None,
+    step_texts: Mapping[str, str] | None = None,
 ) -> str:
     """Render 1 SQLcl apply driver for one consecutive schema batch within a phase."""
     lines = _apply_session_prelude(target)
     lines.extend(_target_identity_guard_lines(target, confirm_target=confirm_target, preflight_con_name=preflight_con_name))
-    lines.extend(_sql_step_lines(target, batch_steps, patch_sources=patch_sources))
+    lines.extend(_sql_step_lines(target, batch_steps, patch_sources=patch_sources, step_texts=step_texts))
     lines.extend(["PROMPT RELEASE_BATCH_APPLIED", driver_epilogue(True), ""])
     return "\n".join(lines)
 
@@ -1725,7 +2033,12 @@ def _render_post_apply_driver(target: Target, code_steps: Sequence[BundleStep]) 
     return "\n".join(lines)
 
 
-def _render_verify_driver(target: Target, verify_steps: Sequence[BundleStep]) -> str:
+def _render_verify_driver(
+    target: Target,
+    verify_steps: Sequence[BundleStep],
+    *,
+    step_texts: Mapping[str, str] | None = None,
+) -> str:
     lines = [
         "SET ECHO OFF",
         "SET FEEDBACK OFF",
@@ -1740,7 +2053,7 @@ def _render_verify_driver(target: Target, verify_steps: Sequence[BundleStep]) ->
         lines.append(f"ALTER SESSION SET CURRENT_SCHEMA = {target.schema};")
     lines.append("SET TRANSACTION READ ONLY;")
     for step in verify_steps:
-        text = step.path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        text = _step_text(step, step_texts).replace("\r\n", "\n").replace("\r", "\n")
         lines.extend([
             "SET DEFINE OFF",
             f"PROMPT RELEASE_VERIFY_START:{step.rel_file}",
@@ -1800,6 +2113,7 @@ def cmd_run(
     confirm_target: str,
     allow_existing: bool,
     skip_backup: bool,
+    allow_unbacked_ords: bool = False,
     report_arg: str | None,
     environ: Mapping[str, str] | None,
     runner: Callable,
@@ -1809,6 +2123,7 @@ def cmd_run(
         raise ReleaseUsageError("--confirm-target <db_unique_name> is required and must be non-empty")
     slug = _parse_bundle_slug(bundle_arg)
     values = _load_env(repo_root, environ)
+    env_file_path = _resolve_env_file(repo_root, environ)
     scratch_root = repo_root / "scratch"
     scratch_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     stamp = _utc_stamp()
@@ -1819,7 +2134,8 @@ def cmd_run(
     else:
         report_path = scratch_root / "release-reports" / f"{slug}-{env}-{stamp}.md"
 
-    release_commit = _verify_prod_git_clean(repo_root, slug) if env == "prod" else _git_head_sha(repo_root)
+    pinned_commit = _verify_prod_git_clean(repo_root, slug) if env == "prod" else None
+    release_commit = pinned_commit if pinned_commit is not None else _git_head_sha(repo_root)
 
     manifest: dict[str, Any] = {"status": "draft"}
     schemas: list[str] = []
@@ -1830,6 +2146,8 @@ def cmd_run(
     timings: dict[str, float] = {}
     completed_phases: list[str] = []
     backup_label = "not-started"
+    ords_backup_coverage = "unknown"
+    unbacked_ords_steps: list[str] = []
     tag_status = "not-applicable"
     deployed_apps: list[int] = []
     outcome = "FAILED"
@@ -1844,7 +2162,7 @@ def cmd_run(
             preflight_started = True
             t0 = time.monotonic()
             try:
-                manifest, steps, schemas, apps, targets, identities, fetched_by_schema, failures = _preflight_bundle(
+                pre = _preflight_bundle(
                     repo_root,
                     slug,
                     env,
@@ -1854,9 +2172,22 @@ def cmd_run(
                     runner=runner,
                     work_dir=tmp_path / "preflight",
                     require_deployer=(app_deployer is _invoke_app_deploy),
+                    pinned_commit=pinned_commit,
+                    env_file_path=env_file_path,
                 )
             finally:
                 timings["preflight"] = round(time.monotonic() - t0, 3)
+            manifest = pre.manifest
+            steps = pre.steps
+            schemas = pre.schemas
+            apps = pre.apps
+            targets = pre.targets
+            identities = pre.identities
+            fetched_by_schema = pre.fetched_by_schema
+            failures = pre.failures
+            pinned_step_texts = pre.pinned_step_texts
+            ords_backup_coverage = pre.ords_backup_coverage
+            unbacked_ords_steps = list(pre.unbacked_ords_steps)
             before_invalids = {schema: set() for schema in schemas}
             after_invalids = {schema: set() for schema in schemas}
             new_invalids = {schema: [] for schema in schemas}
@@ -1877,7 +2208,16 @@ def cmd_run(
             try:
                 if skip_backup:
                     backup_label = "skipped"
+                    if any(s.section == "ords" for s in steps):
+                        ords_backup_coverage = "skipped"
                 else:
+                    if unbacked_ords_steps and not allow_unbacked_ords:
+                        raise ReleaseError(
+                            "03-ords/ step(s) lack ORDS metadata backup coverage: "
+                            + ", ".join(unbacked_ords_steps)
+                            + ". Declare touched schema 'objects' in release.json if backing PL/SQL/objects, "
+                            + "or pass --allow-unbacked-ords when ORDS metadata backup is not available."
+                        )
                     backup_dir = scratch_root / "backups" / f"{slug}-{env}-{stamp}"
                     backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
                     backup_label = backup_dir.relative_to(repo_root).as_posix()
@@ -1898,13 +2238,20 @@ def cmd_run(
                                 })
                             if not existing_items:
                                 continue
-                            _, backed = _fetch_schema_objects(
+                            backup_identity, backed = _fetch_schema_objects(
                                 runner,
                                 targets[schema],
                                 tmp_path / f"backup-{schema}",
                                 existing_items,
                                 include_ddl=True,
                                 environ=values,
+                            )
+                            _assert_matching_session_identity(
+                                backup_identity,
+                                identities[schema],
+                                schema=schema,
+                                phase="backup",
+                                confirm_target=confirm_target,
                             )
                             for obj_type, obj_name in existing_items:
                                 obj = backed.get((obj_type, obj_name)) or {}
@@ -1934,6 +2281,8 @@ def cmd_run(
                                 "environment": env,
                                 "expectedObjects": expected_objects,
                                 "objects": backed_up,
+                                "ordsBackupCoverage": ords_backup_coverage,
+                                "unbackedOrdsSteps": unbacked_ords_steps,
                             },
                         )
                 completed_phases.append("backup")
@@ -1975,6 +2324,7 @@ def cmd_run(
                         confirm_target=confirm_target,
                         preflight_con_name=identities[schema].get("con_name"),
                         patch_sources=patch_sources_by_schema[schema],
+                        step_texts=pinned_step_texts,
                     )
                     output = _run_driver(
                         runner,
@@ -1986,7 +2336,14 @@ def cmd_run(
                         environ=values,
                     )
                     before_payload = _extract_framed_json(output, "BEFORE_INVALID")
-                    _verify_live_identity(before_payload.get("identity") or {}, targets[schema])
+                    before_identity = _verify_live_identity(before_payload.get("identity") or {}, targets[schema])
+                    _assert_matching_session_identity(
+                        before_identity,
+                        identities[schema],
+                        schema=schema,
+                        phase="apply",
+                        confirm_target=confirm_target,
+                    )
                     before_invalids[schema] = _invalid_set(before_payload.get("invalids") or [])
                     post_payload = _extract_framed_json(output, "POST_APPLY")
                     _check_post_apply(schema, post_payload)
@@ -2004,7 +2361,14 @@ def cmd_run(
                             environ=values,
                         )
                         before_payload = _extract_framed_json(output, "BEFORE_INVALID")
-                        _verify_live_identity(before_payload.get("identity") or {}, targets[schema])
+                        before_identity = _verify_live_identity(before_payload.get("identity") or {}, targets[schema])
+                        _assert_matching_session_identity(
+                            before_identity,
+                            identities[schema],
+                            schema=schema,
+                            phase="preconditions",
+                            confirm_target=confirm_target,
+                        )
                         before_invalids[schema] = _invalid_set(before_payload.get("invalids") or [])
 
                     # 4b. Execute strictly by phase (ddl -> code -> ords), grouping consecutive same-schema steps.
@@ -2020,6 +2384,7 @@ def cmd_run(
                                 confirm_target=confirm_target,
                                 preflight_con_name=identities[batch_schema].get("con_name"),
                                 patch_sources=patch_sources_by_schema[batch_schema],
+                                step_texts=pinned_step_texts,
                             )
                             _run_driver(
                                 runner,
@@ -2057,7 +2422,7 @@ def cmd_run(
                     verify_steps = [s for s in steps if s.schema == schema and s.section == "verify"]
                     if not verify_steps:
                         continue
-                    driver_sql = _render_verify_driver(targets[schema], verify_steps)
+                    driver_sql = _render_verify_driver(targets[schema], verify_steps, step_texts=pinned_step_texts)
                     output = _run_driver(
                         runner,
                         targets[schema],
@@ -2113,6 +2478,13 @@ def cmd_run(
             report_lines.extend([
                 f"- **Commit:** `{release_commit}`",
                 f"- **Backup:** `{backup_label}`",
+                f"- **ORDS backup coverage:** `{ords_backup_coverage}`",
+            ])
+            if unbacked_ords_steps:
+                report_lines.append(
+                    "- **Unbacked ORDS steps:** " + ", ".join(f"`{s}`" for s in unbacked_ords_steps)
+                )
+            report_lines.extend([
                 f"- **Git tag:** `{tag_status}`",
                 f"- **Completed phases:** {', '.join(completed_phases) if completed_phases else 'none'}",
                 f"- **Apps deployed:** {', '.join(str(a) for a in deployed_apps) if deployed_apps else 'none'}",
@@ -2181,6 +2553,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--confirm-target", required=True, help="Live DB_UNIQUE_NAME of target database")
     p_run.add_argument("--allow-existing", action="store_true")
     p_run.add_argument("--skip-backup", action="store_true")
+    p_run.add_argument("--allow-unbacked-ords", action="store_true", help="Proceed when 03-ords/ steps have no backed-up object coverage")
     p_run.add_argument("--report", dest="report_arg", help="Optional custom report path")
 
     return parser
@@ -2232,6 +2605,7 @@ def main(
                 confirm_target=args.confirm_target,
                 allow_existing=args.allow_existing,
                 skip_backup=args.skip_backup,
+                allow_unbacked_ords=args.allow_unbacked_ords,
                 report_arg=args.report_arg,
                 environ=environ,
                 runner=runner,

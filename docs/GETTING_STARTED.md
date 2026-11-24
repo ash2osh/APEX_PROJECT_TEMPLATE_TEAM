@@ -304,6 +304,23 @@ A project that finished its cleanup earlier gets these changes with
 - `--source` and a lock `upstream` that embed credentials are refused. Use a Git credential
   helper or an SSH key instead, and remove the credential from `.template-lock.json`.
 
+### Upgrade a pre-Lean 26.2 downstream project (two-step bridge)
+
+If your 26.2 downstream project has a pre-Lean `.template-lock.json` listing
+retired migration/rollout paths, upgrade in two steps so the local
+`scripts/upgrade_template.py` accepts retired paths before Lean Release removes them:
+
+```bash
+# Step 1: upgrade to the published bridge commit (PR #142: 70dd338)
+scripts/team.sh upgrade-template --ref 70dd338c46c24b6265e6feca5f2cd65a5bdac423 --apex-release 26.2 --dry-run
+scripts/team.sh upgrade-template --ref 70dd338c46c24b6265e6feca5f2cd65a5bdac423 --apex-release 26.2
+# Review and commit Step 1, then run Step 2:
+scripts/team.sh upgrade-template --ref main --apex-release 26.2 --dry-run
+scripts/team.sh upgrade-template --ref main --apex-release 26.2
+```
+
+See [release-workflow.md](release-workflow.md#upgrading-existing-downstream-projects) for details.
+
 ## 5. Save your SQLcl connection
 
 SQLcl keeps the password in its own secure store. Save one connection for your

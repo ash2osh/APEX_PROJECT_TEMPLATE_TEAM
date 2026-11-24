@@ -1307,6 +1307,373 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertIn("- **Completed phases:** preflight, backup, apply, verify", report_text)
         self.assertIn("- `apps`:", report_text)
 
+    def test_prod_rejects_git_ignored_files_and_executes_pinned_commit_bytes(self) -> None:
+        subprocess.run(["git", "init"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        (self.root / ".gitignore").write_text("*.ignored.sql\nscratch/\n", encoding="utf-8", newline="\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Init"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+
+        self.assertEqual(self._run_cli(["new", "prod-pin-rel"])[0], 0)
+        bundle = self.root / "releases" / "prod-pin-rel"
+        (bundle / "01-ddl" / "001-t.sql").write_text("CREATE TABLE COMMITTED_T (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        (bundle / "01-ddl" / "secret.ignored.sql").write_text("SELECT 1 FROM DUAL;\n", encoding="utf-8", newline="\n")
+        (bundle / "02-code" / "orders_pkg.sql").write_text("CREATE OR REPLACE " + DEV_PKG_SOURCE + "/\n", encoding="utf-8", newline="\n")
+        (bundle / "04-verify" / "001-check.sql").write_text("SELECT 'COMMITTED_VERIFY' FROM DUAL;\n", encoding="utf-8", newline="\n")
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "prod-pin-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [
+                {"schema": "APP_CODE", "file": "01-ddl/001-t.sql"},
+                {"schema": "APP_CODE", "file": "01-ddl/secret.ignored.sql"},
+            ],
+            "code": [{
+                "schema": "APP_CODE",
+                "file": "02-code/orders_pkg.sql",
+                "objectType": "PACKAGE BODY",
+                "objectName": "ORDERS_PKG",
+                "mode": "replace",
+            }],
+            "ords": [],
+            "verify": [{"schema": "APP_CODE", "file": "04-verify/001-check.sql"}],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+        # Force-add ignored file and commit so even committed-via-(-f) ignored files are caught.
+        subprocess.run(["git", "add", "-f", "releases/prod-pin-rel"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Add with ignored"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+
+        code, out, _ = self._run_cli(["check", "prod-pin-rel", "--env", "prod"])
+        self.assertEqual(code, 1)
+        self.assertIn("Git-ignored", out)
+        code, _, err = self._run_cli(["run", "prod-pin-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("Git-ignored", err)
+        self.assertEqual(self._read_state().get("appliedSteps", []), [])
+
+        # Remove ignored file from manifest and commit cleanly; also add an untracked ignored file to test rejection.
+        manifest["ddl"] = [{"schema": "APP_CODE", "file": "01-ddl/001-t.sql"}]
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+        subprocess.run(["git", "rm", "-f", "releases/prod-pin-rel/01-ddl/secret.ignored.sql"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "add", "releases/prod-pin-rel/release.json"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Clean prod-pin-rel"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        release_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True, text=True, encoding="utf-8"
+        ).stdout.strip()
+
+        (bundle / "01-ddl" / "untracked.ignored.sql").write_text("SELECT 1 FROM DUAL;\n", encoding="utf-8", newline="\n")
+        self._write_state(self.default_state)
+        code, _, err = self._run_cli(["run", "prod-pin-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("clean Git working tree", err)
+        self.assertEqual(self._read_state().get("calls", []), [])
+        (bundle / "01-ddl" / "untracked.ignored.sql").unlink()
+
+        # Mutate tracked SQL files on disk *after* preflight starts (during inventory runner call):
+        # apply and verify must execute ONLY the release_commit bytes!
+        self._write_state(self.default_state)
+        mutated = False
+
+        def mutate_disk_after_preflight(t, driver_path, run_dir, environment=None, phase="apply"):
+            nonlocal mutated
+            res = release.run_sqlcl(t, driver_path, run_dir, environment=environment, phase=phase)
+            if not mutated and run_dir.name.startswith("preflight-"):
+                mutated = True
+                (bundle / "01-ddl" / "001-t.sql").write_text("CREATE TABLE EVIL_UNCOMMITTED (ID NUMBER);\n", encoding="utf-8", newline="\n")
+                (bundle / "02-code" / "orders_pkg.sql").write_text(
+                    "CREATE OR REPLACE PACKAGE BODY ORDERS_PKG AS FUNCTION evil RETURN NUMBER IS BEGIN RETURN 9; END; END ORDERS_PKG;\n/\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                (bundle / "04-verify" / "001-check.sql").write_text("SELECT 'EVIL_VERIFY' FROM DUAL;\n", encoding="utf-8", newline="\n")
+            return res
+
+        code, _, err = self._run_cli_with_runner(
+            ["run", "prod-pin-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"],
+            runner=mutate_disk_after_preflight,
+        )
+        self.assertEqual(code, 0, err)
+        self.assertTrue(mutated)
+        calls = self._read_state()["calls"]
+        apply_drivers = [c["driver"] for c in calls if c["driverName"] == "release-apply.sql"]
+        verify_drivers = [c["driver"] for c in calls if c["driverName"] == "release-verify.sql"]
+        self.assertEqual(len(apply_drivers), 1)
+        self.assertEqual(len(verify_drivers), 1)
+        self.assertIn("COMMITTED_T", apply_drivers[0])
+        self.assertNotIn("EVIL_UNCOMMITTED", apply_drivers[0])
+        self.assertNotIn("FUNCTION evil", apply_drivers[0])
+        self.assertIn("COMMITTED_VERIFY", verify_drivers[0])
+        self.assertNotIn("EVIL_VERIFY", verify_drivers[0])
+        tagged_sha = subprocess.run(
+            ["git", "rev-list", "-n", "1", "release/prod-pin-rel"],
+            cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True, text=True, encoding="utf-8",
+        ).stdout.strip()
+        self.assertEqual(tagged_sha, release_commit)
+
+    def test_backup_session_identity_mismatch_aborts_before_writing_or_applying(self) -> None:
+        self.assertEqual(self._run_cli(["new", "backup-id-rel"])[0], 0)
+        bundle = self.root / "releases" / "backup-id-rel"
+        (bundle / "02-code" / "orders_pkg.sql").write_text("CREATE OR REPLACE " + DEV_PKG_SOURCE + "/\n", encoding="utf-8", newline="\n")
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "backup-id-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [],
+            "code": [{
+                "schema": "APP_CODE",
+                "file": "02-code/orders_pkg.sql",
+                "objectType": "PACKAGE BODY",
+                "objectName": "ORDERS_PKG",
+                "mode": "replace",
+            }],
+            "ords": [],
+            "verify": [],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        for field, bad_val, expected_msg in (
+            ("db_unique_name", "WRONG_BACKUP_DB", "DB_UNIQUE_NAME mismatch in backup session"),
+            ("con_name", "WRONG_PDB", "CON_NAME mismatch in backup session"),
+        ):
+            self._write_state(self.default_state)
+
+            def flip_during_backup(t, driver_path, run_dir, environment=None, phase="apply", field_name=field, bad_value=bad_val):
+                if run_dir.name.startswith("backup-"):
+                    st = self._read_state()
+                    st["envs"]["staging"]["identity"][field_name] = bad_value
+                    self._write_state(st)
+                    try:
+                        return release.run_sqlcl(t, driver_path, run_dir, environment=environment, phase=phase)
+                    finally:
+                        st = self._read_state()
+                        st["envs"]["staging"]["identity"] = self.default_state["envs"]["staging"]["identity"]
+                        self._write_state(st)
+                return release.run_sqlcl(t, driver_path, run_dir, environment=environment, phase=phase)
+
+            code, _, err = self._run_cli_with_runner(
+                ["run", "backup-id-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"],
+                runner=flip_during_backup,
+            )
+            self.assertEqual(code, 1)
+            self.assertIn(expected_msg, err)
+            self.assertEqual(self._read_state().get("appliedSteps", []), [])
+            backup_sql_files = list((self.root / "scratch" / "backups").rglob("*.sql"))
+            self.assertEqual(backup_sql_files, [])
+
+    def test_ords_unbacked_steps_fail_closed_and_allow_unbacked_ords_records_coverage(self) -> None:
+        self.assertEqual(self._run_cli(["new", "ords-unbacked-rel"])[0], 0)
+        bundle = self.root / "releases" / "ords-unbacked-rel"
+        (bundle / "03-ords" / "001-module.sql").write_text(
+            "BEGIN ORDS.DEFINE_MODULE(p_module_name => 'demo', p_base_path => '/demo/'); END;\n/\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "ords-unbacked-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [],
+            "code": [],
+            "ords": [{"schema": "APP_CODE", "file": "03-ords/001-module.sql"}],
+            "verify": [],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        # release check warns and reports unbackedOrdsSteps
+        code, out, _ = self._run_cli(["check", "ords-unbacked-rel", "--env", "staging"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("ORDS backup coverage: unbacked steps: 03-ords/001-module.sql", out)
+
+        code, out_json, _ = self._run_cli(["check", "ords-unbacked-rel", "--env", "staging", "--format", "json"])
+        self.assertEqual(code, 0)
+        plan = json.loads(out_json)
+        self.assertEqual(plan["ordsBackupCoverage"], "unbacked")
+        self.assertEqual(plan["unbackedOrdsSteps"], ["03-ords/001-module.sql"])
+
+        # release run without --allow-unbacked-ords fails closed before apply
+        code, _, err = self._run_cli(["run", "ords-unbacked-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("lack ORDS metadata backup coverage", err)
+        self.assertIn("03-ords/001-module.sql", err)
+        self.assertEqual(self._read_state().get("appliedSteps", []), [])
+
+        # release run --allow-unbacked-ords succeeds and records explicit unbacked status in backup-manifest + report
+        code, out, err = self._run_cli([
+            "run", "ords-unbacked-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ", "--allow-unbacked-ords",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("succeeded", out)
+        self.assertEqual(self._read_state().get("appliedSteps", []), ["03-ords/001-module.sql"])
+
+        backups = sorted((self.root / "scratch" / "backups").glob("ords-unbacked-rel-staging-*"))
+        self.assertEqual(len(backups), 1)
+        bmanifest = json.loads((backups[0] / "backup-manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(bmanifest["ordsBackupCoverage"], "unbacked")
+        self.assertEqual(bmanifest["unbackedOrdsSteps"], ["03-ords/001-module.sql"])
+
+        reports = sorted((self.root / "scratch" / "release-reports").glob("ords-unbacked-rel-staging-*.md"))
+        self.assertGreaterEqual(len(reports), 1)
+        report_text = reports[-1].read_text(encoding="utf-8")
+        self.assertIn("- **ORDS backup coverage:** `unbacked`", report_text)
+        self.assertIn("`03-ords/001-module.sql`", report_text)
+
+    def test_app_descriptor_validated_via_publish_app_describe_during_preflight(self) -> None:
+        self.assertEqual(self._run_cli(["new", "app-desc-rel"])[0], 0)
+        bundle = self.root / "releases" / "app-desc-rel"
+        (bundle / "01-ddl" / "001-t.sql").write_text("CREATE TABLE APP_DESC_T (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "app-desc-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [{"schema": "APP_CODE", "file": "01-ddl/001-t.sql"}],
+            "code": [],
+            "ords": [],
+            "verify": [],
+            "apps": [130],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        app_dir = self.root / "apps" / "APP_CODE" / "130"
+        (app_dir / "deployments").mkdir(parents=True)
+        (app_dir / "application.apx").write_text("app DEMO (\n  name: Demo\n)\n", encoding="utf-8", newline="\n")
+        (self.scripts_dir / "deploy.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n")
+        (self.scripts_dir / "publish_app.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'app_id="$1"; shift\n'
+            'env_name=""\n'
+            'while [ "$#" -gt 0 ]; do case "$1" in --env) env_name="$2"; shift 2;; *) shift;; esac; done\n'
+            'repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"\n'
+            'python3 - "$repo_root/apps/APP_CODE/$app_id/deployments/$env_name.json" "$app_id" <<\'PY\'\n'
+            'import json, sys\n'
+            'd = json.loads(open(sys.argv[1], encoding="utf-8").read())\n'
+            'assert d["workspace"]["name"] and d["app"]["id"] == int(sys.argv[2])\n'
+            'print("/tmp/app")\n'
+            'print(d["workspace"]["name"])\n'
+            'print(d["app"]["databaseSession"]["parsingSchema"])\n'
+            'print("stage_conn")\n'
+            'print("APP_LOGIN")\n'
+            'print("staging")\n'
+            'PY\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        # Malformed staging.json fails in release check and release run preflight before any SQL apply
+        (app_dir / "deployments" / "staging.json").write_text('{"bad": true}\n', encoding="utf-8", newline="\n")
+        code, out, _ = self._run_cli(["check", "app-desc-rel", "--env", "staging"])
+        self.assertEqual(code, 1)
+        self.assertIn("descriptor validation failed", out)
+
+        code, _, err = self._run_cli(["run", "app-desc-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("descriptor validation failed", err)
+        self.assertEqual(self._read_state().get("appliedSteps", []), [])
+        self.assertFalse((self.root / "scratch" / "backups").exists())
+
+        # Valid staging.json passes check
+        (app_dir / "deployments" / "staging.json").write_text(
+            json.dumps({
+                "workspace": {"name": "STAGE_WS"},
+                "app": {"id": 130, "databaseSession": {"parsingSchema": "APP_CODE"}},
+            }) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        code, out, err = self._run_cli(["check", "app-desc-rel", "--env", "staging"])
+        self.assertEqual(code, 0, out + err)
+
+    def test_real_publish_app_describe_rejects_malformed_descriptor(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        if not (repo_root / "scripts" / "publish_app.sh").is_file() or not (repo_root / "template-manifest.json").is_file():
+            self.skipTest("requires full template scripts/publish_app.sh and template-manifest.json")
+
+        import shutil
+
+        for name in (
+            "deploy.sh",
+            "publish_app.sh",
+            "load_env.sh",
+            "sqlcl_safe.sh",
+            "validate_app_source.py",
+            "path_utils.py",
+            "deployment_descriptor.py",
+            "template_release.py",
+        ):
+            src = repo_root / "scripts" / name
+            if src.is_file():
+                shutil.copy2(src, self.scripts_dir / name)
+        shutil.copy2(repo_root / "template-manifest.json", self.root / "template-manifest.json")
+
+        self.assertEqual(self._run_cli(["new", "real-desc-rel"])[0], 0)
+        bundle = self.root / "releases" / "real-desc-rel"
+        (bundle / "01-ddl" / "001-t.sql").write_text("CREATE TABLE REAL_DESC_T (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "real-desc-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [{"schema": "APP_CODE", "file": "01-ddl/001-t.sql"}],
+            "code": [],
+            "ords": [],
+            "verify": [],
+            "apps": [130],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        app_dir = self.root / "apps" / "APP_CODE" / "130"
+        (app_dir / "deployments").mkdir(parents=True)
+        (app_dir / "application.apx").write_text("app DEMO (\n  name: Demo\n)\n", encoding="utf-8", newline="\n")
+
+        # Malformed staging.json (wrong app.id) fails via real publish_app.sh --describe before any SQL runs
+        (app_dir / "deployments" / "staging.json").write_text(
+            json.dumps({
+                "workspace": {"name": "STAGE_WS"},
+                "app": {"id": 999, "databaseSession": {"parsingSchema": "APP_CODE"}},
+            }) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        code, out, _ = self._run_cli(["check", "real-desc-rel", "--env", "staging"])
+        self.assertEqual(code, 1)
+        self.assertIn("descriptor validation failed", out)
+
+        code, _, err = self._run_cli(["run", "real-desc-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("descriptor validation failed", err)
+        self.assertEqual(self._read_state().get("appliedSteps", []), [])
+        self.assertFalse((self.root / "scratch" / "backups").exists())
+
+        # Valid staging.json passes release check
+        (app_dir / "deployments" / "staging.json").write_text(
+            json.dumps({
+                "workspace": {"name": "STAGE_WS"},
+                "app": {"id": 130, "databaseSession": {"parsingSchema": "APP_CODE"}},
+            }) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        code, out, err = self._run_cli(["check", "real-desc-rel", "--env", "staging"])
+        self.assertEqual(code, 0, out + err)
+
 
 if __name__ == "__main__":
     unittest.main()
