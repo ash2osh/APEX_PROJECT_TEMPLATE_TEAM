@@ -267,10 +267,10 @@
     },
     "docs/migration-rules.md": {
       "status": "intended",
-      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow. Both lines document the physical-target writer lock and receipt recheck. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows E2E): both document the shared-database staging rehearsal limit and new-migration's schema-folder layout. Follow-up 2026-11-20 (outside review): both say --phase both usually exits 1 for an applied folder and that an empty preconditions list cannot fail. Follow-up 2026-11-21 (table triggers and sequences): both state the DEV read order (code, then tables, then migration profile). Review 2026-11-23: Both document pooled sessions. The 26.2 rehearsal metrics remain release-specific. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented.",
+      "reason": "26.2 documents dedicated owner profiles, rehearsal metrics, selected-target attempt handling and the feature-first selection rules. 26.1 keeps its own attempt policy and release workflow. Both lines document the physical-target writer lock and receipt recheck. Rechecked 2026-11-19 on the review-fix branch: the shared changes (targets command, Daily choices, backup carry-over, local-readiness docs) are in both lines. Follow-up 2026-11-20 (Windows E2E): both document the shared-database staging rehearsal limit and new-migration's schema-folder layout. Follow-up 2026-11-20 (outside review): both say --phase both usually exits 1 for an applied folder and that an empty preconditions list cannot fail. Follow-up 2026-11-21 (table triggers and sequences): both state the DEV read order (code, then tables, then migration profile). Review 2026-11-23: Both document pooled sessions. The 26.2 rehearsal metrics remain release-specific. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented. Both lines separately bound the boundary preconditions and payload after review.",
       "blobs": [
-        "5608cbfc1de5608bec10731e97e681a54d7baf0b",
-        "cbd3cefb6410bf0643f976b482594c4ebab7bc01"
+        "e99dc6eb49849034d3ca223e56bb5814e3254a3c",
+        "3b7c3addc7c75ffffd85e2c1bb61580bdbb3b1c3"
       ]
     },
     "docs/publish-rules.md": {
@@ -771,10 +771,10 @@
     },
     "tests/test_migrate_cli.py": {
       "status": "intended",
-      "reason": "26.2 keeps the selected-target attempt policy with its own test (test_receipt_for_another_environment_does_not_block_selected_apply), while 26.1 keeps the fail-closed every-chain policy decided on 2026-10-20. Both lines cover confirmation-time replay, lock contention and lease reuse. Review 2026-11-23: Both test initial preflight reuse under a confirmed rollout-owned lease. Their surrounding profile and migration fixtures remain release-specific. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented.",
+      "reason": "26.2 keeps the selected-target attempt policy with its own test (test_receipt_for_another_environment_does_not_block_selected_apply), while 26.1 keeps the fail-closed every-chain policy decided on 2026-10-20. Both lines cover confirmation-time replay, lock contention and lease reuse. Review 2026-11-23: Both test initial preflight reuse under a confirmed rollout-owned lease. Their surrounding profile and migration fixtures remain release-specific. Review 2026-11-24: The staging performance updates were reviewed across both release lines; the existing release-specific contracts and fixtures remain as documented. Both lines separately bound the boundary preconditions and payload after review.",
       "blobs": [
-        "7a3c62eafc2da9c250bf86a6af495aaaeaa030b4",
-        "2ff0b7cf5afc79d0b8c3c12b3cc149dcbeb93a5e"
+        "84b4ae772f38cc5e7217f0d44a511698f2bd9942",
+        "4dcf8b6755ed1785c80379555203b5b81dc3678d"
       ]
     },
     "tests/test_migration_checks.py": {
