@@ -107,9 +107,49 @@ if "RELEASE_FETCH_BEGIN" in driver:
     sys.exit(0)
 
 if "RELEASE_BEFORE_INVALID_BEGIN" in driver and "RELEASE_POST_APPLY_BEGIN" in driver:
+    import hashlib
+    def _norm_sha(text: str) -> str:
+        cleaned = re.sub(
+            r"(?im)^[ \t]*ALTER[ \t]+SESSION[ \t]+SET[ \t]+PLSQL_CODE_TYPE[ \t]*=[ \t]*INTERPRETED[ \t]*;?[ \t]*\r?\n?",
+            "",
+            text.replace("\r\n", "\n").replace("\r", "\n"),
+        )
+        lines = [line.rstrip() for line in cleaned.split("\n")]
+        while lines and lines[0] == "":
+            lines.pop(0)
+        while lines and lines[-1] == "":
+            lines.pop()
+        norm = ("\n".join(lines) + "\n") if lines else ""
+        return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+    db_m = re.search(r"SYS_CONTEXT\('USERENV','DB_UNIQUE_NAME'\)\)\s*<>\s*UPPER\('([^']+)'\)", driver)
+    if db_m and db_m.group(1).upper() != identity.get("db_unique_name", "").upper():
+        print(f"ORA-20901: Target DB_UNIQUE_NAME mismatch (expected {db_m.group(1)}, observed {identity.get('db_unique_name')})")
+        sys.exit(1)
+    con_m = re.search(r"NVL\(SYS_CONTEXT\('USERENV','CON_NAME'\), 'NON-CDB'\)\)\s*<>\s*UPPER\('([^']+)'\)", driver)
+    if con_m and con_m.group(1).upper() != identity.get("con_name", "NON-CDB").upper():
+        print(f"ORA-20901: Target CON_NAME mismatch (expected {con_m.group(1)}, observed {identity.get('con_name')})")
+        sys.exit(1)
+    usr_m = re.search(r"UPPER\(USER\)\s*<>\s*UPPER\('([^']+)'\)", driver)
+    if usr_m and usr_m.group(1).upper() != identity.get("session_user", "").upper():
+        print(f"ORA-20901: Target USER mismatch")
+        sys.exit(1)
+    sch_m = re.search(r"UPPER\(SYS_CONTEXT\('USERENV','CURRENT_SCHEMA'\)\)\s*<>\s*UPPER\('([^']+)'\)", driver)
+    if sch_m and sch_m.group(1).upper() != identity.get("current_schema", "").upper():
+        print(f"ORA-20901: Target CURRENT_SCHEMA mismatch")
+        sys.exit(1)
+    for gm in re.finditer(r"-- RELEASE_PATCH_GUARD objectType=([^\n]+) objectName=([^\n ]+) baseSha256=([0-9a-f]{64})", driver):
+        g_type, g_name, g_sha = gm.group(1).strip(), gm.group(2).strip(), gm.group(3)
+        rec = env_state.get("objects", {}).get(f"{g_type}:{g_name}")
+        live_txt = "" if rec is None else (rec.get("source") or rec.get("ddl") or "")
+        if rec is None or _norm_sha(live_txt) != g_sha:
+            print(f"ORA-20902: Patch base source changed between preflight and apply for {g_type} {g_name}")
+            sys.exit(1)
     if env_state.get("failDdl"):
         print("ORA-00955: name is already used by an existing object")
         sys.exit(1)
+    state.setdefault("appliedSteps", []).extend(re.findall(r"PROMPT RELEASE_STEP_START:([^\n]+)", driver))
+    Path(state_path).write_text(json.dumps(state), encoding="utf-8")
     before_payload = {"identity": identity, "invalids": env_state.get("beforeInvalids", [])}
     post_payload = {"errors": env_state.get("codeErrors", []), "invalids": env_state.get("afterInvalids", [])}
     print("RELEASE_BEFORE_INVALID_BEGIN")
@@ -131,9 +171,49 @@ if "RELEASE_BEFORE_INVALID_BEGIN" in driver:
     sys.exit(0)
 
 if "RELEASE_BATCH_APPLIED" in driver:
+    import hashlib
+    def _norm_sha_b(text: str) -> str:
+        cleaned = re.sub(
+            r"(?im)^[ \t]*ALTER[ \t]+SESSION[ \t]+SET[ \t]+PLSQL_CODE_TYPE[ \t]*=[ \t]*INTERPRETED[ \t]*;?[ \t]*\r?\n?",
+            "",
+            text.replace("\r\n", "\n").replace("\r", "\n"),
+        )
+        lines = [line.rstrip() for line in cleaned.split("\n")]
+        while lines and lines[0] == "":
+            lines.pop(0)
+        while lines and lines[-1] == "":
+            lines.pop()
+        norm = ("\n".join(lines) + "\n") if lines else ""
+        return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+    db_m = re.search(r"SYS_CONTEXT\('USERENV','DB_UNIQUE_NAME'\)\)\s*<>\s*UPPER\('([^']+)'\)", driver)
+    if db_m and db_m.group(1).upper() != identity.get("db_unique_name", "").upper():
+        print(f"ORA-20901: Target DB_UNIQUE_NAME mismatch")
+        sys.exit(1)
+    con_m = re.search(r"NVL\(SYS_CONTEXT\('USERENV','CON_NAME'\), 'NON-CDB'\)\)\s*<>\s*UPPER\('([^']+)'\)", driver)
+    if con_m and con_m.group(1).upper() != identity.get("con_name", "NON-CDB").upper():
+        print(f"ORA-20901: Target CON_NAME mismatch")
+        sys.exit(1)
+    usr_m = re.search(r"UPPER\(USER\)\s*<>\s*UPPER\('([^']+)'\)", driver)
+    if usr_m and usr_m.group(1).upper() != identity.get("session_user", "").upper():
+        print(f"ORA-20901: Target USER mismatch")
+        sys.exit(1)
+    sch_m = re.search(r"UPPER\(SYS_CONTEXT\('USERENV','CURRENT_SCHEMA'\)\)\s*<>\s*UPPER\('([^']+)'\)", driver)
+    if sch_m and sch_m.group(1).upper() != identity.get("current_schema", "").upper():
+        print(f"ORA-20901: Target CURRENT_SCHEMA mismatch")
+        sys.exit(1)
+    for gm in re.finditer(r"-- RELEASE_PATCH_GUARD objectType=([^\n]+) objectName=([^\n ]+) baseSha256=([0-9a-f]{64})", driver):
+        g_type, g_name, g_sha = gm.group(1).strip(), gm.group(2).strip(), gm.group(3)
+        rec = env_state.get("objects", {}).get(f"{g_type}:{g_name}")
+        live_txt = "" if rec is None else (rec.get("source") or rec.get("ddl") or "")
+        if rec is None or _norm_sha_b(live_txt) != g_sha:
+            print(f"ORA-20902: Patch base source changed between preflight and apply for {g_type} {g_name}")
+            sys.exit(1)
     if env_state.get("failDdl"):
         print("ORA-00955: name is already used by an existing object")
         sys.exit(1)
+    state.setdefault("appliedSteps", []).extend(re.findall(r"PROMPT RELEASE_STEP_START:([^\n]+)", driver))
+    Path(state_path).write_text(json.dumps(state), encoding="utf-8")
     print("RELEASE_BATCH_APPLIED")
     sys.exit(0)
 
@@ -301,7 +381,7 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertIn("baseSha256=", out)
 
         bundle = self.root / "releases" / "patch-rel"
-        code_file = bundle / "02-code" / "orders_pkg_package_body.sql"
+        code_file = bundle / "02-code" / "app_code_orders_pkg_package_body.sql"
         self.assertTrue(code_file.is_file())
         content = code_file.read_text(encoding="utf-8")
         self.assertNotIn("PLSQL_CODE_TYPE", content)
@@ -319,7 +399,7 @@ class ReleaseBundleTests(unittest.TestCase):
             "--object", "VIEW:ORDERS_V", "--mode", "new",
         ])
         self.assertEqual(code, 0, err)
-        view_sql = (bundle / "02-code" / "orders_v_view.sql").read_text(encoding="utf-8")
+        view_sql = (bundle / "02-code" / "app_code_orders_v_view.sql").read_text(encoding="utf-8")
         self.assertNotIn("PLSQL_CODE_TYPE", view_sql)
         self.assertIn("CREATE OR REPLACE FORCE VIEW", view_sql)
 
@@ -442,9 +522,10 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertTrue((backups[0] / "APP_CODE.PACKAGE_BODY.ORDERS_PKG.sql").is_file())
 
         # Report created
-        reports = list((self.root / "scratch" / "release-reports").glob("run-rel-staging-*.md"))
-        self.assertEqual(len(reports), 1)
-        report_text = reports[0].read_text(encoding="utf-8")
+        reports = sorted((self.root / "scratch" / "release-reports").glob("run-rel-staging-*.md"))
+        self.assertGreaterEqual(len(reports), 1)
+        report_text = reports[-1].read_text(encoding="utf-8")
+        self.assertIn("- **Outcome:** SUCCEEDED", report_text)
         self.assertIn("before_invalid=1, after_invalid=1, new_invalid=0", report_text)
 
         # Verify apply driver used ALTER SESSION SET CURRENT_SCHEMA, WHENEVER SQLERROR EXIT SQL.SQLCODE, and no PLSQL_CODE_TYPE
@@ -467,7 +548,10 @@ class ReleaseBundleTests(unittest.TestCase):
         ]
         state["calls"] = []
         self._write_state(state)
-        code, _, err = self._run_cli(["run", "run-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"])
+        code, _, err = self._run_cli(
+            ["run", "run-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"],
+            app_deployer=fake_deploy,
+        )
         self.assertEqual(code, 1)
         self.assertIn("New invalid objects appeared", err)
 
@@ -756,7 +840,7 @@ class ReleaseBundleTests(unittest.TestCase):
             "--object", "TRIGGER:TRG_ENABLED", "--mode", "new",
         ])
         self.assertEqual(code, 0, err)
-        enabled_sql = (self.root / "releases" / "trg-rel" / "02-code" / "trg_enabled_trigger.sql").read_text(encoding="utf-8")
+        enabled_sql = (self.root / "releases" / "trg-rel" / "02-code" / "app_code_trg_enabled_trigger.sql").read_text(encoding="utf-8")
         self.assertNotIn("ALTER TRIGGER", enabled_sql)
         self.assertTrue(enabled_sql.endswith("\n/\n"))
         self.assertEqual(enabled_sql.count("\n/"), 1)
@@ -766,7 +850,7 @@ class ReleaseBundleTests(unittest.TestCase):
             "--object", "TRIGGER:TRG_DISABLED", "--mode", "new",
         ])
         self.assertEqual(code, 0, err)
-        disabled_sql = (self.root / "releases" / "trg-rel" / "02-code" / "trg_disabled_trigger.sql").read_text(encoding="utf-8")
+        disabled_sql = (self.root / "releases" / "trg-rel" / "02-code" / "app_code_trg_disabled_trigger.sql").read_text(encoding="utf-8")
         self.assertIn('ALTER TRIGGER "APP_CODE"."TRG_DISABLED" DISABLE;', disabled_sql)
         self.assertTrue(disabled_sql.endswith("DISABLE;\n"))
 
@@ -800,6 +884,428 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertEqual(len(logs), 1)
         self.assertIn("ORA-00955", logs[0].read_text(encoding="utf-8"))
         self.assertIn(str(logs[0]), err)
+
+    def _run_cli_with_runner(
+        self,
+        argv: list[str],
+        *,
+        runner,
+        app_deployer=None,
+        environ: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        proc_env = self._env()
+        kwargs: dict = {"environ": dict(BASE_ENV if environ is None else environ), "runner": runner}
+        if app_deployer is not None:
+            kwargs["app_deployer"] = app_deployer
+        with (
+            mock.patch.dict(os.environ, proc_env, clear=False),
+            mock.patch("builtins.input", side_effect=AssertionError("release must never call input()")),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = release.main(["--repo-root", str(self.root), *argv], **kwargs)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_in_session_guard_aborts_if_db_unique_name_or_patch_source_changes_after_preflight(self) -> None:
+        # Verify both _render_apply_driver and _render_batch_apply_driver emit the -20901 target guard
+        # and -20902 patch guard before DDL/code executes.
+        target = release.Target("staging", "stage_conn", "APP_LOGIN", "APP_CODE", "staging")
+        with tempfile.TemporaryDirectory() as tmp:
+            patch_file = Path(tmp) / "p.sql"
+            patch_file.write_text("CREATE OR REPLACE " + DEV_PKG_SOURCE + "/\n", encoding="utf-8", newline="\n")
+            step = release.BundleStep(
+                section="code",
+                schema="APP_CODE",
+                rel_file="02-code/p.sql",
+                path=patch_file,
+                object_type="PACKAGE BODY",
+                object_name="ORDERS_PKG",
+                mode="patch",
+                base_sha256=release.compute_source_sha256(TARGET_PKG_SOURCE),
+            )
+            for rendered in (
+                release._render_apply_driver(
+                    target,
+                    [step],
+                    confirm_target="STAGEDB_UNQ",
+                    preflight_con_name="STAGEPDB",
+                    patch_sources={("PACKAGE BODY", "ORDERS_PKG"): TARGET_PKG_SOURCE},
+                ),
+                release._render_batch_apply_driver(
+                    target,
+                    [step],
+                    confirm_target="STAGEDB_UNQ",
+                    preflight_con_name="STAGEPDB",
+                    patch_sources={("PACKAGE BODY", "ORDERS_PKG"): TARGET_PKG_SOURCE},
+                ),
+            ):
+                self.assertIn("SYS_CONTEXT('USERENV','DB_UNIQUE_NAME')", rendered)
+                self.assertIn("SYS_CONTEXT('USERENV','CON_NAME')", rendered)
+                self.assertIn("UPPER(USER)", rendered)
+                self.assertIn("SYS_CONTEXT('USERENV','CURRENT_SCHEMA')", rendered)
+                self.assertIn("-20901", rendered)
+                self.assertIn("-20902", rendered)
+                self.assertIn("DBMS_LOB.COMPARE", rendered)
+                self.assertLess(rendered.index("-20901"), rendered.index("RELEASE_STEP_START:02-code/p.sql"))
+                self.assertLess(rendered.index("-20902"), rendered.index("RELEASE_STEP_START:02-code/p.sql"))
+
+        # (a) DB_UNIQUE_NAME changes between preflight and apply
+        self.assertEqual(self._run_cli(["new", "guard-db-rel"])[0], 0)
+        bundle = self.root / "releases" / "guard-db-rel"
+        (bundle / "01-ddl" / "001-ddl.sql").write_text("CREATE TABLE G_T (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "guard-db-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [{"schema": "APP_CODE", "file": "01-ddl/001-ddl.sql"}],
+            "code": [],
+            "ords": [],
+            "verify": [],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        def flip_db_after_preflight(t, driver_path, run_dir, environment=None, phase="apply"):
+            res = release.run_sqlcl(t, driver_path, run_dir, environment=environment, phase=phase)
+            if phase == "inventory":
+                st = self._read_state()
+                st["envs"]["staging"]["identity"]["db_unique_name"] = "WRONG_CLONE_DB"
+                self._write_state(st)
+            return res
+
+        code, _, err = self._run_cli_with_runner(
+            ["run", "guard-db-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ", "--skip-backup"],
+            runner=flip_db_after_preflight,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("ORA-20901", err)
+        self.assertEqual(self._read_state().get("appliedSteps", []), [])
+
+        # (b) Patch object's live source changes between preflight and apply
+        self._write_state(self.default_state)
+        self.assertEqual(self._run_cli(["new", "guard-patch-rel"])[0], 0)
+        p_bundle = self.root / "releases" / "guard-patch-rel"
+        (p_bundle / "02-code" / "app_code_orders_pkg_package_body.sql").write_text(
+            "CREATE OR REPLACE " + DEV_PKG_SOURCE + "/\n", encoding="utf-8", newline="\n"
+        )
+        p_manifest = {
+            "schemaVersion": 1,
+            "slug": "guard-patch-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [],
+            "code": [{
+                "schema": "APP_CODE",
+                "file": "02-code/app_code_orders_pkg_package_body.sql",
+                "objectType": "PACKAGE BODY",
+                "objectName": "ORDERS_PKG",
+                "mode": "patch",
+                "baseSha256": release.compute_source_sha256(TARGET_PKG_SOURCE),
+            }],
+            "ords": [],
+            "verify": [],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (p_bundle / "release.json").write_text(json.dumps(p_manifest), encoding="utf-8", newline="\n")
+
+        def flip_source_after_preflight(t, driver_path, run_dir, environment=None, phase="apply"):
+            res = release.run_sqlcl(t, driver_path, run_dir, environment=environment, phase=phase)
+            if phase == "inventory":
+                st = self._read_state()
+                st["envs"]["staging"]["objects"]["PACKAGE BODY:ORDERS_PKG"]["source"] = (
+                    "PACKAGE BODY ORDERS_PKG AS\n  FUNCTION get_count RETURN NUMBER IS BEGIN RETURN 999; END;\nEND ORDERS_PKG;\n"
+                )
+                self._write_state(st)
+            return res
+
+        code, _, err = self._run_cli_with_runner(
+            ["run", "guard-patch-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ", "--skip-backup"],
+            runner=flip_source_after_preflight,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("ORA-20902", err)
+        self.assertEqual(self._read_state().get("appliedSteps", []), [])
+
+    def test_ddl_and_ords_backup_coverage_and_fail_closed_on_empty_ddl(self) -> None:
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["TABLE:ORDERS"] = {
+            "source": "",
+            "ddl": 'CREATE TABLE "APP_CODE"."ORDERS" ("ID" NUMBER);',
+        }
+        state["envs"]["staging"]["objects"]["VIEW:LEGACY_V"] = {
+            "source": "",
+            "ddl": 'CREATE OR REPLACE FORCE VIEW "APP_CODE"."LEGACY_V" AS SELECT 1 AS X FROM DUAL;',
+        }
+        state["envs"]["staging"]["objects"]["PACKAGE:ORDS_API_PKG"] = {
+            "source": "PACKAGE ORDS_API_PKG AS PROCEDURE run_get; END ORDS_API_PKG;\n",
+        }
+        self._write_state(state)
+
+        self.assertEqual(self._run_cli(["new", "backup-cov-rel"])[0], 0)
+        bundle = self.root / "releases" / "backup-cov-rel"
+        (bundle / "01-ddl" / "001-alter.sql").write_text(
+            "ALTER TABLE APP_CODE.ORDERS ADD (NOTES VARCHAR2(50));\nDROP VIEW LEGACY_V;\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        (bundle / "03-ords" / "001-ords.sql").write_text("BEGIN NULL; END;\n/\n", encoding="utf-8", newline="\n")
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "backup-cov-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [{"schema": "APP_CODE", "file": "01-ddl/001-alter.sql"}],
+            "code": [],
+            "ords": [{
+                "schema": "APP_CODE",
+                "file": "03-ords/001-ords.sql",
+                "objects": ["PACKAGE:ORDS_API_PKG"],
+            }],
+            "verify": [],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        code, out, err = self._run_cli(["run", "backup-cov-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"])
+        self.assertEqual(code, 0, f"out={out}\nerr={err}")
+
+        backups = sorted((self.root / "scratch" / "backups").glob("backup-cov-rel-staging-*"))
+        self.assertEqual(len(backups), 1)
+        bmanifest = json.loads((backups[0] / "backup-manifest.json").read_text(encoding="utf-8"))
+        expected_pairs = {(o["objectType"], o["objectName"]) for o in bmanifest["expectedObjects"]}
+        backed_pairs = {(o["objectType"], o["objectName"]) for o in bmanifest["objects"]}
+        self.assertEqual(
+            expected_pairs,
+            {("TABLE", "ORDERS"), ("VIEW", "LEGACY_V"), ("PACKAGE", "ORDS_API_PKG")},
+        )
+        self.assertEqual(backed_pairs, expected_pairs)
+        self.assertTrue((backups[0] / "APP_CODE.TABLE.ORDERS.sql").is_file())
+        self.assertTrue((backups[0] / "APP_CODE.VIEW.LEGACY_V.sql").is_file())
+        self.assertTrue((backups[0] / "APP_CODE.PACKAGE.ORDS_API_PKG.sql").is_file())
+
+        # Fail closed before apply if an existing object returns empty DDL/source
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["TABLE:ORDERS"]["ddl"] = ""
+        state["calls"] = []
+        state["appliedSteps"] = []
+        self._write_state(state)
+
+        code, _, err = self._run_cli(["run", "backup-cov-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("Backup failed before apply", err)
+        self.assertIn("APP_CODE.ORDERS (TABLE)", err)
+        self.assertEqual(self._read_state().get("appliedSteps", []), [])
+
+    def test_prod_requires_clean_tracked_git_bundle_and_tags_release_commit(self) -> None:
+        self.assertEqual(self._run_cli(["new", "prod-clean-rel"])[0], 0)
+        bundle = self.root / "releases" / "prod-clean-rel"
+        (bundle / "02-code" / "app_code_orders_pkg_package_body.sql").write_text(
+            "CREATE OR REPLACE " + DEV_PKG_SOURCE + "/\n", encoding="utf-8", newline="\n"
+        )
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "prod-clean-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [],
+            "code": [{
+                "schema": "APP_CODE",
+                "file": "02-code/app_code_orders_pkg_package_body.sql",
+                "objectType": "PACKAGE BODY",
+                "objectName": "ORDERS_PKG",
+                "mode": "replace",
+            }],
+            "ords": [],
+            "verify": [],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        # Not a Git repo -> refused before any SQL runs
+        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("Git repository", err)
+        self.assertEqual(self._read_state().get("calls", []), [])
+
+        # Git repo initialized, bundle untracked -> refused before any SQL runs
+        subprocess.run(["git", "init"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        (self.root / "README.md").write_text("init\n", encoding="utf-8", newline="\n")
+        subprocess.run(["git", "add", "README.md"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Init"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+
+        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("tracked in Git", err)
+        self.assertEqual(self._read_state().get("calls", []), [])
+
+        # Commit bundle, then leave an untracked file inside bundle -> refused before SQL runs
+        subprocess.run(["git", "add", "releases"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Add prod-clean-rel"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        release_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.root,
+            stdin=subprocess.DEVNULL,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+
+        (bundle / "01-ddl" / "untracked.sql").write_text("SELECT 1 FROM DUAL;\n", encoding="utf-8", newline="\n")
+        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("clean Git working tree", err)
+        self.assertEqual(self._read_state().get("calls", []), [])
+
+        # Remove untracked file -> succeeds, tags exact release_commit BEFORE writing deployed status
+        (bundle / "01-ddl" / "untracked.sql").unlink()
+        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        self.assertEqual(code, 0, err)
+        tagged_sha = subprocess.run(
+            ["git", "rev-list", "-n", "1", "release/prod-clean-rel"],
+            cwd=self.root,
+            stdin=subprocess.DEVNULL,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+        self.assertEqual(tagged_sha, release_commit)
+        locked = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        self.assertEqual(locked["status"], "deployed")
+        self.assertEqual(locked["deployedCommit"], release_commit)
+
+    def test_schema_qualified_collect_filenames_and_duplicate_file_rejection(self) -> None:
+        multi_env = {
+            **BASE_ENV,
+            "CODE_SCHEMA": "APP_DATA,APP_CODE",
+            "CODE_PREFIXES": "*,*",
+            "CODE_SQLCL_CONNECTION": "dev_data,dev_code",
+            "CODE_EXPECTED_USER": "APP_DATA,APP_CODE",
+        }
+        state = self._read_state()
+        state["connMap"]["dev_data"] = "dev_data"
+        state["connMap"]["dev_code"] = "dev"
+        state["envs"]["dev_data"] = {
+            "identity": {
+                "session_user": "APP_DATA",
+                "current_schema": "APP_DATA",
+                "db_name": "DEVDB",
+                "db_unique_name": "DEVDB_UNQ",
+                "service_name": "dev_svc",
+                "con_name": "DEVPDB",
+            },
+            "objects": {
+                "PACKAGE BODY:ORDERS_PKG": {
+                    "source": "PACKAGE BODY ORDERS_PKG AS FUNCTION f RETURN NUMBER IS BEGIN RETURN 10; END; END ORDERS_PKG;\n",
+                },
+            },
+        }
+        self._write_state(state)
+
+        self.assertEqual(self._run_cli(["new", "dup-rel"], environ=multi_env)[0], 0)
+        self.assertEqual(
+            self._run_cli([
+                "collect", "dup-rel", "--from", "dev", "--schema", "APP_CODE",
+                "--object", "PACKAGE_BODY:ORDERS_PKG", "--mode", "new",
+            ], environ=multi_env)[0],
+            0,
+        )
+        self.assertEqual(
+            self._run_cli([
+                "collect", "dup-rel", "--from", "dev", "--schema", "APP_DATA",
+                "--object", "PACKAGE_BODY:ORDERS_PKG", "--mode", "new",
+            ], environ=multi_env)[0],
+            0,
+        )
+        bundle = self.root / "releases" / "dup-rel"
+        self.assertTrue((bundle / "02-code" / "app_code_orders_pkg_package_body.sql").is_file())
+        self.assertTrue((bundle / "02-code" / "app_data_orders_pkg_package_body.sql").is_file())
+
+        # collect --file colliding with different entry is refused without overwriting
+        code, _, err = self._run_cli([
+            "collect", "dup-rel", "--from", "dev", "--schema", "APP_DATA",
+            "--object", "PACKAGE_BODY:ORDERS_PKG", "--mode", "new",
+            "--file", "app_code_orders_pkg_package_body.sql",
+        ], environ=multi_env)
+        self.assertEqual(code, 1)
+        self.assertIn("already used by APP_CODE.ORDERS_PKG", err)
+        self.assertIn("RETURN 2", (bundle / "02-code" / "app_code_orders_pkg_package_body.sql").read_text(encoding="utf-8"))
+
+        # Duplicate file reference in release.json is refused by release check
+        manifest = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        manifest["code"][1]["file"] = "02-code/app_code_orders_pkg_package_body.sql"
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+        code, _, err = self._run_cli(["check", "dup-rel", "--env", "dev"], environ=multi_env)
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate bundle file reference", err)
+
+    def test_app_env_preflight_validation_and_failure_report_after_sql_apply(self) -> None:
+        self.assertEqual(self._run_cli(["new", "app-rel"])[0], 0)
+        bundle = self.root / "releases" / "app-rel"
+        (bundle / "01-ddl" / "001-t.sql").write_text("CREATE TABLE APP_T (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "app-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [{"schema": "APP_CODE", "file": "01-ddl/001-t.sql"}],
+            "code": [],
+            "ords": [],
+            "verify": [],
+            "apps": [130],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        # (a) apps non-empty on --env dev fails preflight with zero apply/backup SQL
+        code, _, err = self._run_cli(["run", "app-rel", "--env", "dev", "--confirm-target", "DEVDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("supports staging and prod only", err)
+        self.assertEqual(self._read_state().get("appliedSteps", []), [])
+        self.assertFalse((self.root / "scratch" / "backups").exists())
+
+        # (b) missing scripts/deploy.sh and missing apps/*/130/deployments/staging.json fail preflight
+        (self.root / "apps" / "APP_CODE" / "130" / "deployments").mkdir(parents=True)
+        code, out, _ = self._run_cli(["check", "app-rel", "--env", "staging"])
+        self.assertEqual(code, 1)
+        self.assertIn("scripts/deploy.sh not found", out)
+        self.assertIn("apps/*/130/deployments/staging.json", out)
+
+        # Create deploy.sh and staging.json, then fail Step 5 app_deployer after SQL apply succeeds
+        (self.scripts_dir / "deploy.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n")
+        (self.root / "apps" / "APP_CODE" / "130" / "deployments" / "staging.json").write_text("{}\n", encoding="utf-8", newline="\n")
+
+        def failing_deploy(_root: Path, app_id: int, _env: str, _confirm: str, _vals) -> None:
+            raise release.ReleaseError(f"APEX app {app_id} deploy failed: simulated failure")
+
+        code, _, err = self._run_cli(
+            ["run", "app-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"],
+            app_deployer=failing_deploy,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("simulated failure", err)
+        reports = sorted((self.root / "scratch" / "release-reports").glob("app-rel-staging-*.md"))
+        self.assertEqual(len(reports), 1)
+        report_text = reports[0].read_text(encoding="utf-8")
+        self.assertIn("- **Outcome:** FAILED", report_text)
+        self.assertIn("- **Error:** APEX app 130 deploy failed: simulated failure", report_text)
+        self.assertIn("- **Backup:** `scratch/backups/app-rel-staging-", report_text)
+        self.assertIn("- **Completed phases:** preflight, backup, apply, verify", report_text)
+        self.assertIn("- `apps`:", report_text)
 
 
 if __name__ == "__main__":

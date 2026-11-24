@@ -72,6 +72,18 @@ SUPPORTED_OBJECT_TYPES = {
     "TYPE BODY": "TYPE BODY",
     "TYPE_BODY": "TYPE BODY",
 }
+BACKUP_OBJECT_TYPES = {
+    **SUPPORTED_OBJECT_TYPES,
+    "TABLE": "TABLE",
+    "INDEX": "INDEX",
+    "SEQUENCE": "SEQUENCE",
+    "SYNONYM": "SYNONYM",
+    "MATERIALIZED VIEW": "MATERIALIZED VIEW",
+    "MATERIALIZED_VIEW": "MATERIALIZED VIEW",
+}
+_DDL_IDENT_PART = r'(?:"[A-Za-z0-9_$#]+"|[A-Za-z][A-Za-z0-9_$#]*)'
+_DDL_QUALIFIED_IDENT = rf"({_DDL_IDENT_PART})(?:\s*\.\s*({_DDL_IDENT_PART}))?"
+_SQL_COMMENT_RE = re.compile(r"/\*.*?\*/|--[^\r\n]*", re.DOTALL)
 SECTION_DIRS = (
     ("ddl", "01-ddl"),
     ("code", "02-code"),
@@ -99,6 +111,7 @@ class BundleStep:
     object_name: str | None = None
     mode: str | None = None
     base_sha256: str | None = None
+    objects: tuple[tuple[str, str], ...] = ()
 
 
 def _utc_now() -> str:
@@ -131,18 +144,134 @@ def _parse_bundle_slug(bundle: str) -> str:
     return _validate_slug(text)
 
 
-def _normalize_object_spec(spec: str) -> tuple[str, str]:
+def _normalize_object_spec(
+    spec: str,
+    *,
+    allowed_types: Mapping[str, str] = SUPPORTED_OBJECT_TYPES,
+) -> tuple[str, str]:
     if not isinstance(spec, str) or ":" not in spec:
         raise ReleaseUsageError("--object must use TYPE:NAME (for example PACKAGE_BODY:ORDERS_PKG)")
     raw_type, raw_name = spec.split(":", 1)
     norm_type_key = " ".join(raw_type.strip().upper().replace("_", " ").split())
-    object_type = SUPPORTED_OBJECT_TYPES.get(norm_type_key)
+    object_type = allowed_types.get(norm_type_key)
     if object_type is None:
         raise ReleaseUsageError(f"unsupported object type: {raw_type!r}")
     object_name = raw_name.strip().upper()
     if ORACLE_IDENTIFIER.fullmatch(object_name) is None:
         raise ReleaseUsageError(f"object name must be an uppercase Oracle identifier: {raw_name!r}")
     return object_type, object_name
+
+
+def _parse_step_objects(raw_objects: Any, *, label: str) -> tuple[tuple[str, str], ...]:
+    if raw_objects is None:
+        return ()
+    if not isinstance(raw_objects, list):
+        raise ReleaseError(f"{label} must be a list")
+    parsed: list[tuple[str, str]] = []
+    for item_idx, item in enumerate(raw_objects):
+        if isinstance(item, str):
+            try:
+                pair = _normalize_object_spec(item, allowed_types=BACKUP_OBJECT_TYPES)
+            except ReleaseUsageError as exc:
+                raise ReleaseError(f"{label}[{item_idx}]: {exc}") from exc
+        elif isinstance(item, dict):
+            raw_type = item.get("objectType")
+            raw_name = item.get("objectName")
+            if not isinstance(raw_type, str):
+                raise ReleaseError(f"{label}[{item_idx}].objectType is invalid: {raw_type!r}")
+            norm_type_key = " ".join(raw_type.strip().upper().replace("_", " ").split())
+            object_type = BACKUP_OBJECT_TYPES.get(norm_type_key)
+            if object_type is None:
+                raise ReleaseError(f"{label}[{item_idx}].objectType is unsupported: {raw_type!r}")
+            if not isinstance(raw_name, str):
+                raise ReleaseError(f"{label}[{item_idx}].objectName is invalid: {raw_name!r}")
+            object_name = raw_name.strip().upper()
+            if ORACLE_IDENTIFIER.fullmatch(object_name) is None:
+                raise ReleaseError(f"{label}[{item_idx}].objectName must be an uppercase Oracle identifier: {raw_name!r}")
+            pair = (object_type, object_name)
+        else:
+            raise ReleaseError(f"{label}[{item_idx}] must be an object or 'TYPE:NAME' string")
+        if pair not in parsed:
+            parsed.append(pair)
+    return tuple(parsed)
+
+
+def _clean_ddl_ident(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    val = raw.strip().strip('"').strip().upper()
+    return val if ORACLE_IDENTIFIER.fullmatch(val) is not None else None
+
+
+def _split_ddl_schema_obj(first: str, second: str | None, default_schema: str) -> tuple[str, str] | None:
+    if second is not None:
+        schema = _clean_ddl_ident(first)
+        obj = _clean_ddl_ident(second)
+    else:
+        schema = default_schema
+        obj = _clean_ddl_ident(first)
+    if schema is None or obj is None:
+        return None
+    return schema, obj
+
+
+def _extract_ddl_candidate_objects(sql_text: str, default_schema: str) -> list[tuple[str, str, str]]:
+    """Extract candidate existing object references from 01-ddl/ SQL for pre-apply backup."""
+    cleaned = _SQL_COMMENT_RE.sub(" ", sql_text)
+    candidates: list[tuple[str, str, str]] = []
+
+    def _add(schema: str, obj_type: str, obj_name: str) -> None:
+        item = (schema, obj_type, obj_name)
+        if item not in candidates:
+            candidates.append(item)
+
+    for match in re.finditer(
+        rf"(?is)\bALTER\s+(TABLE|VIEW|TRIGGER|INDEX|SEQUENCE|PACKAGE|PROCEDURE|FUNCTION|TYPE|MATERIALIZED\s+VIEW)\s+{_DDL_QUALIFIED_IDENT}",
+        cleaned,
+    ):
+        obj_type = " ".join(match.group(1).upper().split())
+        split = _split_ddl_schema_obj(match.group(2), match.group(3), default_schema)
+        if split:
+            _add(split[0], obj_type, split[1])
+
+    for match in re.finditer(
+        rf"(?is)\bDROP\s+(PACKAGE\s+BODY|TYPE\s+BODY|MATERIALIZED\s+VIEW|TABLE|TRIGGER|VIEW|INDEX|SEQUENCE|SYNONYM|PROCEDURE|FUNCTION|PACKAGE|TYPE)\s+(?:IF\s+EXISTS\s+)?{_DDL_QUALIFIED_IDENT}",
+        cleaned,
+    ):
+        obj_type = " ".join(match.group(1).upper().split())
+        split = _split_ddl_schema_obj(match.group(2), match.group(3), default_schema)
+        if split:
+            _add(split[0], obj_type, split[1])
+
+    for match in re.finditer(
+        rf"(?is)\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:FORCE|NOFORCE|EDITIONABLE|NONEDITIONABLE|UNIQUE|BITMAP|GLOBAL\s+TEMPORARY|PRIVATE)\s+)*(PACKAGE\s+BODY|TYPE\s+BODY|MATERIALIZED\s+VIEW|VIEW|TRIGGER|INDEX|SEQUENCE|SYNONYM|PROCEDURE|FUNCTION|PACKAGE|TYPE|TABLE)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_DDL_QUALIFIED_IDENT}",
+        cleaned,
+    ):
+        obj_type = " ".join(match.group(1).upper().split())
+        split = _split_ddl_schema_obj(match.group(2), match.group(3), default_schema)
+        if split:
+            _add(split[0], obj_type, split[1])
+
+    for match in re.finditer(
+        rf"(?is)\bGRANT\s+([^;]+?)\s+ON\s+(?!DIRECTORY\b){_DDL_QUALIFIED_IDENT}\s+TO\b",
+        cleaned,
+    ):
+        privs = match.group(1).upper()
+        split = _split_ddl_schema_obj(match.group(2), match.group(3), default_schema)
+        if not split:
+            continue
+        has_exec = "EXECUTE" in privs
+        has_table_priv = any(k in privs for k in ("SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "INDEX", "REFERENCES", "READ", "WRITE"))
+        if has_exec and not has_table_priv:
+            cand_types = ("PACKAGE", "PROCEDURE", "FUNCTION", "TYPE")
+        elif has_exec:
+            cand_types = ("TABLE", "VIEW", "SEQUENCE", "MATERIALIZED VIEW", "PACKAGE", "PROCEDURE", "FUNCTION", "TYPE")
+        else:
+            cand_types = ("TABLE", "VIEW", "SEQUENCE", "MATERIALIZED VIEW")
+        for cand_type in cand_types:
+            _add(split[0], cand_type, split[1])
+
+    return candidates
 
 
 def _validate_schema_name(schema: str) -> str:
@@ -298,6 +427,7 @@ def _load_and_validate_manifest(bundle_dir: Path, expected_slug: str) -> tuple[d
 
     steps: list[BundleStep] = []
     inferred_schemas: list[str] = list(declared_schemas)
+    seen_files: set[str] = set()
 
     for section, subdir in SECTION_DIRS:
         entries = manifest.get(section, [])
@@ -313,6 +443,9 @@ def _load_and_validate_manifest(bundle_dir: Path, expected_slug: str) -> tuple[d
                 raise ReleaseError(f"release.json '{section}[{idx}].schema' must be an uppercase Oracle identifier")
             raw_file = entry.get("file")
             rel_file, file_path = _resolve_section_file(bundle_dir, subdir, str(raw_file or ""))
+            if rel_file in seen_files:
+                raise ReleaseError(f"duplicate bundle file reference in release.json: {rel_file}")
+            seen_files.add(rel_file)
             if section == "code":
                 raw_type = entry.get("objectType")
                 raw_name = entry.get("objectName")
@@ -340,7 +473,16 @@ def _load_and_validate_manifest(bundle_dir: Path, expected_slug: str) -> tuple[d
                     base_sha256=base_sha,
                 ))
             else:
-                steps.append(BundleStep(section=section, schema=schema, rel_file=rel_file, path=file_path))
+                step_objects: tuple[tuple[str, str], ...] = ()
+                if section in {"ddl", "ords"} and "objects" in entry:
+                    step_objects = _parse_step_objects(entry.get("objects"), label=f"release.json '{section}[{idx}].objects'")
+                steps.append(BundleStep(
+                    section=section,
+                    schema=schema,
+                    rel_file=rel_file,
+                    path=file_path,
+                    objects=step_objects,
+                ))
             if schema not in inferred_schemas:
                 inferred_schemas.append(schema)
 
@@ -518,7 +660,7 @@ def _render_fetch_objects_driver(
                 f"      l_ddl := DBMS_METADATA.GET_DDL({q_meta_type}, {q_name}, {q_schema});",
                 "      l_item.put('ddl', l_ddl);",
                 "    EXCEPTION WHEN OTHERS THEN",
-                "      NULL;",
+                "      l_item.put('ddlError', SQLERRM);",
                 "    END;",
                 "  END IF;",
             ])
@@ -662,9 +804,9 @@ def _source_text_for_hash(object_type: str, item: Mapping[str, Any]) -> str:
     return ""
 
 
-def _default_code_filename(object_type: str, object_name: str) -> str:
+def _default_code_filename(schema: str, object_type: str, object_name: str) -> str:
     type_slug = object_type.lower().replace(" ", "_")
-    return f"{object_name.lower()}_{type_slug}.sql"
+    return f"{schema.lower()}_{object_name.lower()}_{type_slug}.sql"
 
 
 def _git_head_sha(repo_root: Path) -> str:
@@ -687,7 +829,61 @@ def _git_head_sha(repo_root: Path) -> str:
     return "unknown"
 
 
-def _git_create_release_tag(repo_root: Path, slug: str) -> str:
+def _verify_prod_git_clean(repo_root: Path, slug: str) -> str:
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
+    try:
+        check_repo = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--git-dir"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            check=False,
+            timeout=10,
+        )
+        if check_repo.returncode != 0:
+            raise ReleaseError("--env prod requires a Git repository with a committed release bundle")
+        head_sha = _git_head_sha(repo_root)
+        if re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None:
+            raise ReleaseError(f"--env prod requires a valid 40-character Git HEAD commit SHA, got {head_sha!r}")
+        rel_manifest = f"releases/{slug}/release.json"
+        tracked = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "--", rel_manifest],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            check=False,
+            timeout=10,
+        )
+        if tracked.returncode != 0:
+            raise ReleaseError(f"--env prod requires {rel_manifest} to be tracked in Git before release")
+        status_proc = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all", "--", f"releases/{slug}"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            check=False,
+            timeout=10,
+        )
+        if status_proc.returncode != 0:
+            detail = status_proc.stderr.strip() or f"exit {status_proc.returncode}"
+            raise ReleaseError(f"git status failed for releases/{slug}: {detail}")
+        if status_proc.stdout.strip():
+            raise ReleaseError(
+                f"--env prod requires a clean Git working tree for releases/{slug}; "
+                f"commit or discard changes first:\n{status_proc.stdout.rstrip()}"
+            )
+        return head_sha
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReleaseError(f"Git verification for --env prod failed: {exc}") from exc
+
+
+def _git_create_release_tag(repo_root: Path, slug: str, target_commit: str | None = None) -> str:
     tag = f"release/{slug}"
     env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
     try:
@@ -704,7 +900,7 @@ def _git_create_release_tag(repo_root: Path, slug: str) -> str:
         if check_repo.returncode != 0:
             return "skipped (not a Git repository)"
         exists = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "-q", "--verify", f"refs/tags/{tag}"],
+            ["git", "-C", str(repo_root), "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -714,9 +910,17 @@ def _git_create_release_tag(repo_root: Path, slug: str) -> str:
             timeout=10,
         )
         if exists.returncode == 0:
+            existing_sha = exists.stdout.strip()
+            if target_commit and existing_sha.lower() != target_commit.lower():
+                raise ReleaseError(
+                    f"Git tag {tag} already exists on commit {existing_sha[:12]}, expected {target_commit[:12]}"
+                )
             return f"already exists ({tag})"
+        tag_cmd = ["git", "-C", str(repo_root), "tag", tag]
+        if target_commit:
+            tag_cmd.append(target_commit)
         created = subprocess.run(
-            ["git", "-C", str(repo_root), "tag", tag],
+            tag_cmd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -888,7 +1092,7 @@ def cmd_collect(
 
     code_dir = bundle_dir / "02-code"
     code_dir.mkdir(parents=True, exist_ok=True)
-    raw_rel = file_arg if file_arg else _default_code_filename(object_type, object_name)
+    raw_rel = file_arg if file_arg else _default_code_filename(schema, object_type, object_name)
     norm_rel = raw_rel.replace("\\", "/").strip()
     while norm_rel.startswith("./"):
         norm_rel = norm_rel[2:]
@@ -903,10 +1107,33 @@ def cmd_collect(
         raise ReleaseUsageError(f"invalid --file path under 02-code/: {exc}") from exc
     if dest_path.is_symlink():
         raise ReleaseError(f"destination cannot be a symlink: {dest_path}")
+
+    rel_entry_file = f"02-code/{checked_rel.as_posix()}"
+    code_list = list(manifest.get("code") or [])
+    for existing in code_list:
+        if not isinstance(existing, dict):
+            continue
+        same_obj = (
+            existing.get("schema") == schema
+            and existing.get("objectType") == object_type
+            and existing.get("objectName") == object_name
+        )
+        if same_obj:
+            continue
+        existing_file = str(existing.get("file") or "").strip().replace("\\", "/")
+        while existing_file.startswith("./"):
+            existing_file = existing_file[2:]
+        if existing_file and not existing_file.startswith("02-code/"):
+            existing_file = f"02-code/{existing_file}"
+        if existing_file == rel_entry_file:
+            raise ReleaseError(
+                f"bundle file {rel_entry_file} is already used by "
+                f"{existing.get('schema')}.{existing.get('objectName')} ({existing.get('objectType')})"
+            )
+
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_text(sql_text, encoding="utf-8", newline="\n")
 
-    rel_entry_file = f"02-code/{checked_rel.as_posix()}"
     new_entry: dict[str, Any] = {
         "schema": schema,
         "file": rel_entry_file,
@@ -917,7 +1144,6 @@ def cmd_collect(
     if base_sha256 is not None:
         new_entry["baseSha256"] = base_sha256
 
-    code_list = list(manifest.get("code") or [])
     replaced = False
     for idx, existing in enumerate(code_list):
         if (
@@ -955,6 +1181,7 @@ def _preflight_bundle(
     values: Mapping[str, str],
     runner: Callable,
     work_dir: Path,
+    require_deployer: bool = True,
 ) -> tuple[dict[str, Any], list[BundleStep], list[str], list[int], dict[str, Target], dict[str, dict[str, str]], dict[str, dict[tuple[str, str], dict[str, Any]]], list[str]]:
     bundle_dir = _safe_bundle_dir(repo_root, slug)
     if not bundle_dir.is_dir():
@@ -969,14 +1196,33 @@ def _preflight_bundle(
     fetched_by_schema: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
     failures: list[str] = []
 
+    items_by_schema: dict[str, list[tuple[str, str]]] = {schema: [] for schema in schemas}
+    for step in steps:
+        if step.section == "code" and step.object_type and step.object_name:
+            pair = (step.object_type, step.object_name)
+            if pair not in items_by_schema[step.schema]:
+                items_by_schema[step.schema].append(pair)
+        elif step.section in {"ddl", "ords"}:
+            if step.objects:
+                for pair in step.objects:
+                    if pair not in items_by_schema[step.schema]:
+                        items_by_schema[step.schema].append(pair)
+            elif step.section == "ddl":
+                sql_text = step.path.read_text(encoding="utf-8")
+                for cand_schema, cand_type, cand_name in _extract_ddl_candidate_objects(sql_text, step.schema):
+                    if cand_schema in items_by_schema:
+                        pair = (cand_type, cand_name)
+                        if pair not in items_by_schema[cand_schema]:
+                            items_by_schema[cand_schema].append(pair)
+
     for schema in schemas:
         targets[schema] = _resolve_schema_target(values, env, schema, operation="migration")
 
     for schema in schemas:
         target = targets[schema]
         schema_code_steps = [s for s in steps if s.schema == schema and s.section == "code"]
-        items = list(dict.fromkeys((s.object_type, s.object_name) for s in schema_code_steps if s.object_type and s.object_name))
-        need_ddl = any(s.object_type in {"VIEW", "TRIGGER"} for s in schema_code_steps)
+        items = items_by_schema[schema]
+        need_ddl = any(obj_type in {"VIEW", "TRIGGER"} for obj_type, _ in items)
         identity, fetched = _fetch_schema_objects(
             runner,
             target,
@@ -1028,6 +1274,32 @@ def _preflight_bundle(
                         f"patch baseSha256 mismatch for {schema}.{step.object_name} ({step.object_type}): "
                         f"expected {step.base_sha256[:12]}..., live {live_sha[:12]}... (diff: {diff_path.relative_to(repo_root).as_posix()})"
                     )
+
+    if apps:
+        if env == "dev":
+            failures.append(
+                "APEX app deploy in release run supports staging and prod only; "
+                "use 'scripts/team.sh publish <app_id> --env dev' for DEV"
+            )
+        else:
+            if require_deployer and not (repo_root / "scripts" / "deploy.sh").is_file():
+                failures.append(
+                    "scripts/deploy.sh not found; cannot deploy APEX app(s): "
+                    + ", ".join(str(a) for a in apps)
+                )
+            apps_dir = repo_root / "apps"
+            if apps_dir.is_dir():
+                for app_id in apps:
+                    matches = [
+                        p
+                        for p in apps_dir.glob(f"*/{app_id}/deployments/{env}.json")
+                        if p.is_file() and not p.is_symlink()
+                    ]
+                    if not matches:
+                        failures.append(
+                            f"APEX app {app_id} deployment descriptor not found under "
+                            f"apps/*/{app_id}/deployments/{env}.json"
+                        )
 
     return manifest, steps, schemas, apps, targets, identities, fetched_by_schema, failures
 
@@ -1155,9 +1427,185 @@ def _before_invalids_lines(target: Target) -> list[str]:
     ]
 
 
-def _sql_step_lines(section_steps: Sequence[BundleStep]) -> list[str]:
+def _target_identity_guard_lines(
+    target: Target,
+    *,
+    confirm_target: str | None = None,
+    preflight_con_name: str | None = None,
+) -> list[str]:
+    q_user = _sql_literal(target.expected_user)
+    q_schema = _sql_literal(target.schema)
+    lines = [
+        "WHENEVER SQLERROR EXIT FAILURE ROLLBACK",
+        "BEGIN",
+    ]
+    if confirm_target and confirm_target.strip():
+        q_db = _sql_literal(confirm_target.strip())
+        lines.extend([
+            f"  IF SYS_CONTEXT('USERENV','DB_UNIQUE_NAME') IS NULL OR UPPER(SYS_CONTEXT('USERENV','DB_UNIQUE_NAME')) <> UPPER({q_db}) THEN",
+            f"    RAISE_APPLICATION_ERROR(-20901, 'Target DB_UNIQUE_NAME mismatch in apply session (expected ' || {q_db} || ', observed ' || NVL(SYS_CONTEXT('USERENV','DB_UNIQUE_NAME'), '<NULL>') || ')');",
+            "  END IF;",
+        ])
+    if preflight_con_name and preflight_con_name.strip():
+        q_con = _sql_literal(preflight_con_name.strip())
+        lines.extend([
+            f"  IF UPPER(NVL(SYS_CONTEXT('USERENV','CON_NAME'), 'NON-CDB')) <> UPPER({q_con}) THEN",
+            f"    RAISE_APPLICATION_ERROR(-20901, 'Target CON_NAME mismatch in apply session (expected ' || {q_con} || ', observed ' || NVL(SYS_CONTEXT('USERENV','CON_NAME'), 'NON-CDB') || ')');",
+            "  END IF;",
+        ])
+    lines.extend([
+        f"  IF UPPER(USER) <> UPPER({q_user}) THEN",
+        f"    RAISE_APPLICATION_ERROR(-20901, 'Target USER mismatch in apply session (expected ' || {q_user} || ', observed ' || USER || ')');",
+        "  END IF;",
+        f"  IF UPPER(SYS_CONTEXT('USERENV','CURRENT_SCHEMA')) <> UPPER({q_schema}) THEN",
+        f"    RAISE_APPLICATION_ERROR(-20901, 'Target CURRENT_SCHEMA mismatch in apply session (expected ' || {q_schema} || ', observed ' || SYS_CONTEXT('USERENV','CURRENT_SCHEMA') || ')');",
+        "  END IF;",
+        "END;",
+        "/",
+    ])
+    return lines
+
+
+def _patch_base_guard_lines(target: Target, step: BundleStep, expected_source: str) -> list[str]:
+    assert step.object_type and step.object_name
+    q_schema = _sql_literal(target.schema)
+    q_type = _sql_literal(step.object_type)
+    q_name = _sql_literal(step.object_name)
+    q_meta_type = _sql_literal(step.object_type.replace(" ", "_"))
+    expected_norm = normalize_source_for_hash(expected_source)
+    expected_sha = step.base_sha256 or compute_source_sha256(expected_source)
+
+    append_lines: list[str] = []
+    if expected_norm:
+        for line in expected_norm.split("\n")[:-1]:
+            if not line:
+                append_lines.append("  DBMS_LOB.APPEND(l_expected, TO_CLOB(CHR(10)));")
+                continue
+            for idx in range(0, len(line), 1500):
+                chunk = line[idx : idx + 1500]
+                append_lines.append(f"  DBMS_LOB.APPEND(l_expected, TO_CLOB({_sql_literal(chunk)}));")
+            append_lines.append("  DBMS_LOB.APPEND(l_expected, TO_CLOB(CHR(10)));")
+
+    lines = [
+        "SET DEFINE OFF",
+        "WHENEVER SQLERROR EXIT FAILURE ROLLBACK",
+        f"-- RELEASE_PATCH_GUARD objectType={step.object_type} objectName={step.object_name} baseSha256={expected_sha}",
+        "DECLARE",
+        "  l_raw            CLOB;",
+        "  l_ddl            CLOB;",
+        "  l_live           CLOB;",
+        "  l_expected       CLOB;",
+        "  l_pos            PLS_INTEGER := 1;",
+        "  l_total          PLS_INTEGER;",
+        "  l_nl             PLS_INTEGER;",
+        "  l_len            PLS_INTEGER;",
+        "  l_next           PLS_INTEGER;",
+        "  l_off            PLS_INTEGER;",
+        "  l_take           PLS_INTEGER;",
+        "  l_chunk          VARCHAR2(32767);",
+        "  l_line           VARCHAR2(32767);",
+        "  l_started        BOOLEAN := FALSE;",
+        "  l_pending_blanks PLS_INTEGER := 0;",
+        "  l_code_type_re   CONSTANT VARCHAR2(200) := '^[[:space:]]*ALTER[[:space:]]+SESSION[[:space:]]+SET[[:space:]]+PLSQL_' || 'CODE_TYPE[[:space:]]*=[[:space:]]*INTERPRETED[[:space:]]*;?[[:space:]]*$';",
+        "  PROCEDURE cleanup_lobs IS",
+        "  BEGIN",
+        "    IF l_raw IS NOT NULL AND DBMS_LOB.ISTEMPORARY(l_raw) = 1 THEN DBMS_LOB.FREETEMPORARY(l_raw); END IF;",
+        "    IF l_live IS NOT NULL AND DBMS_LOB.ISTEMPORARY(l_live) = 1 THEN DBMS_LOB.FREETEMPORARY(l_live); END IF;",
+        "    IF l_expected IS NOT NULL AND DBMS_LOB.ISTEMPORARY(l_expected) = 1 THEN DBMS_LOB.FREETEMPORARY(l_expected); END IF;",
+        "  END;",
+        "BEGIN",
+        "  DBMS_LOB.CREATETEMPORARY(l_raw, TRUE);",
+        "  DBMS_LOB.CREATETEMPORARY(l_live, TRUE);",
+        "  DBMS_LOB.CREATETEMPORARY(l_expected, TRUE);",
+        *append_lines,
+        "  FOR r IN (SELECT text FROM ALL_SOURCE",
+        f"             WHERE OWNER = {q_schema} AND TYPE = {q_type} AND NAME = {q_name}",
+        "             ORDER BY line) LOOP",
+        "    DBMS_LOB.APPEND(l_raw, TO_CLOB(r.text));",
+        "  END LOOP;",
+    ]
+    if step.object_type in {"VIEW", "TRIGGER"}:
+        lines.extend([
+            "  IF DBMS_LOB.GETLENGTH(l_raw) = 0 THEN",
+            "    BEGIN",
+            "      DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE);",
+            f"      l_ddl := DBMS_METADATA.GET_DDL({q_meta_type}, {q_name}, {q_schema});",
+            "      IF l_ddl IS NOT NULL THEN",
+            "        DBMS_LOB.APPEND(l_raw, l_ddl);",
+            "      END IF;",
+            "    EXCEPTION WHEN OTHERS THEN",
+            "      NULL;",
+            "    END;",
+            "  END IF;",
+        ])
+    lines.extend([
+        "  l_total := DBMS_LOB.GETLENGTH(l_raw);",
+        "  WHILE l_pos <= l_total LOOP",
+        "    l_nl := DBMS_LOB.INSTR(l_raw, CHR(10), l_pos);",
+        "    IF l_nl = 0 THEN",
+        "      l_len := l_total - l_pos + 1;",
+        "      l_next := l_total + 1;",
+        "    ELSE",
+        "      l_len := l_nl - l_pos;",
+        "      l_next := l_nl + 1;",
+        "    END IF;",
+        "    l_line := '';",
+        "    IF l_len > 0 THEN",
+        "      l_off := 0;",
+        "      WHILE l_off < l_len LOOP",
+        "        l_chunk := DBMS_LOB.SUBSTR(l_raw, 8000, l_pos + l_off);",
+        "        IF l_chunk IS NULL THEN",
+        "          EXIT;",
+        "        END IF;",
+        "        l_take := LEAST(LENGTH(l_chunk), l_len - l_off);",
+        "        l_line := l_line || SUBSTR(l_chunk, 1, l_take);",
+        "        l_off := l_off + l_take;",
+        "      END LOOP;",
+        "    END IF;",
+        "    l_line := REPLACE(l_line, CHR(13), '');",
+        "    IF NOT REGEXP_LIKE(l_line, l_code_type_re, 'i') THEN",
+        "      l_line := REGEXP_REPLACE(l_line, '[[:space:]]+$', '');",
+        "      IF l_line IS NULL THEN",
+        "        IF l_started THEN",
+        "          l_pending_blanks := l_pending_blanks + 1;",
+        "        END IF;",
+        "      ELSE",
+        "        l_started := TRUE;",
+        "        WHILE l_pending_blanks > 0 LOOP",
+        "          DBMS_LOB.APPEND(l_live, TO_CLOB(CHR(10)));",
+        "          l_pending_blanks := l_pending_blanks - 1;",
+        "        END LOOP;",
+        "        DBMS_LOB.APPEND(l_live, TO_CLOB(l_line || CHR(10)));",
+        "      END IF;",
+        "    END IF;",
+        "    l_pos := l_next;",
+        "  END LOOP;",
+        "  IF DBMS_LOB.COMPARE(l_live, l_expected) <> 0 THEN",
+        "    cleanup_lobs;",
+        f"    RAISE_APPLICATION_ERROR(-20902, 'Patch base source changed between preflight and apply for ' || {q_schema} || '.' || {q_name} || ' (' || {q_type} || ')');",
+        "  END IF;",
+        "  cleanup_lobs;",
+        "EXCEPTION",
+        "  WHEN OTHERS THEN",
+        "    cleanup_lobs;",
+        "    RAISE;",
+        "END;",
+        "/",
+    ])
+    return lines
+
+
+def _sql_step_lines(
+    target: Target,
+    section_steps: Sequence[BundleStep],
+    *,
+    patch_sources: Mapping[tuple[str, str], str] | None = None,
+) -> list[str]:
     lines: list[str] = []
     for step in section_steps:
+        if step.section == "code" and step.mode == "patch" and step.object_type and step.object_name:
+            if patch_sources is not None and (step.object_type, step.object_name) in patch_sources:
+                lines.extend(_patch_base_guard_lines(target, step, patch_sources[(step.object_type, step.object_name)]))
         text = step.path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
         lines.extend([
             "SET DEFINE OFF",
@@ -1216,20 +1664,28 @@ def _post_apply_lines(target: Target, code_steps: Sequence[BundleStep]) -> list[
     return lines
 
 
-def _render_apply_driver(target: Target, schema_steps: Sequence[BundleStep]) -> str:
-    """Render 1 SQLcl driver for single-schema bundles: before-invalids, 01-ddl -> 02-code -> 03-ords, ALL_ERRORS, after-invalids."""
+def _render_apply_driver(
+    target: Target,
+    schema_steps: Sequence[BundleStep],
+    *,
+    confirm_target: str | None = None,
+    preflight_con_name: str | None = None,
+    patch_sources: Mapping[tuple[str, str], str] | None = None,
+) -> str:
+    """Render 1 SQLcl driver for single-schema bundles: target guard, before-invalids, 01-ddl -> 02-code -> 03-ords, ALL_ERRORS, after-invalids."""
     ddl_steps = [s for s in schema_steps if s.section == "ddl"]
     code_steps = [s for s in schema_steps if s.section == "code"]
     ords_steps = [s for s in schema_steps if s.section == "ords"]
 
     lines = _apply_session_prelude(target)
+    lines.extend(_target_identity_guard_lines(target, confirm_target=confirm_target, preflight_con_name=preflight_con_name))
     lines.extend(_before_invalids_lines(target))
     if ddl_steps:
-        lines.extend(_sql_step_lines(ddl_steps))
+        lines.extend(_sql_step_lines(target, ddl_steps, patch_sources=patch_sources))
     if code_steps:
-        lines.extend(_sql_step_lines(code_steps))
+        lines.extend(_sql_step_lines(target, code_steps, patch_sources=patch_sources))
     if ords_steps:
-        lines.extend(_sql_step_lines(ords_steps))
+        lines.extend(_sql_step_lines(target, ords_steps, patch_sources=patch_sources))
     lines.extend(_post_apply_lines(target, code_steps))
     lines.extend([driver_epilogue(True), ""])
     return "\n".join(lines)
@@ -1244,10 +1700,18 @@ def _render_before_invalids_driver(target: Target) -> str:
     return "\n".join(lines)
 
 
-def _render_batch_apply_driver(target: Target, batch_steps: Sequence[BundleStep]) -> str:
+def _render_batch_apply_driver(
+    target: Target,
+    batch_steps: Sequence[BundleStep],
+    *,
+    confirm_target: str | None = None,
+    preflight_con_name: str | None = None,
+    patch_sources: Mapping[tuple[str, str], str] | None = None,
+) -> str:
     """Render 1 SQLcl apply driver for one consecutive schema batch within a phase."""
     lines = _apply_session_prelude(target)
-    lines.extend(_sql_step_lines(batch_steps))
+    lines.extend(_target_identity_guard_lines(target, confirm_target=confirm_target, preflight_con_name=preflight_con_name))
+    lines.extend(_sql_step_lines(target, batch_steps, patch_sources=patch_sources))
     lines.extend(["PROMPT RELEASE_BATCH_APPLIED", driver_epilogue(True), ""])
     return "\n".join(lines)
 
@@ -1348,236 +1812,337 @@ def cmd_run(
     scratch_root = repo_root / "scratch"
     scratch_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     stamp = _utc_stamp()
-    timings: dict[str, float] = {}
-
-    with tempfile.TemporaryDirectory(prefix="release-run-", dir=scratch_root) as tmp_dir:
-        tmp_path = Path(tmp_dir)
-
-        # Step 1-2: Preflight + target confirmation
-        t0 = time.monotonic()
-        manifest, steps, schemas, apps, targets, identities, fetched_by_schema, failures = _preflight_bundle(
-            repo_root,
-            slug,
-            env,
-            allow_existing=allow_existing,
-            confirm_target=confirm_target,
-            values=values,
-            runner=runner,
-            work_dir=tmp_path / "preflight",
-        )
-        timings["preflight"] = round(time.monotonic() - t0, 3)
-        if failures:
-            raise ReleaseError("Preflight refused:\n  - " + "\n  - ".join(failures))
-
-        # Step 3: Backup existing target objects
-        t1 = time.monotonic()
-        backup_label = "skipped"
-        if not skip_backup:
-            backup_dir = scratch_root / "backups" / f"{slug}-{env}-{stamp}"
-            backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            backup_label = backup_dir.relative_to(repo_root).as_posix()
-            backed_up: list[dict[str, str]] = []
-            for schema in schemas:
-                existing_items = [
-                    key
-                    for key, obj in fetched_by_schema[schema].items()
-                    if obj.get("exists") is True
-                ]
-                if not existing_items:
-                    continue
-                _, backed = _fetch_schema_objects(
-                    runner,
-                    targets[schema],
-                    tmp_path / f"backup-{schema}",
-                    existing_items,
-                    include_ddl=True,
-                    environ=values,
-                )
-                for (obj_type, obj_name), obj in backed.items():
-                    content = obj.get("ddl") or obj.get("source") or ""
-                    if not isinstance(content, str) or not content.strip():
-                        continue
-                    fname = f"{schema}.{obj_type.replace(' ', '_')}.{obj_name}.sql"
-                    (backup_dir / fname).write_text(content.replace("\r\n", "\n"), encoding="utf-8", newline="\n")
-                    backed_up.append({"schema": schema, "objectType": obj_type, "objectName": obj_name, "file": fname})
-            _write_json_lf(backup_dir / "backup-manifest.json", {"slug": slug, "environment": env, "objects": backed_up})
-        timings["backup"] = round(time.monotonic() - t1, 3)
-
-        # Step 4: Execute all 01-ddl -> all 02-code -> all 03-ords (consecutive schema batches) + invalid delta
-        t2 = time.monotonic()
-        before_invalids: dict[str, set[tuple[str, str]]] = {schema: set() for schema in schemas}
-        after_invalids: dict[str, set[tuple[str, str]]] = {schema: set() for schema in schemas}
-        new_invalids: dict[str, list[tuple[str, str]]] = {schema: [] for schema in schemas}
-        apply_schemas = [
-            schema for schema in schemas
-            if any(s.schema == schema and s.section in {"ddl", "code", "ords"} for s in steps)
-        ]
-
-        def _check_post_apply(schema: str, post_payload: Mapping[str, Any]) -> None:
-            code_errors = post_payload.get("errors") or []
-            if code_errors:
-                formatted_errs = [
-                    f"{e.get('objectType')} {e.get('objectName')} L{e.get('line')}:{e.get('position')}: {e.get('text')}"
-                    for e in code_errors
-                ]
-                raise ReleaseError(f"Compilation errors in {schema}:\n  - " + "\n  - ".join(formatted_errs))
-
-            before_set = before_invalids[schema]
-            after_set = _invalid_set(post_payload.get("invalids") or [])
-            delta = sorted(after_set - before_set)
-            after_invalids[schema] = after_set
-            new_invalids[schema] = delta
-            if delta:
-                names = ", ".join(f"{t} {n}" for t, n in delta)
-                raise ReleaseError(f"New invalid objects appeared in {schema}: {names}")
-
-        if len(apply_schemas) == 1:
-            schema = apply_schemas[0]
-            schema_apply_steps = [s for s in steps if s.schema == schema and s.section in {"ddl", "code", "ords"}]
-            driver_sql = _render_apply_driver(targets[schema], schema_apply_steps)
-            output = _run_driver(
-                runner,
-                targets[schema],
-                tmp_path / f"apply-{schema}",
-                "release-apply.sql",
-                driver_sql,
-                phase="apply",
-                environ=values,
-            )
-            before_payload = _extract_framed_json(output, "BEFORE_INVALID")
-            _verify_live_identity(before_payload.get("identity") or {}, targets[schema])
-            before_invalids[schema] = _invalid_set(before_payload.get("invalids") or [])
-            post_payload = _extract_framed_json(output, "POST_APPLY")
-            _check_post_apply(schema, post_payload)
-        elif len(apply_schemas) > 1:
-            # 4a. Capture before invalid-object baselines for all touched schemas before any DDL runs.
-            for schema in apply_schemas:
-                driver_sql = _render_before_invalids_driver(targets[schema])
-                output = _run_driver(
-                    runner,
-                    targets[schema],
-                    tmp_path / f"before-invalids-{schema}",
-                    "release-before-invalids.sql",
-                    driver_sql,
-                    phase="preconditions",
-                    environ=values,
-                )
-                before_payload = _extract_framed_json(output, "BEFORE_INVALID")
-                _verify_live_identity(before_payload.get("identity") or {}, targets[schema])
-                before_invalids[schema] = _invalid_set(before_payload.get("invalids") or [])
-
-            # 4b. Execute strictly by phase (ddl -> code -> ords), grouping consecutive same-schema steps.
-            batch_num = 0
-            for section in ("ddl", "code", "ords"):
-                phase_steps = [s for s in steps if s.section == section]
-                for batch_schema, batch_iter in groupby(phase_steps, key=lambda s: s.schema):
-                    batch_num += 1
-                    batch_steps = list(batch_iter)
-                    driver_sql = _render_batch_apply_driver(targets[batch_schema], batch_steps)
-                    _run_driver(
-                        runner,
-                        targets[batch_schema],
-                        tmp_path / f"apply-{batch_num:02d}-{section}-{batch_schema}",
-                        f"release-apply-{section}-{batch_schema}.sql",
-                        driver_sql,
-                        phase="apply",
-                        environ=values,
-                    )
-
-            # 4c. After all apply phases finish, check ALL_ERRORS and invalid-object delta per schema.
-            for schema in apply_schemas:
-                schema_code_steps = [s for s in steps if s.schema == schema and s.section == "code"]
-                driver_sql = _render_post_apply_driver(targets[schema], schema_code_steps)
-                output = _run_driver(
-                    runner,
-                    targets[schema],
-                    tmp_path / f"post-apply-{schema}",
-                    "release-post-apply.sql",
-                    driver_sql,
-                    phase="postconditions",
-                    environ=values,
-                )
-                post_payload = _extract_framed_json(output, "POST_APPLY")
-                _check_post_apply(schema, post_payload)
-        timings["apply"] = round(time.monotonic() - t2, 3)
-
-        # Step 4b: 04-verify smoke scripts (read-only)
-        t3 = time.monotonic()
-        for schema in schemas:
-            verify_steps = [s for s in steps if s.schema == schema and s.section == "verify"]
-            if not verify_steps:
-                continue
-            driver_sql = _render_verify_driver(targets[schema], verify_steps)
-            output = _run_driver(
-                runner,
-                targets[schema],
-                tmp_path / f"verify-{schema}",
-                "release-verify.sql",
-                driver_sql,
-                phase="postconditions",
-                environ=values,
-            )
-            if "RELEASE_VERIFY_OK" not in output.splitlines():
-                raise ReleaseError(f"04-verify smoke scripts did not complete cleanly for {schema}")
-        timings["verify"] = round(time.monotonic() - t3, 3)
-
-        # Step 5: Optional APEX app deploy
-        t4 = time.monotonic()
-        deployed_apps: list[int] = []
-        for app_id in apps:
-            app_deployer(repo_root, app_id, env, confirm_target, values)
-            deployed_apps.append(app_id)
-        timings["apps"] = round(time.monotonic() - t4, 3)
-
-    # Step 6: Report & Prod lock
-    commit_sha = _git_head_sha(repo_root)
-    tag_status = "not-applicable"
-    if env == "prod":
-        bundle_dir = _safe_bundle_dir(repo_root, slug)
-        observed_db = next(iter(identities.values()))["db_unique_name"] if identities else confirm_target
-        manifest["status"] = "deployed"
-        manifest["deployedAt"] = _utc_now()
-        manifest["deployedTarget"] = observed_db
-        manifest["deployedCommit"] = commit_sha
-        _write_json_lf(bundle_dir / "release.json", manifest)
-        tag_status = _git_create_release_tag(repo_root, slug)
-
     if report_arg:
         report_path = Path(report_arg)
         if not report_path.is_absolute():
             report_path = repo_root / report_path
     else:
         report_path = scratch_root / "release-reports" / f"{slug}-{env}-{stamp}.md"
-    report_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    report_lines = [
-        f"# Release Report: {slug} ({env})",
-        "",
-        f"- **Status:** {manifest.get('status')}",
-        f"- **Commit:** `{commit_sha}`",
-        f"- **Backup:** `{backup_label}`",
-        f"- **Git tag:** `{tag_status}`",
-        f"- **Apps deployed:** {', '.join(str(a) for a in deployed_apps) if deployed_apps else 'none'}",
-        "",
-        "## Target Identities",
-        "",
-    ]
-    for schema in schemas:
-        ident = identities[schema]
-        report_lines.append(
-            f"- `{schema}`: `DB_UNIQUE_NAME={ident['db_unique_name']}`, `CON_NAME={ident['con_name']}`, "
-            f"`USER={ident['session_user']}`, before_invalid={len(before_invalids[schema])}, "
-            f"after_invalid={len(after_invalids[schema])}, new_invalid={len(new_invalids[schema])}"
-        )
-    report_lines.extend([
-        "",
-        "## Phase Timings (seconds)",
-        "",
-        *(f"- `{phase}`: {secs:.3f}s" for phase, secs in timings.items()),
-        "",
-    ])
-    report_path.write_text("\n".join(report_lines), encoding="utf-8", newline="\n")
-    print(f"Release {slug} -> {env} succeeded. Report: {report_path}")
+    release_commit = _verify_prod_git_clean(repo_root, slug) if env == "prod" else _git_head_sha(repo_root)
+
+    manifest: dict[str, Any] = {"status": "draft"}
+    schemas: list[str] = []
+    identities: dict[str, dict[str, str]] = {}
+    before_invalids: dict[str, set[tuple[str, str]]] = {}
+    after_invalids: dict[str, set[tuple[str, str]]] = {}
+    new_invalids: dict[str, list[tuple[str, str]]] = {}
+    timings: dict[str, float] = {}
+    completed_phases: list[str] = []
+    backup_label = "not-started"
+    tag_status = "not-applicable"
+    deployed_apps: list[int] = []
+    outcome = "FAILED"
+    error_message: str | None = None
+    preflight_started = False
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="release-run-", dir=scratch_root) as tmp_dir:
+            tmp_path = Path(tmp_dir)
+
+            # Step 1-2: Preflight + target confirmation
+            preflight_started = True
+            t0 = time.monotonic()
+            try:
+                manifest, steps, schemas, apps, targets, identities, fetched_by_schema, failures = _preflight_bundle(
+                    repo_root,
+                    slug,
+                    env,
+                    allow_existing=allow_existing,
+                    confirm_target=confirm_target,
+                    values=values,
+                    runner=runner,
+                    work_dir=tmp_path / "preflight",
+                    require_deployer=(app_deployer is _invoke_app_deploy),
+                )
+            finally:
+                timings["preflight"] = round(time.monotonic() - t0, 3)
+            before_invalids = {schema: set() for schema in schemas}
+            after_invalids = {schema: set() for schema in schemas}
+            new_invalids = {schema: [] for schema in schemas}
+            if failures:
+                raise ReleaseError("Preflight refused:\n  - " + "\n  - ".join(failures))
+            completed_phases.append("preflight")
+
+            patch_sources_by_schema: dict[str, dict[tuple[str, str], str]] = {schema: {} for schema in schemas}
+            for step in steps:
+                if step.section == "code" and step.mode == "patch" and step.object_type and step.object_name:
+                    obj = fetched_by_schema[step.schema].get((step.object_type, step.object_name), {})
+                    patch_sources_by_schema[step.schema][(step.object_type, step.object_name)] = _source_text_for_hash(
+                        step.object_type, obj
+                    )
+
+            # Step 3: Backup existing target objects
+            t1 = time.monotonic()
+            try:
+                if skip_backup:
+                    backup_label = "skipped"
+                else:
+                    backup_dir = scratch_root / "backups" / f"{slug}-{env}-{stamp}"
+                    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    backup_label = backup_dir.relative_to(repo_root).as_posix()
+                    expected_objects: list[dict[str, str]] = []
+                    backed_up: list[dict[str, str]] = []
+                    try:
+                        for schema in schemas:
+                            existing_items = [
+                                key
+                                for key, obj in fetched_by_schema[schema].items()
+                                if obj.get("exists") is True
+                            ]
+                            for obj_type, obj_name in existing_items:
+                                expected_objects.append({
+                                    "schema": schema,
+                                    "objectType": obj_type,
+                                    "objectName": obj_name,
+                                })
+                            if not existing_items:
+                                continue
+                            _, backed = _fetch_schema_objects(
+                                runner,
+                                targets[schema],
+                                tmp_path / f"backup-{schema}",
+                                existing_items,
+                                include_ddl=True,
+                                environ=values,
+                            )
+                            for obj_type, obj_name in existing_items:
+                                obj = backed.get((obj_type, obj_name)) or {}
+                                content = obj.get("ddl") or obj.get("source") or ""
+                                if not isinstance(content, str) or not content.strip():
+                                    ddl_err = obj.get("ddlError")
+                                    detail = f" ({ddl_err})" if isinstance(ddl_err, str) and ddl_err.strip() else ""
+                                    raise ReleaseError(
+                                        f"Backup failed before apply: existing object {schema}.{obj_name} ({obj_type}) "
+                                        f"returned empty DDL/source{detail}"
+                                    )
+                                fname = f"{schema}.{obj_type.replace(' ', '_')}.{obj_name}.sql"
+                                (backup_dir / fname).write_text(
+                                    content.replace("\r\n", "\n"), encoding="utf-8", newline="\n"
+                                )
+                                backed_up.append({
+                                    "schema": schema,
+                                    "objectType": obj_type,
+                                    "objectName": obj_name,
+                                    "file": fname,
+                                })
+                    finally:
+                        _write_json_lf(
+                            backup_dir / "backup-manifest.json",
+                            {
+                                "slug": slug,
+                                "environment": env,
+                                "expectedObjects": expected_objects,
+                                "objects": backed_up,
+                            },
+                        )
+                completed_phases.append("backup")
+            finally:
+                timings["backup"] = round(time.monotonic() - t1, 3)
+
+            # Step 4: Execute all 01-ddl -> all 02-code -> all 03-ords (consecutive schema batches) + invalid delta
+            t2 = time.monotonic()
+            try:
+                apply_schemas = [
+                    schema for schema in schemas
+                    if any(s.schema == schema and s.section in {"ddl", "code", "ords"} for s in steps)
+                ]
+
+                def _check_post_apply(schema: str, post_payload: Mapping[str, Any]) -> None:
+                    code_errors = post_payload.get("errors") or []
+                    if code_errors:
+                        formatted_errs = [
+                            f"{e.get('objectType')} {e.get('objectName')} L{e.get('line')}:{e.get('position')}: {e.get('text')}"
+                            for e in code_errors
+                        ]
+                        raise ReleaseError(f"Compilation errors in {schema}:\n  - " + "\n  - ".join(formatted_errs))
+
+                    before_set = before_invalids[schema]
+                    after_set = _invalid_set(post_payload.get("invalids") or [])
+                    delta = sorted(after_set - before_set)
+                    after_invalids[schema] = after_set
+                    new_invalids[schema] = delta
+                    if delta:
+                        names = ", ".join(f"{t} {n}" for t, n in delta)
+                        raise ReleaseError(f"New invalid objects appeared in {schema}: {names}")
+
+                if len(apply_schemas) == 1:
+                    schema = apply_schemas[0]
+                    schema_apply_steps = [s for s in steps if s.schema == schema and s.section in {"ddl", "code", "ords"}]
+                    driver_sql = _render_apply_driver(
+                        targets[schema],
+                        schema_apply_steps,
+                        confirm_target=confirm_target,
+                        preflight_con_name=identities[schema].get("con_name"),
+                        patch_sources=patch_sources_by_schema[schema],
+                    )
+                    output = _run_driver(
+                        runner,
+                        targets[schema],
+                        tmp_path / f"apply-{schema}",
+                        "release-apply.sql",
+                        driver_sql,
+                        phase="apply",
+                        environ=values,
+                    )
+                    before_payload = _extract_framed_json(output, "BEFORE_INVALID")
+                    _verify_live_identity(before_payload.get("identity") or {}, targets[schema])
+                    before_invalids[schema] = _invalid_set(before_payload.get("invalids") or [])
+                    post_payload = _extract_framed_json(output, "POST_APPLY")
+                    _check_post_apply(schema, post_payload)
+                elif len(apply_schemas) > 1:
+                    # 4a. Capture before invalid-object baselines for all touched schemas before any DDL runs.
+                    for schema in apply_schemas:
+                        driver_sql = _render_before_invalids_driver(targets[schema])
+                        output = _run_driver(
+                            runner,
+                            targets[schema],
+                            tmp_path / f"before-invalids-{schema}",
+                            "release-before-invalids.sql",
+                            driver_sql,
+                            phase="preconditions",
+                            environ=values,
+                        )
+                        before_payload = _extract_framed_json(output, "BEFORE_INVALID")
+                        _verify_live_identity(before_payload.get("identity") or {}, targets[schema])
+                        before_invalids[schema] = _invalid_set(before_payload.get("invalids") or [])
+
+                    # 4b. Execute strictly by phase (ddl -> code -> ords), grouping consecutive same-schema steps.
+                    batch_num = 0
+                    for section in ("ddl", "code", "ords"):
+                        phase_steps = [s for s in steps if s.section == section]
+                        for batch_schema, batch_iter in groupby(phase_steps, key=lambda s: s.schema):
+                            batch_num += 1
+                            batch_steps = list(batch_iter)
+                            driver_sql = _render_batch_apply_driver(
+                                targets[batch_schema],
+                                batch_steps,
+                                confirm_target=confirm_target,
+                                preflight_con_name=identities[batch_schema].get("con_name"),
+                                patch_sources=patch_sources_by_schema[batch_schema],
+                            )
+                            _run_driver(
+                                runner,
+                                targets[batch_schema],
+                                tmp_path / f"apply-{batch_num:02d}-{section}-{batch_schema}",
+                                f"release-apply-{section}-{batch_schema}.sql",
+                                driver_sql,
+                                phase="apply",
+                                environ=values,
+                            )
+
+                    # 4c. After all apply phases finish, check ALL_ERRORS and invalid-object delta per schema.
+                    for schema in apply_schemas:
+                        schema_code_steps = [s for s in steps if s.schema == schema and s.section == "code"]
+                        driver_sql = _render_post_apply_driver(targets[schema], schema_code_steps)
+                        output = _run_driver(
+                            runner,
+                            targets[schema],
+                            tmp_path / f"post-apply-{schema}",
+                            "release-post-apply.sql",
+                            driver_sql,
+                            phase="postconditions",
+                            environ=values,
+                        )
+                        post_payload = _extract_framed_json(output, "POST_APPLY")
+                        _check_post_apply(schema, post_payload)
+                completed_phases.append("apply")
+            finally:
+                timings["apply"] = round(time.monotonic() - t2, 3)
+
+            # Step 4b: 04-verify smoke scripts (read-only)
+            t3 = time.monotonic()
+            try:
+                for schema in schemas:
+                    verify_steps = [s for s in steps if s.schema == schema and s.section == "verify"]
+                    if not verify_steps:
+                        continue
+                    driver_sql = _render_verify_driver(targets[schema], verify_steps)
+                    output = _run_driver(
+                        runner,
+                        targets[schema],
+                        tmp_path / f"verify-{schema}",
+                        "release-verify.sql",
+                        driver_sql,
+                        phase="postconditions",
+                        environ=values,
+                    )
+                    if "RELEASE_VERIFY_OK" not in output.splitlines():
+                        raise ReleaseError(f"04-verify smoke scripts did not complete cleanly for {schema}")
+                completed_phases.append("verify")
+            finally:
+                timings["verify"] = round(time.monotonic() - t3, 3)
+
+            # Step 5: Optional APEX app deploy
+            t4 = time.monotonic()
+            try:
+                for app_id in apps:
+                    app_deployer(repo_root, app_id, env, confirm_target, values)
+                    deployed_apps.append(app_id)
+                completed_phases.append("apps")
+            finally:
+                timings["apps"] = round(time.monotonic() - t4, 3)
+
+        # Step 6: Report & Prod lock
+        if env == "prod":
+            tag_status = _git_create_release_tag(repo_root, slug, release_commit)
+            bundle_dir = _safe_bundle_dir(repo_root, slug)
+            observed_db = next(iter(identities.values()))["db_unique_name"] if identities else confirm_target
+            manifest["status"] = "deployed"
+            manifest["deployedAt"] = _utc_now()
+            manifest["deployedTarget"] = observed_db
+            manifest["deployedCommit"] = release_commit
+            _write_json_lf(bundle_dir / "release.json", manifest)
+            completed_phases.append("prod-lock")
+
+        outcome = "SUCCEEDED"
+    except Exception as exc:
+        error_message = str(exc)
+        raise
+    finally:
+        if preflight_started:
+            report_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            report_lines = [
+                f"# Release Report: {slug} ({env})",
+                "",
+                f"- **Outcome:** {outcome}",
+                f"- **Status:** {manifest.get('status')}",
+            ]
+            if error_message:
+                report_lines.append(f"- **Error:** {error_message}")
+            report_lines.extend([
+                f"- **Commit:** `{release_commit}`",
+                f"- **Backup:** `{backup_label}`",
+                f"- **Git tag:** `{tag_status}`",
+                f"- **Completed phases:** {', '.join(completed_phases) if completed_phases else 'none'}",
+                f"- **Apps deployed:** {', '.join(str(a) for a in deployed_apps) if deployed_apps else 'none'}",
+                "",
+                "## Target Identities",
+                "",
+            ])
+            for schema in schemas:
+                ident = identities.get(schema)
+                if ident is None:
+                    report_lines.append(f"- `{schema}`: (preflight identity not captured)")
+                    continue
+                report_lines.append(
+                    f"- `{schema}`: `DB_UNIQUE_NAME={ident['db_unique_name']}`, `CON_NAME={ident['con_name']}`, "
+                    f"`USER={ident['session_user']}`, before_invalid={len(before_invalids.get(schema, ()))}, "
+                    f"after_invalid={len(after_invalids.get(schema, ()))}, new_invalid={len(new_invalids.get(schema, ()))}"
+                )
+            report_lines.extend([
+                "",
+                "## Phase Timings (seconds)",
+                "",
+                *(f"- `{phase}`: {secs:.3f}s" for phase, secs in timings.items()),
+                "",
+            ])
+            report_path.write_text("\n".join(report_lines), encoding="utf-8", newline="\n")
+            if outcome == "SUCCEEDED":
+                print(f"Release {slug} -> {env} succeeded. Report: {report_path}")
+            else:
+                print(f"Release {slug} -> {env} failed. Report: {report_path}", file=sys.stderr)
+
     return 0
 
 
