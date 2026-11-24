@@ -3,18 +3,21 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
 import math
 import os
 import re
+import selectors
 import signal
 import shutil
 import subprocess
-import time
-import selectors
+import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from . import windows_job
 from .local_config import ConfigError, validate_sqlcl_pool_settings
@@ -54,6 +57,7 @@ SQLCL_ERROR_RE = re.compile(r"(?m)^(?:(?:ORA-\d{5}|SP2-\d{4}|SQLcl Error):|Error
 # generated without it keeps today's EXIT line. A failure still ends SQLcl through WHENEVER ... EXIT.
 POOLED_EPILOGUE_MARKER = "-- TEAM_POOLED_EPILOGUE"
 _active_pool: object | None = None
+_active_dispatch_stats: SessionDispatchStats | None = None
 
 
 def _set_active_pool(pool: object | None) -> None:
@@ -64,6 +68,157 @@ def _set_active_pool(pool: object | None) -> None:
 def active_pool() -> object | None:
     """The session pool of the running deployment command, or None (one SQLcl launch per script)."""
     return _active_pool
+
+
+class SessionDispatchStats:
+    """Thread-safe command totals for pooled and one-shot SQLcl dispatches."""
+
+    _TIME_FIELDS = ("acquisitionSeconds", "startupSeconds", "resetSeconds", "scriptSeconds", "elapsedSeconds")
+
+    def __init__(self, fallback_reason: str | None = None) -> None:
+        self._lock = threading.Lock()
+        self._totals = {
+            "fallbackReason": fallback_reason,
+            "drivers": 0,
+            "dispatchedDrivers": 0,
+            "pooledDrivers": 0,
+            "oneShotDrivers": 0,
+            "successfulDrivers": 0,
+            "failedDrivers": 0,
+            "processStarts": 0,
+            "connectionAttempts": 0,
+            "sessionsEstablished": 0,
+            "poolFallbacks": 0,
+            "resetAttempts": 0,
+            "replacements": 0,
+            **{field: 0.0 for field in self._TIME_FIELDS},
+        }
+
+    def record(self, evidence: Mapping) -> None:
+        mode = evidence.get("mode")
+        with self._lock:
+            self._totals["drivers"] += 1
+            if evidence.get("dispatched") is True:
+                self._totals["dispatchedDrivers"] += 1
+                self._totals["pooledDrivers" if mode == "pooled" else "oneShotDrivers"] += 1
+            successful = evidence.get("success") is True
+            self._totals["successfulDrivers" if successful else "failedDrivers"] += 1
+            for field in ("processStarts", "connectionAttempts", "sessionsEstablished", "resetAttempts"):
+                value = evidence.get(field)
+                if type(value) is int and value >= 0:
+                    self._totals[field] += value
+            if evidence.get("poolFallback") is True:
+                self._totals["poolFallbacks"] += 1
+                if self._totals["fallbackReason"] is None:
+                    self._totals["fallbackReason"] = evidence.get("fallbackReason")
+            if evidence.get("replacementReason"):
+                self._totals["replacements"] += 1
+            for field in self._TIME_FIELDS:
+                value = evidence.get(field)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+                    self._totals[field] = round(self._totals[field] + float(value), 3)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            result = dict(self._totals)
+        if result["pooledDrivers"] and result["oneShotDrivers"]:
+            result["mode"] = "mixed"
+        elif result["pooledDrivers"]:
+            result["mode"] = "pooled"
+        elif result["oneShotDrivers"]:
+            result["mode"] = "one-shot"
+        else:
+            result["mode"] = "none"
+        result["processesStarted"] = result["processStarts"]
+        result["scripts"] = result["dispatchedDrivers"]
+        result["databaseSessions"] = (
+            result["sessionsEstablished"]
+            if result["pooledDrivers"] and not result["oneShotDrivers"]
+            else None
+        )
+        return result
+
+
+def _set_active_dispatch_stats(stats: SessionDispatchStats | None) -> SessionDispatchStats | None:
+    global _active_dispatch_stats
+    previous = _active_dispatch_stats
+    _active_dispatch_stats = stats
+    return previous
+
+
+def active_dispatch_stats() -> SessionDispatchStats | None:
+    """Return the active deployment's mutable dispatch counter, if any."""
+    return _active_dispatch_stats
+
+
+def session_dispatch_stats() -> dict | None:
+    """Return a snapshot of dispatch totals inside a deployment context, or None outside one."""
+    stats = _active_dispatch_stats
+    return None if stats is None else stats.snapshot()
+
+
+def safe_pool_reason(reason: object) -> str:
+    """Map pool internals to a sanitized diagnostic suitable for reports."""
+    value = str(reason).casefold()
+    if "windows-pipes" in value:
+        return "windows-pipes"
+    if "closed" in value:
+        return "pool closed"
+    if "reset" in value:
+        return "persistent SQLcl session reset failed"
+    if "alias" in value or "unsupported" in value:
+        return "persistent SQLcl session configuration refused"
+    if any(token in value for token in ("start", "connect", "baseline", "session")):
+        return "persistent SQLcl session startup failed"
+    return "persistent SQLcl session unavailable"
+
+
+def _add_dispatch_seconds(evidence: dict, field: str, started: float) -> None:
+    evidence[field] = round(float(evidence.get(field, 0.0)) + max(0.0, time.monotonic() - started), 3)
+
+
+def _write_dispatch_evidence(run_dir: Path, evidence: Mapping) -> None:
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=".sqlcl-session-", dir=run_dir)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(dict(evidence), handle, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, run_dir / "sqlcl-session.json")
+    except OSError:
+        pass
+    finally:
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                Path(temporary).unlink(missing_ok=True)
+
+
+def _new_dispatch_evidence(driver: Path, phase: str | None, alias: str) -> dict:
+    return {
+        "alias": alias,
+        "entryDriver": Path(driver).name,
+        "phase": phase or "sqlcl",
+        "role": "writer" if phase == "apply" else "reader",
+        "mode": None,
+        "dispatched": False,
+        "success": False,
+        "status": "failed",
+        "processStarts": 0,
+        "connectionAttempts": 0,
+        "sessionsEstablished": 0,
+        "resetAttempts": 0,
+        "acquisitionSeconds": 0.0,
+        "startupSeconds": 0.0,
+        "resetSeconds": 0.0,
+        "scriptSeconds": 0.0,
+        "dispatchSeconds": 0.0,
+        "elapsedSeconds": 0.0,
+        "startupReason": None,
+        "replacementReason": None,
+        "fallbackReason": None,
+        "poolFallback": False,
+        "returncode": None,
+    }
 
 
 def driver_epilogue(commit: bool) -> str:
@@ -166,6 +321,7 @@ class _BridgeCancelled(Exception):
 def _run_bridge_bounded_posix(
     command: list[str], *, cwd: Path, env: Mapping[str, str], timeout_seconds: float,
     output_limit_bytes: int, cancel_event: threading.Event | None = None, deadline: float | None = None,
+    on_start: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess:
     """Stream at most the requested bytes and kill the isolated SQLcl process tree on overflow."""
     deadline = time.monotonic() + timeout_seconds if deadline is None else deadline
@@ -182,6 +338,8 @@ def _run_bridge_bounded_posix(
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    if on_start is not None:
+        on_start()
     assert process.stdin is not None and process.stdout is not None
     process.stdin.close()
     captured = bytearray()
@@ -276,6 +434,7 @@ def _run_bridge(
     output_limit_bytes: int | None = None,
     cancel_event: threading.Event | None = None,
     deadline: float | None = None,
+    on_start: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the SQLcl bridge with its output (stderr included) as text and nothing on stdin."""
     deadline = time.monotonic() + timeout_seconds if deadline is None else deadline
@@ -303,6 +462,7 @@ def _run_bridge(
                 deadline=deadline,
                 output_limit_bytes=output_limit_bytes,
                 cancel_event=cancel_event,
+                on_start=on_start,
                 **options,
             )
         except windows_job.OutputLimitExceeded as error:
@@ -318,6 +478,7 @@ def _run_bridge(
             output_limit_bytes=output_limit_bytes,
             cancel_event=cancel_event,
             deadline=deadline,
+            on_start=on_start,
         )
     # Killing only the Bash bridge leaves its SQLcl/JVM descendants running.
     # Give this invocation its own process group so timeout/interrupt cleanup
@@ -327,6 +488,8 @@ def _run_bridge(
     if time.monotonic() >= deadline:
         raise subprocess.TimeoutExpired(command, timeout_seconds)
     with subprocess.Popen(command, stdin=subprocess.PIPE, start_new_session=True, **options) as process:
+        if on_start is not None:
+            on_start()
         previous_handlers = {}
 
         def stop_tree():
@@ -396,16 +559,22 @@ def _run_pooled(
     output_limit_bytes: int | None,
     cancel_event: threading.Event | None,
     deadline: float,
+    telemetry: dict,
 ) -> subprocess.CompletedProcess | None:
     """Send a pooled driver to the active session pool; None means run it with its own SQLcl."""
     pool = _active_pool
-    if pool is None or str(environment.get("SQLCL_PERSISTENT_SESSIONS", "1")) == "0":
+    if pool is None:
+        return None
+    if str(environment.get("SQLCL_PERSISTENT_SESSIONS", "1")) == "0":
+        telemetry["fallbackReason"] = "persistent sessions disabled by configuration"
         return None
     try:
         text = driver.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        telemetry["fallbackReason"] = "pooled driver could not be inspected"
         return None
     if not is_pooled_driver(text):
+        telemetry["fallbackReason"] = "driver not eligible for pooling"
         return None
     from .sqlcl_pool import PoolUnavailable
 
@@ -413,9 +582,9 @@ def _run_pooled(
         return pool.run_driver(  # type: ignore[attr-defined]
             target.connection, driver, run_dir, phase=phase, timeout_seconds=timeout_seconds,
             environment=environment, output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,
-            deadline=deadline,
+            deadline=deadline, telemetry=telemetry,
         )
-    except PoolUnavailable:
+    except PoolUnavailable as error:
         # Nothing of this driver ran: a pooled driver ends with its own COMMIT;/ROLLBACK;, so it is safe to
         # run with a one-shot SQLcl, whose end of input then has nothing left to commit. Preserve the same
         # workflow deadline and do not start a fallback after cancellation or expiry.
@@ -423,6 +592,10 @@ def _run_pooled(
             raise _BridgeCancelled("") from None
         if time.monotonic() >= deadline:
             raise subprocess.TimeoutExpired("sqlcl", timeout_seconds) from None
+        telemetry["fallbackReason"] = safe_pool_reason(error)
+        telemetry["poolFallback"] = True
+        if hasattr(pool, "fallback_reason"):
+            pool.fallback_reason = telemetry["fallbackReason"]  # type: ignore[attr-defined]
         return None
 
 
@@ -490,33 +663,49 @@ def run_sqlcl(
 
     bridge = Path(__file__).with_name("sqlcl_session.sh").resolve(strict=True)
     started = time.monotonic()
+    dispatch = _new_dispatch_evidence(resolved_driver, phase, target.connection)
     timeout_elapsed: float | None = None
     cancelled = False
+    completed: subprocess.CompletedProcess | None = None
+    reason: str | None = None
     try:
         completed = _run_pooled(
             target, resolved_driver, resolved_run,
             phase=phase, timeout_seconds=effective_timeout, environment=child_environment,
             output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,
             deadline=started + effective_timeout,
+            telemetry=dispatch,
         )
         if completed is None:
+            dispatch["mode"] = "one-shot"
             if cancel_event is not None and cancel_event.is_set():
                 raise _BridgeCancelled("")
             remaining = started + effective_timeout - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired("sqlcl", effective_timeout)
-            completed = _run_bridge(
-                # as_posix: the bridge compares the driver path with the run directory
-                # as strings, which only works when both use "/" (Git Bash accepts
-                # C:/dir/file); on Linux and macOS it is the same as str().
-                [bash_command(), bridge.as_posix(), resolved_run.as_posix(), target.connection, resolved_driver.as_posix()],
-                cwd=resolved_run,
-                env=child_environment,
-                timeout_seconds=effective_timeout,
-                output_limit_bytes=output_limit_bytes,
-                cancel_event=cancel_event,
-                deadline=started + effective_timeout,
-            )
+
+            def record_one_shot_start() -> None:
+                dispatch["dispatched"] = True
+                dispatch["processStarts"] += 1
+                dispatch["connectionAttempts"] += 1
+
+            script_started = time.monotonic()
+            try:
+                completed = _run_bridge(
+                    # as_posix: the bridge compares the driver path with the run directory
+                    # as strings, which only works when both use "/" (Git Bash accepts
+                    # C:/dir/file); on Linux and macOS it is the same as str().
+                    [bash_command(), bridge.as_posix(), resolved_run.as_posix(), target.connection, resolved_driver.as_posix()],
+                    cwd=resolved_run,
+                    env=child_environment,
+                    timeout_seconds=effective_timeout,
+                    output_limit_bytes=output_limit_bytes,
+                    cancel_event=cancel_event,
+                    deadline=started + effective_timeout,
+                    on_start=record_one_shot_start,
+                )
+            finally:
+                _add_dispatch_seconds(dispatch, "scriptSeconds", script_started)
         output = completed.stdout or ""
         reason = None
         if completed.returncode != 0:
@@ -553,6 +742,22 @@ def run_sqlcl(
             log_file.write(output)
     except OSError as error:
         raise SqlclError(f"could not preserve SQLcl diagnostics ({error})", resolved_run, output) from error
+
+    dispatch_elapsed = round(time.monotonic() - started, 3)
+    dispatch["dispatchSeconds"] = dispatch["scriptSeconds"]
+    dispatch["elapsedSeconds"] = dispatch_elapsed
+    dispatch["success"] = reason is None
+    dispatch["status"] = (
+        "timed-out" if timeout_elapsed is not None else
+        "cancelled" if cancelled else
+        "failed" if reason is not None else
+        "success"
+    )
+    dispatch["returncode"] = completed.returncode if completed is not None else None
+    _write_dispatch_evidence(resolved_run, dispatch)
+    stats = active_dispatch_stats()
+    if stats is not None:
+        stats.record(dispatch)
 
     if timeout_elapsed is not None:
         raise SqlclTimeout(

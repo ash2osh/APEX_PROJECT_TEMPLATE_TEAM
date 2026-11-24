@@ -232,6 +232,13 @@ class MigrationAttemptEvidenceTests(unittest.TestCase):
     def test_pre_payload_refusal_evidence_unlocks_only_while_retained_and_matching(self):
         cases = (
             (
+                "writer precondition refusal",
+                "MIGRATION_IDENTITY_VERIFIED\n"
+                "CHECK_REHEARSAL_FAILED:preconditions\n"
+                "ORA-20985: preconditions failed\n",
+                "preconditions-refused-before-payload",
+            ),
+            (
                 "identity refusal",
                 "MIGRATION_IDENTITY_VERIFIED\n"
                 "ORA-20987: MIGRATION_IDENTITY_GUARD_REFUSED: target differs\n",

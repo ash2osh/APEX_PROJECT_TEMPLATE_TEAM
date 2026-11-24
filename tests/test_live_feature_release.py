@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import statistics
@@ -34,6 +35,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.template_release import is_apex_26_2
 
@@ -417,23 +419,48 @@ class LiveFeatureReleaseTests(unittest.TestCase):
         plan = self._prepare_dev_feature(slug, f"VIEW:{view}", env, identity)
         retained = json.loads((self.project / plan).read_bytes())["beforeState"]["units"][0]["state"]
         self.assertIn(original_tail * 800 + "' AS C11", retained["text"].encode("utf-8")[32768:].decode("utf-8", errors="ignore"))
-        concurrent = self.project / "scratch" / f"{slug}-concurrent.sql"
-        concurrent.write_text("whenever sqlerror exit failure rollback\nset encoding UTF-8\nset define off\n" + guard + prefix + concurrent_tail + suffix + "exit\n", encoding="utf-8")
-        late_env = self._sqlcl_proxy(slug, {**env, "FIXTURE_CONCURRENT_SQL": str(concurrent)}, """
+        # The competing driver lives in a private directory outside the fixture's review and receipt paths.
+        hook_dir = Path(self.workdir.name) / f"{slug}-apply-hook"
+        hook_dir.mkdir(mode=0o700)
+        competing_driver = hook_dir / "concurrent.sql"
+        competing_driver.write_text(
+            "whenever sqlerror exit failure rollback\nset encoding UTF-8\nset define off\n"
+            + guard + prefix + concurrent_tail + suffix + "exit\n", encoding="utf-8",
+        )
+        hook_marker = hook_dir / "injected"
+        (hook_dir / "sitecustomize.py").write_text("""
 import os
 from pathlib import Path
-import subprocess
 import sys
 
-args = sys.argv[1:]
-real = os.environ["FIXTURE_REAL_SQL"]
-driver = next((Path(arg[1:]) for arg in args if arg.startswith("@")), None)
-if driver and driver.is_file() and b"MIGRATION_APPLY_COMPLETED" in driver.read_bytes():
-    altered = ["@" + os.environ["FIXTURE_CONCURRENT_SQL"] if arg.startswith("@") else arg for arg in args]
-    subprocess.run([real, *altered], check=True)
-os.execv(real, [real, *args])
-""")
+if "scripts.feature_cli" in sys.orig_argv and "--execute-plan" in sys.orig_argv:
+    from scripts import sqlcl_session
+
+    original = sqlcl_session.run_sqlcl
+
+    def run_with_concurrent_edit(target, driver, run_dir, **kwargs):
+        if kwargs.get("phase") == "apply" and driver.name == "checkpoint-apply.sql":
+            if target.connection != os.environ["FIXTURE_APPLY_CONNECTION"]:
+                raise RuntimeError("view fixture apply target changed before dispatch")
+            competing_driver = Path(os.environ["FIXTURE_CONCURRENT_SQL"])
+            original(
+                target, competing_driver, competing_driver.parent, phase="apply",
+                environment={**os.environ, "SQLCL_PERSISTENT_SESSIONS": "0"},
+            )
+            Path(os.environ["FIXTURE_APPLY_MARKER"]).touch(exist_ok=False)
+        return original(target, driver, run_dir, **kwargs)
+
+    sqlcl_session.run_sqlcl = run_with_concurrent_edit
+""", encoding="utf-8")
+        late_env = {
+            **env,
+            "FIXTURE_CONCURRENT_SQL": str(competing_driver),
+            "FIXTURE_APPLY_CONNECTION": CONNECTION,
+            "FIXTURE_APPLY_MARKER": str(hook_marker),
+            "PYTHONPATH": os.pathsep.join(filter(None, (str(hook_dir), str(self.project), env.get("PYTHONPATH")))),
+        }
         refused = self._execute_dev_feature(slug, plan, late_env)
+        self.assertTrue(hook_marker.is_file(), refused.stdout + refused.stderr)
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         marker = self.project / "releases/.dev-apply-attempts" / f"{Path(plan).parent.name}.json"
         evidence = json.loads(marker.read_bytes())["evidencePaths"]
@@ -568,74 +595,96 @@ os.execv(real, [real, *args])
         self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
         self.assertIn("unresolved DEV apply", refused.stderr)
 
+    @staticmethod
+    def _benchmark_event(path: Path) -> dict:
+        def script_bytes(path: Path, run_dir: Path, ancestors=()) -> list[bytes]:
+            path = path.resolve()
+            if not path.is_file() or path in ancestors:
+                raise ValueError(f"benchmark driver include is missing, non-regular, or recursive: {path}")
+            raw = path.read_bytes()
+            scripts = [raw]
+            for line in raw.splitlines():
+                match = re.match(rb"\s*(@@?|(?i:START)\s+)(\S.*)$", line)
+                if match:
+                    directive, arguments = match.groups()
+                    include = shlex.split(arguments.decode("utf-8"))[0]
+                    base = path.parent if directive == b"@@" else run_dir
+                    child = base / include
+                    if not child.suffix:
+                        child = child.with_suffix(".sql")
+                    scripts.extend(script_bytes(child, run_dir, (*ancestors, path)))
+            return scripts
+
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if not record["success"]:
+            raise ValueError(f"failed SQLcl evidence: {path}")
+        driver_name = record["entryDriver"]
+        if driver_name != Path(driver_name).name:
+            raise ValueError(f"benchmark entry driver must be a basename: {path}")
+        scripts = script_bytes(path.parent / driver_name, path.parent)
+        raw = scripts[0]
+        if record["phase"] == "apply":
+            phase = "apply"
+        elif record["phase"] == "postconditions":
+            phase = "verification"
+        elif record["phase"] == "preconditions":
+            phase = "checks"
+        else:
+            phase = "catalogOrIdentity"
+        output = path.with_name("sqlcl-output.log").read_text(encoding="utf-8")
+        return {
+            "mode": record["mode"], "phase": phase, "seconds": record["elapsedSeconds"],
+            "processStarts": record["processStarts"], "connectionAttempts": record["connectionAttempts"],
+            "entryDriverBytes": len(raw), "deliveredSqlBytes": sum(map(len, scripts)),
+            "payloadStarts": [
+                line.removeprefix("MIGRATION_PAYLOAD_STARTED:")
+                for line in output.splitlines() if line.startswith("MIGRATION_PAYLOAD_STARTED:")
+            ],
+            "checkMarkerSectionBytes": sum(
+                len(match[0]) for source in scripts
+                for match in re.finditer(
+                    rb"(?m)^.*CHECK_PAYLOAD_BEGIN:(\w+)[^\n]*\n(?s:.*?)^.*CHECK_PAYLOAD_END:\1[^\n]*\n?", source,
+                )
+            ),
+        }
+
     def _benchmark_trace(self) -> tuple[dict, Path]:
         trace = self.project / "scratch" / "benchmark-sqlcl.jsonl"
-        env = self._sqlcl_proxy("benchmark", self.env, r"""
+        hook_dir = Path(self.workdir.name) / "benchmark-hook"
+        hook_dir.mkdir(mode=0o700)
+        (hook_dir / "sitecustomize.py").write_text("""
 import json
 import os
 from pathlib import Path
-import re
-import shlex
-import subprocess
 import sys
-import time
 
+is_rollout = any(Path(arg).name == "rollout.py" for arg in sys.orig_argv[1:2])
+if is_rollout or any(module in sys.orig_argv for module in ("scripts.migration_checks", "scripts.migrate")):
+    from scripts import sqlcl_session
+    from test_live_feature_release import LiveFeatureReleaseTests
 
-def script_bytes(path, ancestors=()):
-    path = path.resolve()
-    if path in ancestors:
-        raise RuntimeError("benchmark SQLcl script includes itself")
-    raw = path.read_bytes()
-    children = []
-    for line in raw.splitlines():
-        match = re.match(rb"\s*(@@?|(?i:START)\s+)(\S.*)$", line)
-        if match:
-            relative, arguments = match.groups()
-            include = shlex.split(arguments.decode("utf-8"))[0]
-            base = path.parent if relative == b"@@" else Path.cwd()
-            include = base / include
-            if not include.suffix:
-                include = include.with_suffix(".sql")
-            children.extend(script_bytes(include, (*ancestors, path)))
-    return [raw, *children]
+    original = sqlcl_session.run_sqlcl
 
+    def trace_driver(target, driver, run_dir, **kwargs):
+        result = original(target, driver, run_dir, **kwargs)
+        record = LiveFeatureReleaseTests._benchmark_event(Path(run_dir) / "sqlcl-session.json")
+        fd = os.open(os.environ["BENCHMARK_TRACE"], os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, (json.dumps(record) + "\\n").encode("ascii"))
+        finally:
+            os.close(fd)
+        return result
 
-script = next((Path(arg[1:]) for arg in sys.argv[1:] if arg.startswith("@")), None)
-scripts = script_bytes(script) if script is not None and script.is_file() else [b""]
-raw = scripts[0]
-if b"MIGRATION_APPLY_COMPLETED" in raw:
-    phase = "apply"
-elif b"CHECK_PAYLOAD_BEGIN:postconditions" in raw:
-    phase = "verification"
-elif b"CHECK_PAYLOAD_BEGIN:" in raw:
-    phase = "checks"
-else:
-    phase = "catalogOrIdentity"
-started = time.perf_counter()
-result = subprocess.run([os.environ["FIXTURE_REAL_SQL"], *sys.argv[1:]], capture_output=True)
-elapsed = time.perf_counter() - started
-markers = [
-    line.decode("ascii", "replace").removeprefix("MIGRATION_PAYLOAD_STARTED:")
-    for line in result.stdout.splitlines() if line.startswith(b"MIGRATION_PAYLOAD_STARTED:")
-]
-record = {
-    "connect": "-name" in sys.argv, "phase": phase, "seconds": elapsed,
-    "entryDriverBytes": len(raw), "deliveredSqlBytes": sum(map(len, scripts)), "payloadStarts": markers,
-    "checkMarkerSectionBytes": sum(
-        len(match[0]) for source in scripts
-        for match in re.finditer(rb"(?m)^.*CHECK_PAYLOAD_BEGIN:(\w+)[^\n]*\n(?s:.*?)^.*CHECK_PAYLOAD_END:\1[^\n]*\n?", source)
-    ),
-}
-fd = os.open(os.environ["BENCHMARK_TRACE"], os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-try:
-    os.write(fd, (json.dumps(record) + "\n").encode("ascii"))
-finally:
-    os.close(fd)
-sys.stdout.buffer.write(result.stdout)
-sys.stderr.buffer.write(result.stderr)
-raise SystemExit(result.returncode)
-""")
-        return {**env, "BENCHMARK_TRACE": str(trace)}, trace
+    sqlcl_session.run_sqlcl = trace_driver
+""", encoding="utf-8")
+        # Record before read-only commands clean their successful scratch runs.
+        return {
+            **self.env,
+            "BENCHMARK_TRACE": str(trace),
+            "PYTHONPATH": os.pathsep.join(filter(None, (
+                str(hook_dir), str(self.project), str(self.project / "tests"), self.env.get("PYTHONPATH"),
+            ))),
+        }, trace
 
     def test_staging_consolidation_benchmark_preserves_equivalent_effects(self) -> None:
         expected = os.environ.get("TEMPLATE_LIVE_PROOF_STAGING_DB_NAME")
@@ -649,6 +698,7 @@ raise SystemExit(result.returncode)
 
         target = Target("staging", STAGING_CONNECTION, SCHEMA, SCHEMA, "staging")
         target_guard = _disposable_guard(stage_identity)
+        requested_pool = os.environ.get("SQLCL_PERSISTENT_SESSIONS", "1") != "0"
         trace_env, trace = self._benchmark_trace()
         samples = []
 
@@ -763,6 +813,7 @@ raise SystemExit(result.returncode)
                 run_ok(*prepare, env=trace_env)
                 prepared = time.perf_counter()
                 prepare_events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+                self.assertTrue(prepare_events, "prepare produced no SQLcl dispatch evidence")
                 if capsule is not None:
                     self._assert_capsule_target(capsule, "staging", stage_identity)
                 trace.unlink()
@@ -770,6 +821,10 @@ raise SystemExit(result.returncode)
                 run_ok(*apply, env=trace_env)
                 applied = time.perf_counter()
                 apply_events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+                expected_mode = "pooled" if requested_pool else "one-shot"
+                self.assertEqual({event["mode"] for event in apply_events}, {expected_mode}, "unexpected apply transport")
+                if capsule is not None or not requested_pool:
+                    self.assertEqual({event["mode"] for event in prepare_events}, {expected_mode}, "unexpected prepare transport")
                 verify_started = time.perf_counter()
                 self.assertEqual(self._count(f"select count(*) from {table} where id = 1 and version_used = 3 and {package}.revision() = 3", STAGING_CONNECTION), 1)
                 self.assertEqual(self._count(valid["sql"], STAGING_CONNECTION), 1)
@@ -801,7 +856,10 @@ raise SystemExit(result.returncode)
                     "preparationCatalogOrIdentitySqlclSeconds": sum(event["seconds"] for event in prepare_events if event["phase"] == "catalogOrIdentity"),
                     "applySqlclSeconds": sum(event["seconds"] for event in apply_events if event["phase"] == "apply"),
                     "verificationSqlclSecondsWithinApply": sum(event["seconds"] for event in apply_events if event["phase"] == "verification"),
-                    "connectedSqlclSessions": sum(event["connect"] for event in events),
+                    "sqlclProcessStarts": sum(event["processStarts"] for event in events),
+                    "sqlclConnectionAttempts": sum(event["connectionAttempts"] for event in events),
+                    "pooledDrivers": sum(event["mode"] == "pooled" for event in events),
+                    "oneShotDrivers": sum(event["mode"] == "one-shot" for event in events),
                     "entryDriverBytes": sum(event["entryDriverBytes"] for event in events),
                     "deliveredSqlBytes": sum(event["deliveredSqlBytes"] for event in events),
                     "checkMarkerSectionBytes": sum(event["checkMarkerSectionBytes"] for event in events),
@@ -820,16 +878,17 @@ raise SystemExit(result.returncode)
         report = ROOT / "scratch" / f"feature-benchmark-{self.token}.json"
         report.parent.mkdir(exist_ok=True)
         database = self._sql(STAGING_CONNECTION, "set heading off feedback off\nselect version_full from product_component_version where product like 'Oracle%Database%';")
-        sqlcl = _run([trace_env["FIXTURE_REAL_SQL"], "-version"], cwd=self.project, env=self.env)
+        sqlcl = _run(["sql", "-version"], cwd=self.project, env=self.env)
         self.assertEqual(sqlcl.returncode, 0, sqlcl.stderr)
         with report.open("x", encoding="utf-8") as file:
             json.dump({
-                "schemaVersion": 1, "sampleCountPerStrategy": 3, "samples": samples, "medians": medians,
+                "schemaVersion": 2, "sampleCountPerStrategy": 3, "requestedSqlclMode": "pooled" if requested_pool else "one-shot",
+                "samples": samples, "medians": medians,
                 "databaseVersion": database.strip().splitlines()[-1], "sqlclVersion": sqlcl.stdout.strip(),
                 "notes": [
                     "Each sample starts with equivalent objects on one approved staging connection. The connection probe includes one SELECT round trip.",
-                    "Total release time sums the preparation command, apply command, and independent outcome verification. Fixture setup and report instrumentation are outside these intervals.",
-                    "SQLcl sessions and byte counts cover both commands. Delivered SQL bytes include explicit local script includes. Check section bytes count the SQL between the generated BEGIN and END markers, including in-session checks.",
+                    "Total release time sums the preparation command, apply command, and independent outcome verification. Fixture setup and final report generation are outside these intervals. Each command uses the same dispatch observer.",
+                    "SQLcl process, connection-attempt, driver and byte counts cover both commands. Delivered SQL bytes include explicit local driver includes. Check section bytes count the SQL between the generated BEGIN and END markers, including in-session checks.",
                     "The capsule budget covers its selected object steps. Legacy migrate has no capsule budget.",
                 ],
             }, file, indent=2)
@@ -1750,6 +1809,61 @@ raise SystemExit(result.returncode)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(retried["status"], "success")
         self.assertEqual(self._count(f"select count(*) from user_tables where table_name = '{table}'", STAGING_DB), 1)
+
+    def test_late_migrate_precondition_refuses_before_payload_in_the_leased_writer(self) -> None:
+        from scripts import migrate, migration_attempts, release_ownership, sqlcl_pool
+        from scripts.db_targets import Target
+        from scripts.migration_manifest import load_batch
+
+        identity = _fixture_identity(STAGING_DB, self.workdir.name, self.env)
+        guard = _disposable_guard(identity)
+        flag, table = f"LIVE_{self.token}_LRF", f"LIVE_{self.token}_LRT"
+        self._register_drops(STAGING_DB, guard + _drop_table(table))
+        self._sql(
+            STAGING_DB, guard + f"CREATE TABLE {flag} (OK NUMBER);\nINSERT INTO {flag} VALUES (1);\nCOMMIT;",
+            drops=(guard + _drop_table(flag),),
+        )
+        folder = self._migration(
+            "late-guard", {"001-create-table.sql": f"CREATE TABLE {table} (ID NUMBER PRIMARY KEY);\n"},
+            preconditions=({"id": "flag-open", "sql": f"SELECT COUNT(*) FROM {flag} WHERE OK = 1", "expected": 1},),
+            postconditions=({"id": "table", "sql": f"SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME = '{table}'", "expected": 1},),
+        )
+        target = Target("staging", STAGING_DB, SCHEMA, SCHEMA, "staging")
+        scope = release_ownership.scope_from_observed_identity(identity)
+        original = migrate._verify_receipts_and_attempts
+        changed = False
+
+        def after_initial_preflight(*args, **kwargs):
+            nonlocal changed
+            original(*args, **kwargs)
+            if not changed:
+                self._sql(STAGING_DB, guard + f"UPDATE {flag} SET OK = 0;\nCOMMIT;")
+                changed = True
+
+        with (
+            sqlcl_pool.deployment_sessions(),
+            release_ownership.target_writer_lease(self.project, scope, {"purpose": "live-migration-precondition"}) as lease,
+            patch.object(migrate, "_verify_receipts_and_attempts", side_effect=after_initial_preflight),
+        ):
+            result = migrate.apply_batch(
+                self.project, load_batch(self.project, [folder]), target, lambda _: True,
+                writer_lease=lease, rollout_confirmed_by="terminal",
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(result, 2)
+        evidence, = (self.project / "scratch").glob("migration-attempt-*/apply-001/sqlcl-output.log")
+        transcript = evidence.read_text(encoding="utf-8")
+        self.assertIn("ORA-20985", transcript)
+        self.assertNotIn("MIGRATION_PAYLOAD_STARTED:", transcript)
+        manifest = json.loads((evidence.parents[1] / "run-manifest.json").read_bytes())
+        self.assertEqual(manifest["state"], "apply-not-started")
+        self.assertFalse(manifest["migrations"][0]["writeAttempted"])
+        events = [json.loads(path.read_bytes()) for path in (self.project / folder).glob("attempt-event.*.json")]
+        refused, = (event for event in events if event["state"] == "apply-not-started")
+        self.assertTrue(migration_attempts.validate_no_write_evidence(self.project, refused))
+        self.assertFalse((self.project / folder / "status.staging.json").exists())
+        self.assertEqual(self._count(f"SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME = '{table}'", STAGING_DB), 0)
 
     def test_unknown_run_without_a_checkpoint_is_reconciled_then_frees_the_target(self) -> None:
         slug = self._name("recon")

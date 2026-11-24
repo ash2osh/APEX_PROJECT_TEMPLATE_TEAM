@@ -50,6 +50,9 @@ filter. Each new scenario checks the named target before creating its fixtures.
 | `dev_receipt_and_capsule_match_across_three_disposable_targets` | `TEMPLATE_LIVE_STAGING_CONNECTION`, `TEMPLATE_LIVE_PROOF_PRODUCTION_CONNECTION`, and `TEMPLATE_LIVE_PROOF_DEV_DB_NAME`, `TEMPLATE_LIVE_PROOF_STAGING_DB_NAME`, `TEMPLATE_LIVE_PROOF_PRODUCTION_DB_NAME`. Use three separate disposable databases with the same owner name. The scenario checks the DEV receipt against the capsule, tests a redirected saved alias and invalid staging proof, verifies the installed source and settings on all three targets, and retains an ambiguous DEV attempt. |
 | `staging_consolidation_benchmark_preserves_equivalent_effects` | `TEMPLATE_LIVE_FEATURE_BENCHMARK=1`, `TEMPLATE_LIVE_STAGING_CONNECTION`, and `TEMPLATE_LIVE_PROOF_STAGING_DB_NAME` for disposable staging separate from DEV. |
 
+Configure a disposable staging proof-generation registry as described in
+[feature releases](feature-releases.md) before running the capsule benchmark.
+
 The benchmark runs three rotated trials for batched legacy migrations, the
 consolidated feature capsule, and the bounded intermediate transition. Each
 sample starts with equivalent objects on the same staging connection. Each
@@ -57,9 +60,11 @@ path verifies the same final body and backfilled data. The bounded migration
 asserts intermediate source, compiler settings, and validity before its data
 step. The report under `scratch/feature-benchmark-*.json` contains per-trial
 observations, medians, database and SQLcl versions, selected steps, body writes,
-connected SQLcl sessions, and authored and delivered SQL bytes. Delivered bytes
-include nested scripts and count marked check sections, including in-session
-checks. The report records preparation, catalog/identity sessions, apply,
+SQLcl process starts, connection attempts, actual driver modes, and authored and
+delivered SQL bytes. The benchmark reads dispatch evidence after each command.
+A pooled sample requires pooled apply drivers and, for capsules, pooled prepare
+drivers. Delivered bytes include nested driver scripts and count marked check
+sections, including in-session checks. The report records preparation, catalog/identity sessions, apply,
 independent verification and total release time alongside the capsule's
 object-budget coverage and outcome. The connection probe includes a scalar round
 trip. Run the suite on approved targets before using its timings to estimate a

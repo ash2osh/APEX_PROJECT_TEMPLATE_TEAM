@@ -31,7 +31,6 @@ import re
 import select
 import secrets
 import signal
-import stat
 import subprocess
 import tempfile
 import threading
@@ -192,7 +191,6 @@ def reset_block(baseline: SessionBaseline, baseline_settings: Path, defines: set
         "    RAISE_APPLICATION_ERROR(-20961, 'TEAM_POOL_RESET: session edition changed');",
         "  END IF;",
         f"  EXECUTE IMMEDIATE 'ALTER SESSION SET CURRENT_SCHEMA = \"{baseline.session_user.replace(chr(34), '')}\"';",
-        *_ddl_transform_statements(baseline.ddl or {}),
     ]
     ordered_nls = sorted(baseline.nls, key=lambda name: (name not in {"NLS_LANGUAGE", "NLS_TERRITORY"}, name))
     for name in ordered_nls:
@@ -203,10 +201,12 @@ def reset_block(baseline: SessionBaseline, baseline_settings: Path, defines: set
                 statements.append(_alter_session(name, baseline.compiler[name]))
     statements.append("  DBMS_SESSION.RESET_PACKAGE;")
     lines.extend(("BEGIN", *statements, "END;", "/"))
-    # The replay sets SERVEROUTPUT back to its baseline anyway; switching it off first matters for speed: while it is
-    # on, SQLcl fetches server output after every database call, doubling the round trips of the replay (live,
-    # 2026-11-22: about 9 s per reset against a remote database, 1.2 s with it off).
+    # Suppress the extra output fetches during transform and client settings replay.
     lines.append("SET SERVEROUTPUT OFF")
+    if baseline.ddl:
+        # RESET_PACKAGE clears DBMS_METADATA's package state when its call ends. Apply the
+        # client's captured transform settings only after that PL/SQL call has completed.
+        lines.extend(("BEGIN", *_ddl_transform_statements(baseline.ddl), "END;", "/"))
     lines.append(f'@"{baseline_settings.as_posix()}"')
     lines.extend(("CLEAR COLUMNS", "CLEAR BREAKS", "CLEAR COMPUTES"))
     lines.extend(f"UNDEFINE {name}" for name in sorted(defines))
@@ -289,6 +289,7 @@ class SqlclProcess:
         self.connects = 0
         self.defines: set[str] = set()
         self.process: subprocess.Popen | None = None
+        self.last_reset_failure_reason: str | None = None
         self._lines: queue.Queue[str | None] = queue.Queue()
         self.lock = threading.Lock()
 
@@ -314,6 +315,13 @@ class SqlclProcess:
     def retired(self) -> bool:
         return self.batches >= MAX_BATCHES or not self.alive()
 
+    def retirement_reason(self) -> str:
+        if not self.alive():
+            return "session process ended"
+        if self.batches >= MAX_BATCHES:
+            return "session batch limit reached"
+        return "session retired"
+
     def alive(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
@@ -323,6 +331,7 @@ class SqlclProcess:
         deadline: float,
         timeout_seconds: float,
         cancel_event: threading.Event | None = None,
+        telemetry: dict | None = None,
     ) -> None:
         if os.name == "nt":
             raise PoolUnavailable("windows-pipes")
@@ -339,6 +348,9 @@ class SqlclProcess:
             )
         except OSError as error:
             raise PoolUnavailable(f"SQLcl could not be started: {error}") from error
+        if telemetry is not None:
+            telemetry["processStarts"] = telemetry.get("processStarts", 0) + 1
+            telemetry["connectionAttempts"] = telemetry.get("connectionAttempts", 0) + 1
         threading.Thread(target=self._pump, name=f"sqlcl-pool-{self.role}", daemon=True).start()
         self.connects = 1
         returncode, output = self.run_segment(
@@ -367,6 +379,8 @@ class SqlclProcess:
             self.kill()
             raise PoolUnavailable("persistent SQLcl session did not start; output: " + output[-2000:])
         self.baseline = baseline
+        if telemetry is not None:
+            telemetry["sessionsEstablished"] = telemetry.get("sessionsEstablished", 0) + 1
 
     def _pump(self) -> None:
         assert self.process is not None and self.process.stdout is not None
@@ -541,24 +555,33 @@ class SqlclProcess:
         *,
         deadline: float,
         cancel_event: threading.Event | None = None,
+        telemetry: dict | None = None,
     ) -> bool:
         """Return this reused session to its baseline; False means the process must be replaced."""
+        self.last_reset_failure_reason = None
         if self.baseline is None or not self.alive():
+            self.last_reset_failure_reason = "session process unavailable before reset"
             return False
         reconnect = self.alias if self.role == "writer" and self.baseline.compiler is None else None
         try:
             text = reset_block(self.baseline, self.baseline_settings, self.defines, reconnect_alias=reconnect)
+            if reconnect is not None and telemetry is not None:
+                telemetry["connectionAttempts"] = telemetry.get("connectionAttempts", 0) + 1
             returncode, output = self.run_segment(
                 text, timeout_seconds=timeout_seconds, deadline=deadline, cancel_event=cancel_event,
             )
         except (PoolUnavailable, subprocess.TimeoutExpired):
+            self.last_reset_failure_reason = "session reset timed out or could not be prepared"
             self.kill()
             return False
         if returncode != 0 or RESET_OK_MARKER not in output.split() or SQLCL_ERROR_RE.search(output):
+            self.last_reset_failure_reason = "session reset verification failed"
             self.kill()
             return False
         if reconnect is not None:
             self.connects += 1
+            if telemetry is not None:
+                telemetry["sessionsEstablished"] = telemetry.get("sessionsEstablished", 0) + 1
         self.defines.clear()
         return True
 
@@ -639,7 +662,9 @@ class SessionPool:
         deadline: float,
         timeout_seconds: float,
         cancel_event: threading.Event | None,
+        telemetry: dict,
     ) -> Iterator[SqlclProcess]:
+        acquisition_started = time.monotonic()
         key = (alias, role)
         limit = 1 if role == "writer" else self.max_readers
         with self._condition:
@@ -650,6 +675,8 @@ class SessionPool:
                 group = self._processes.setdefault(key, [])
                 for process in list(group):
                     if process.retired() and not process.lock.locked():
+                        if not telemetry.get("replacementReason"):
+                            telemetry["replacementReason"] = process.retirement_reason()
                         group.remove(process)
                         self._retired_connects += process.connects
                         process.close(deadline=deadline, cancel_event=cancel_event)
@@ -665,10 +692,23 @@ class SessionPool:
                     fresh = True
                     break
                 self._condition.wait(timeout=min(remaining, 0.05))
+        telemetry["acquisitionSeconds"] = round(
+            telemetry.get("acquisitionSeconds", 0.0) + time.monotonic() - acquisition_started, 3,
+        )
         try:
             if fresh:
                 try:
-                    chosen.start(deadline=deadline, timeout_seconds=timeout_seconds, cancel_event=cancel_event)
+                    startup_started = time.monotonic()
+                    telemetry["startupReason"] = telemetry.get("replacementReason") or "no idle session for this alias and role"
+                    try:
+                        chosen.start(
+                            deadline=deadline, timeout_seconds=timeout_seconds, cancel_event=cancel_event,
+                            telemetry=telemetry,
+                        )
+                    finally:
+                        telemetry["startupSeconds"] = round(
+                            telemetry.get("startupSeconds", 0.0) + time.monotonic() - startup_started, 3,
+                        )
                     self.processes_started += 1
                 except BaseException:
                     with self._condition:
@@ -694,8 +734,11 @@ class SessionPool:
         output_limit_bytes: int | None = None,
         cancel_event: threading.Event | None = None,
         deadline: float | None = None,
+        telemetry: dict | None = None,
     ) -> subprocess.CompletedProcess:
         """Run one pooled driver; raise PoolUnavailable before anything of it ran if no session is available."""
+        telemetry = {} if telemetry is None else telemetry
+        telemetry["mode"] = "pooled"
         started = time.monotonic()
         deadline = started + timeout_seconds if deadline is None else deadline
         _check_request(deadline, timeout_seconds, cancel_event)
@@ -708,38 +751,53 @@ class SessionPool:
             try:
                 with self._acquire(
                     connection, role, environment, deadline=deadline, timeout_seconds=timeout_seconds,
-                    cancel_event=cancel_event,
+                    cancel_event=cancel_event, telemetry=telemetry,
                 ) as process:
-                    if process.scripts > 0 and not process.reset(
-                        timeout_seconds, deadline=deadline, cancel_event=cancel_event,
-                    ):
+                    if process.scripts > 0:
+                        reset_started = time.monotonic()
+                        telemetry["resetAttempts"] = telemetry.get("resetAttempts", 0) + 1
+                        try:
+                            reset_ok = process.reset(
+                                timeout_seconds, deadline=deadline, cancel_event=cancel_event, telemetry=telemetry,
+                            )
+                        finally:
+                            sqlcl_session._add_dispatch_seconds(telemetry, "resetSeconds", reset_started)
+                    else:
+                        reset_ok = True
+                    if not reset_ok:
                         replace = True
+                        telemetry["replacementReason"] = (
+                            process.last_reset_failure_reason or "session reset verification failed"
+                        )
                     else:
                         replace = False
-                        reset_seconds = round(time.monotonic() - started, 3)
                         _check_request(deadline, timeout_seconds, cancel_event)
                         segment = f'cd "{run_dir.as_posix()}"\n@"{driver_path.as_posix()}"'
                         defines = script_defines(driver_path, run_dir)
                         _check_request(deadline, timeout_seconds, cancel_event)
                         process.scripts += 1
                         self.scripts += 1
-                        slot = process.next_slot
-                        process.defines |= defines
-                        returncode, output = process.run_segment(
-                            segment, timeout_seconds=timeout_seconds, deadline=deadline,
-                            output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,
+                        telemetry.update(
+                            dispatched=True, slot=process.next_slot, processScripts=process.scripts,
+                            pid=process.process.pid if process.process else None,
                         )
-                        _write_evidence(run_dir, {
-                            "mode": "pooled", "alias": connection, "role": role,
-                            "pid": process.process.pid if process.process else None, "slot": slot,
-                            "processScripts": process.scripts, "resetSeconds": reset_seconds,
-                            "scriptSeconds": round(time.monotonic() - started - reset_seconds, 3),
-                            "returncode": returncode,
-                        })
+                        process.defines |= defines
+                        script_started = time.monotonic()
+                        try:
+                            returncode, output = process.run_segment(
+                                segment, timeout_seconds=timeout_seconds, deadline=deadline,
+                                output_limit_bytes=output_limit_bytes, cancel_event=cancel_event,
+                            )
+                        finally:
+                            telemetry["scriptSeconds"] = round(
+                                telemetry.get("scriptSeconds", 0.0) + time.monotonic() - script_started, 3,
+                            )
+                        telemetry["returncode"] = returncode
                         return subprocess.CompletedProcess(["sqlcl-pool", connection], returncode, output, None)
             except PoolUnavailable as error:
-                self.fallback_reason = str(error).splitlines()[0][:200]
-                raise
+                self.fallback_reason = sqlcl_session.safe_pool_reason(error)
+                telemetry["fallbackReason"] = self.fallback_reason
+                raise PoolUnavailable(self.fallback_reason) from None
             if replace:
                 _check_request(deadline, timeout_seconds, cancel_event)
             if replace and attempts >= 3:
@@ -755,15 +813,6 @@ class SessionPool:
                 self._retired_connects += process.connects
                 process.close()
         safe_rmtree(self.root)
-
-
-def _write_evidence(run_dir: Path, record: Mapping) -> None:
-    path = Path(run_dir) / "sqlcl-session.json"
-    with contextlib.suppress(OSError):
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(record, handle, sort_keys=True)
-            handle.write("\n")
 
 
 def _enabled(environment: Mapping[str, str]) -> tuple[bool, str | None]:
@@ -795,11 +844,21 @@ def deployment_sessions(environment: Mapping[str, str] | None = None) -> Iterato
     available, it yields None and every script keeps its own SQLcl launch.
     """
     env = os.environ if environment is None else environment
-    outer = sqlcl_session.active_pool()
-    if outer is not None:
-        yield outer  # type: ignore[misc]
+    if sqlcl_session.active_dispatch_stats() is not None:
+        yield sqlcl_session.active_pool()  # type: ignore[misc]
         return
-    enabled, _reason = _enabled(env)
+    enabled, reason = _enabled(env)
+    stats = sqlcl_session.SessionDispatchStats(reason)
+    previous_stats = sqlcl_session._set_active_dispatch_stats(stats)
+    try:
+        with _deployment_pool(env, enabled) as pool:
+            yield pool
+    finally:
+        sqlcl_session._set_active_dispatch_stats(previous_stats)
+
+
+@contextlib.contextmanager
+def _deployment_pool(env: Mapping[str, str], enabled: bool) -> Iterator[SessionPool | None]:
     if not enabled:
         yield None
         return

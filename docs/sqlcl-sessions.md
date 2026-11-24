@@ -18,16 +18,16 @@ Now a command keeps a few SQLcl processes running for its whole run and sends ev
 
 ## What is reset between scripts
 
-Each process connects once and reuses its database session. Before every script except its first, one
-PL/SQL call (one round trip) does the following:
+Each process normally reuses its database session. Before every script except its first, a
+PL/SQL call does the following:
 
 - rolls back;
 - re-enables `COMMIT IN PROCEDURE`;
 - sets `CURRENT_SCHEMA` back to the login;
 - restores NLS and PL/SQL compiler settings to the values the session started with;
-- resets the `DBMS_METADATA` transforms;
 - clears package state (`DBMS_SESSION.RESET_PACKAGE`).
 
+A second call restores the `DBMS_METADATA` transforms after the package reset has taken effect.
 SQLcl's own `SET` options come back from a `STORE SET` baseline, and the column, break and compute settings
 are cleared. Variables a script defined are undefined, including those defined in the scripts it runs with `@`, `@@` or
 `START`, and the positional variables (`&1`, `&2`, ...) an include was given.
@@ -40,13 +40,22 @@ timeout expires or the request is cancelled before dispatch, the driver does not
 cancellation after dispatch terminates the SQLcl process tree. A one-shot fallback uses the time
 remaining and requires that the pooled process has never dispatched that driver.
 
-Each script's run folder keeps `sqlcl-output.log` and a `sqlcl-session.json` record of the process and
-role that ran it. A rollout report records how scripts reached SQLcl, under `sqlcl`:
+Each script's run folder keeps `sqlcl-output.log` and a `sqlcl-session.json` record
+with the driver name, phase, role, transport, outcome, and any cold-start or
+replacement reason. Pooled records include the PID and the script's sequence
+in that process. Acquisition, startup, reset, and driver time are separate for
+pooled runs. One-shot driver time includes its launch and connection.
 
-- `mode`;
-- `processesStarted`;
-- `databaseSessions`;
-- `scripts`.
+The rollout report's `sqlcl` section counts driver calls, dispatches by
+transport, launcher starts, connection attempts, confirmed session baselines,
+resets, and fallbacks.
+`mode` is `pooled`, `one-shot`, `mixed`, or `none` when no driver was dispatched.
+`processesStarted` counts launcher starts and `scripts` counts dispatched
+drivers. `databaseSessions` counts confirmed sessions for pooled-only runs.
+It is null for one-shot and mixed runs because their connection attempts do not
+independently confirm session counts. Summed driver timings can overlap when
+readers run concurrently. These diagnostics are informational and outside
+staging-proof validation.
 
 ## Settings
 

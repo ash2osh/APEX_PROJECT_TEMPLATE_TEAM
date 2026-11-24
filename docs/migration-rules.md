@@ -185,8 +185,16 @@ normal source verification or prove transport behavior on another SQLcl release.
 
 Every folder requires a `checks.json` with read-only preconditions and
 postconditions. These checks validate the expected starting state and verify
-the committed result. The runner also performs structural catalog checks for
-SQL forms it can analyze. Unsupported or data-changing operations need explicit
+the committed result. At each apply boundary the guarded writer evaluates the
+folder's preconditions in a read-only transaction immediately before the payload.
+It ends that transaction before applying. A failing check refuses before any
+payload marker. Postconditions still run against committed state on a separate
+reader. Predicates that must remain true until a data change commits belong in
+reviewed SQL or a database constraint. The apply timeout includes the writer's
+precondition checks. When the configured check timeout is stricter, a separately
+bounded reader check also runs.
+
+The runner also performs structural catalog checks for SQL forms it can analyze. Unsupported or data-changing operations need explicit
 reviewed checks; incomplete verification blocks automated apply. When such an
 operation has its checks, preflight passes but lists it as `REVIEW:`: the
 analyzer cannot see what that SQL does, so only the checks stand for it.
@@ -474,6 +482,11 @@ could not complete. Rehearsal evidence is kept under
 `scratch/migration-rehearsal-*` when SQLcl fails; successful runs remove it.
 
 ## Rollout
+
+The retained migration run manifest records the initial preflight duration and
+per-folder elapsed time for the apply boundary, apply, fresh catalog capture,
+postconditions, and structural verification. Apply time includes the writer's
+precondition checks. A phase may be absent if it did not complete.
 
 `rollout` runs a reviewed release as an ordered manifest. It uses the existing
 migration, read-only verification and app deployment paths; standalone DBA

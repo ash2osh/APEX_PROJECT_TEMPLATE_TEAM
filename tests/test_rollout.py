@@ -169,7 +169,18 @@ class RolloutManifestTests(unittest.TestCase):
         steps = self.pause_steps(3)
         manifest = self.write_manifest(steps)
         report_base = self.root / "scratch" / "report"
-        with patch("scripts.rollout.execute_step", side_effect=self.fake_executor(calls, fail_at=2)), patch(
+        execute = self.fake_executor(calls, fail_at=2)
+
+        def check_progress(*args, **kwargs):
+            number = kwargs["step_number"]
+            saved = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["steps"][number - 1]["status"], "running")
+            self.assertTrue(saved["steps"][number - 1]["startedAt"])
+            if number > 1:
+                self.assertEqual(saved["steps"][number - 2]["status"], "succeeded")
+            return execute(*args, **kwargs)
+
+        with patch("scripts.rollout.execute_step", side_effect=check_progress), patch(
             "sys.stdout"
         ) as stdout, patch("sys.stderr") as stderr:
             status = rollout.run_rollout(
