@@ -37,7 +37,7 @@ IDENTITY_KEYS = {
 }
 NO_WRITE_REASONS = {
     "identity-guard-refused", "migration-identity-guard-refused",
-    "connection-failed-before-payload", "sqlcl-start-failed",
+    "connection-failed-before-payload", "sqlcl-start-failed", "preconditions-refused-before-payload",
 }
 NOT_STARTED_CONNECTION_ERRORS = re.compile(
     r"(?m)^ORA-(?:01017|12154|12514|12537|12541|12545|12547|12560|12637)\b"
@@ -77,7 +77,7 @@ def not_started_reason(output: str) -> str | None:
         and "CHECK_REHEARSAL_FAILED:preconditions" in lines
         and re.search(r"(?m)^ORA-20985\b", output)
     ):
-        # The apply session evaluates the checkpoint's preconditions before any payload and refused (S3).
+        # The guarded writer refused preconditions before any payload reached SQLcl.
         return "preconditions-refused-before-payload"
     if "MIGRATION_IDENTITY_VERIFIED" not in lines and IDENTITY_GUARD_ERRORS.search(output):
         return "migration-identity-guard-refused"

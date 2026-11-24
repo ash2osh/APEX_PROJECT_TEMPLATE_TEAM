@@ -1074,6 +1074,7 @@ def _run_capsule_rollout(
             database_state_before = report["databaseState"]
             result = None
             try:
+                rollout._write_reports(report, report_paths)
                 if step["type"] == "feature-migrate":
                     if environment == "prod" and not promotion_generation_rechecked:
                         try:

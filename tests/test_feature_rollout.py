@@ -645,7 +645,14 @@ class FeatureRolloutTests(unittest.TestCase):
         self._enter(self._patches(environment="staging"))
         report_base = self.root / "scratch" / "staging-yes"
         output = io.StringIO()
-        with patch.object(feature_release, "execute_checkpoint", side_effect=RuntimeError("stop before the first checkpoint")) as execute, \
+        progress = []
+
+        def check_progress(*_args, **_kwargs):
+            saved = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
+            progress.append(saved["steps"][0])
+            raise RuntimeError("stop before the first checkpoint")
+
+        with patch.object(feature_release, "execute_checkpoint", side_effect=check_progress) as execute, \
                 contextlib.redirect_stdout(output), patch("builtins.input", side_effect=AssertionError("-y must not read stdin")):
             status = rollout.run_rollout(
                 self.manifest_path, "staging", repo_root=self.root, capsule_path=self.capsule_path,
@@ -654,6 +661,8 @@ class FeatureRolloutTests(unittest.TestCase):
 
         self.assertEqual(status, 2)
         self.assertTrue(execute.called, "the flag must lead to the first checkpoint")
+        self.assertEqual(progress[0]["status"], "running")
+        self.assertTrue(progress[0]["startedAt"])
         self.assertIn("Confirmed by --yes; the interactive prompt was skipped.", output.getvalue())
         report = json.loads(report_base.with_suffix(".json").read_text(encoding="utf-8"))
         self.assertEqual(report["confirmedBy"], "--yes")

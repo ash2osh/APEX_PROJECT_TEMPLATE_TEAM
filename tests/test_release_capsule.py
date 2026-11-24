@@ -783,7 +783,7 @@ class ReleaseCapsuleTests(unittest.TestCase):
                     self.fail(f"fixture SQLcl received an unexpected payload {relative}")
             output = "\n".join([
                 "MIGRATION_IDENTITY_BEGIN", json.dumps(identity), "MIGRATION_IDENTITY_END", "MIGRATION_IDENTITY_VERIFIED",
-                *(f"MIGRATION_PAYLOAD_STARTED:{name}" for name, _ in payloads),
+                *re.findall(r"(?m)^PROMPT (MIGRATION_(?:PRECONDITIONS_VERIFIED|PAYLOAD_STARTED:\S+))$", source),
                 "MIGRATION_APPLY_COMPLETED", *(["FEATURE_CHECKPOINT_APPLY_COMPLETED"] if "FEATURE_CHECKPOINT_APPLY_COMPLETED" in source else []), "",
             ])
             (run_dir / "sqlcl-output.log").write_text(output, encoding="utf-8")

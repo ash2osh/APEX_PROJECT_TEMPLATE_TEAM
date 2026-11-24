@@ -13,7 +13,7 @@ import os
 import subprocess
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 # How long one wait for the command lasts before Python looks for a Ctrl-C.
@@ -182,6 +182,7 @@ def run(
     deadline: float | None = None,
     output_limit_bytes: int | None = None,
     cancel_event: threading.Event | None = None,
+    on_start: Callable[[], None] | None = None,
     **popen_options: Any,
 ) -> subprocess.CompletedProcess:
     """subprocess.run for Windows: Ctrl-C and the timeout end the command and everything it started.
@@ -201,6 +202,7 @@ def run(
             deadline=deadline,
             output_limit_bytes=output_limit_bytes,
             cancel_event=cancel_event,
+            on_start=on_start,
             console_cancel_event=control_event.event,
             **popen_options,
         )
@@ -217,6 +219,7 @@ def _run_with_control_event(
     output_limit_bytes: int | None,
     cancel_event: threading.Event | None,
     console_cancel_event: threading.Event,
+    on_start: Callable[[], None] | None = None,
     **popen_options: Any,
 ) -> subprocess.CompletedProcess:
     deadline = (time.monotonic() + timeout if timeout is not None else None) if deadline is None else deadline
@@ -232,6 +235,7 @@ def _run_with_control_event(
             deadline=deadline,
             output_limit_bytes=output_limit_bytes,
             cancel_event=cancel_event,
+            on_start=on_start,
             console_cancel_event=console_cancel_event,
             **popen_options,
         )
@@ -240,6 +244,8 @@ def _run_with_control_event(
     except OSError:
         job = None
     process = subprocess.Popen(command, stdin=subprocess.PIPE, **popen_options)
+    if on_start is not None:
+        on_start()
     try:
         if job is not None:
             try:
@@ -282,6 +288,7 @@ def _run_bounded(
     output_limit_bytes: int,
     cancel_event: threading.Event | None = None,
     console_cancel_event: threading.Event | None = None,
+    on_start: Callable[[], None] | None = None,
     **popen_options: Any,
 ) -> subprocess.CompletedProcess:
     """Capture a fixed byte budget and terminate the Windows job as soon as it overflows."""
@@ -301,6 +308,8 @@ def _run_bounded(
         job = None
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=False, **popen_options)
+    if on_start is not None:
+        on_start()
     try:
         if job is not None:
             try:

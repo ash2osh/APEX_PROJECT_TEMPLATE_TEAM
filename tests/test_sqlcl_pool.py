@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import fake_sqlcl_pool
 from scripts import sqlcl_pool, sqlcl_session
@@ -241,6 +242,11 @@ class SqlclPoolTests(unittest.TestCase):
         self.assertEqual(2, pool.stats()["processesStarted"])
         second_runs = [event for event in self._events("script") if event["path"].endswith(f"{run_dir.name}/driver.sql")]
         self.assertEqual(1, len(second_runs), "the script ran exactly once, on the new process")
+        evidence = json.loads((run_dir / "sqlcl-session.json").read_text(encoding="utf-8"))
+        self.assertEqual("session reset verification failed", evidence["replacementReason"])
+        self.assertEqual(1, evidence["processStarts"])
+        self.assertEqual(1, evidence["connectionAttempts"])
+        self.assertEqual(1, evidence["sessionsEstablished"])
 
     def test_lost_session_replaced_before_script_sent(self) -> None:
         self._pool()
@@ -315,7 +321,93 @@ class SqlclPoolTests(unittest.TestCase):
         evidence = json.loads((run_dir / "sqlcl-session.json").read_text(encoding="utf-8"))
         self.assertEqual("writer", evidence["role"])
         self.assertEqual("pooled", evidence["mode"])
+        self.assertIs(evidence["dispatched"], True)
+        self.assertIsInstance(evidence["pid"], int)
+        self.assertEqual(1, evidence["processScripts"])
+        self.assertEqual("apply", evidence["phase"])
+        self.assertEqual("driver.sql", evidence["entryDriver"])
+        self.assertIs(evidence["success"], True)
+        self.assertEqual(1, evidence["processStarts"])
+        self.assertEqual(1, evidence["connectionAttempts"])
+        self.assertEqual(1, evidence["sessionsEstablished"])
+        self.assertGreaterEqual(evidence["acquisitionSeconds"], 0)
+        self.assertGreaterEqual(evidence["startupSeconds"], 0)
+        self.assertEqual(0, evidence["resetSeconds"])
+        self.assertGreaterEqual(evidence["scriptSeconds"], 0)
+        self.assertGreaterEqual(evidence["elapsedSeconds"], evidence["scriptSeconds"])
         self.assertEqual(0, evidence["returncode"])
+
+    def test_one_shot_dispatch_emits_attributed_session_evidence(self) -> None:
+        self._pool()
+        _, run_dir = self._run("PROMPT one shot", pooled=False)
+        evidence = json.loads((run_dir / "sqlcl-session.json").read_text(encoding="utf-8"))
+        self.assertEqual("one-shot", evidence["mode"])
+        self.assertEqual("driver.sql", evidence["entryDriver"])
+        self.assertEqual(1, evidence["processStarts"])
+        self.assertEqual(1, evidence["connectionAttempts"])
+        self.assertIs(evidence["success"], True)
+
+    def test_deployment_dispatch_stats_count_mixed_modes_without_shared_deltas(self) -> None:
+        with sqlcl_pool.deployment_sessions(self.environment):
+            self._run("PROMPT one shot", pooled=False)
+            self._run("PROMPT pooled", phase="postconditions")
+            stats = sqlcl_session.session_dispatch_stats()
+        self.assertEqual(2, stats["drivers"])
+        self.assertEqual("mixed", stats["mode"])
+        self.assertEqual(2, stats["dispatchedDrivers"])
+        self.assertEqual(1, stats["pooledDrivers"])
+        self.assertEqual(1, stats["oneShotDrivers"])
+        self.assertEqual(2, stats["processStarts"])
+        self.assertEqual(2, stats["connectionAttempts"])
+        self.assertIsNone(stats["databaseSessions"], "one-shot connections were not independently observed")
+        self.assertEqual(2, stats["successfulDrivers"])
+
+    def test_pooled_dispatch_report_counts_only_confirmed_session_baselines(self) -> None:
+        with sqlcl_pool.deployment_sessions(self.environment):
+            self._run("PROMPT pooled", phase="postconditions")
+            stats = sqlcl_session.session_dispatch_stats()
+        self.assertEqual(1, stats["processStarts"])
+        self.assertEqual(1, stats["connectionAttempts"])
+        self.assertEqual(1, stats["sessionsEstablished"])
+        self.assertEqual(1, stats["databaseSessions"])
+
+    def test_one_shot_dispatch_stats_exist_when_pool_is_disabled(self) -> None:
+        with sqlcl_pool.deployment_sessions({**self.environment, "SQLCL_PERSISTENT_SESSIONS": "0"}):
+            self._run("PROMPT no pool")
+            stats = sqlcl_session.session_dispatch_stats()
+        self.assertEqual(1, stats["drivers"])
+        self.assertEqual(0, stats["pooledDrivers"])
+        self.assertEqual(1, stats["oneShotDrivers"])
+        self.assertEqual(1, stats["processStarts"])
+        self.assertEqual(1, stats["connectionAttempts"])
+
+    def test_nested_context_keeps_forced_one_shot_and_does_not_count_cancelled_driver(self) -> None:
+        environment = {**self.environment, "SQLCL_PERSISTENT_SESSIONS": "0"}
+        cancel = threading.Event()
+        cancel.set()
+        with sqlcl_pool.deployment_sessions(environment):
+            with sqlcl_pool.deployment_sessions(self.environment) as inner:
+                self.assertIsNone(inner)
+                driver, run_dir = self._driver("PROMPT must not run")
+                with self.assertRaises(SqlclCancelled):
+                    run_sqlcl(self.target, driver, run_dir, environment=environment, cancel_event=cancel)
+            stats = sqlcl_session.session_dispatch_stats()
+        evidence = json.loads((run_dir / "sqlcl-session.json").read_text(encoding="utf-8"))
+        self.assertIs(evidence["dispatched"], False)
+        self.assertEqual(0, stats["processStarts"])
+        self.assertEqual(0, stats["dispatchedDrivers"])
+        self.assertEqual(1, stats["failedDrivers"])
+
+    def test_start_failure_fallback_is_attributed_without_raw_startup_output(self) -> None:
+        self.environment["FAKE_START_FAIL"] = "1"
+        self._pool()
+        _, run_dir = self._run("PROMPT after startup fallback")
+        evidence = json.loads((run_dir / "sqlcl-session.json").read_text(encoding="utf-8"))
+        self.assertEqual("one-shot", evidence["mode"])
+        self.assertEqual(2, evidence["processStarts"])
+        self.assertEqual(2, evidence["connectionAttempts"])
+        self.assertEqual("persistent SQLcl session startup failed", evidence["fallbackReason"])
+        self.assertNotIn("SP2-0640", json.dumps(evidence))
 
     def test_start_failure_falls_back_to_one_shot(self) -> None:
         self.environment["FAKE_START_FAIL"] = "1"
@@ -328,14 +420,26 @@ class SqlclPoolTests(unittest.TestCase):
         self.assertEqual(2, len(self._events("start")), "the fallback delivered the never-dispatched driver once")
 
     def test_safe_fallback_gets_only_the_remaining_workflow_time(self) -> None:
-        self.environment.update(FAKE_START_FAIL="1", FAKE_BASELINE_DELAY="0.2")
+        self.environment.update(FAKE_START_FAIL="1", FAKE_BASELINE_DELAY="0.05")
         self._pool()
-        driver, run_dir = self._driver("FAKE_SLEEP 0.25;", pooled=True)
-        started = time.monotonic()
-        with self.assertRaises(SqlclTimeout):
-            run_sqlcl(self.target, driver, run_dir, environment=self.environment, timeout_seconds=0.35)
+        driver, run_dir = self._driver("PROMPT safe fallback", pooled=True)
+        pool_run = sqlcl_pool.SessionPool.run_driver
+        bridge_run = sqlcl_session._run_bridge
+        deadlines = []
 
-        self.assertLess(time.monotonic() - started, 0.7)
+        def pooled(pool, *args, **kwargs):
+            deadlines.append(kwargs["deadline"])
+            return pool_run(pool, *args, **kwargs)
+
+        def fallback(*args, **kwargs):
+            deadlines.append(kwargs["deadline"])
+            return bridge_run(*args, **kwargs)
+
+        with patch.object(sqlcl_pool.SessionPool, "run_driver", pooled), patch.object(sqlcl_session, "_run_bridge", fallback):
+            run_sqlcl(self.target, driver, run_dir, environment=self.environment, timeout_seconds=3)
+
+        self.assertEqual(2, len(deadlines))
+        self.assertEqual(deadlines[0], deadlines[1], "fallback keeps the original deadline")
         self.assertEqual(2, len(self._events("start")), "pool failure fell back once with residual time")
         self.assertEqual(1, sum(event.get("path") == str(driver) for event in self._events("script")))
 
@@ -356,15 +460,14 @@ class EntryPointTests(unittest.TestCase):
         report: dict = {}
         rollout._finish_report(report, time.perf_counter(), "success", 0)
         self.assertEqual("one-shot", report["sqlcl"]["mode"])
-        pool = sqlcl_pool.SessionPool()
-        sqlcl_session._set_active_pool(pool)
-        try:
+        with sqlcl_pool.deployment_sessions({"SQLCL_PERSISTENT_SESSIONS": "0"}):
             rollout._finish_report(report, time.perf_counter(), "success", 0)
-        finally:
-            sqlcl_session._set_active_pool(None)
-            pool.close()
-        self.assertEqual({"mode", "fallbackReason", "processesStarted", "databaseSessions", "scripts"}, set(report["sqlcl"]))
-        self.assertEqual("pooled", report["sqlcl"]["mode"])
+        stats = report["sqlcl"]
+        self.assertEqual("none", stats["mode"], "no SQLcl drivers actually ran")
+        self.assertEqual(0, stats["processesStarted"])
+        self.assertEqual(0, stats["scripts"])
+        self.assertIsNone(stats["databaseSessions"])
+        self.assertEqual("disabled by SQLCL_PERSISTENT_SESSIONS=0", stats["fallbackReason"])
 
     def test_prod_accepts_staging_proof_from_other_sqlcl_mode(self) -> None:
         # The mode is reported, not enforced: the stage proof requires only its own fields.
@@ -413,6 +516,9 @@ class ResetBlockTests(unittest.TestCase):
         baseline = sqlcl_pool.SessionBaseline("APP", "ORA$BASE", {}, None, ddl)
         text = sqlcl_pool.reset_block(baseline, Path("/tmp/base.sql"), set())
         default = text.index("SESSION_TRANSFORM, 'DEFAULT');")
+        self.assertLess(text.index("SET SERVEROUTPUT OFF"), default)
+        reset_package_end = text.index("/", text.index("DBMS_SESSION.RESET_PACKAGE;"))
+        self.assertGreater(default, reset_package_end)
         for expected in ("'STORAGE', FALSE);", "'SQLTERMINATOR', TRUE);", "'COLLATION_CLAUSE', 'NEVER');"):
             self.assertLess(default, text.index(expected))
         self.assertIsNone(sqlcl_pool.parse_show_ddl("no markers here"))

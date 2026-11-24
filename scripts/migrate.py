@@ -13,6 +13,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -716,7 +717,7 @@ def apply_folder(
     *,
     expected_identity: Mapping[str, str] | None = None,
 ) -> dict:
-    """Apply the exact staged SQL files in one SQLcl session and commit on clean exit."""
+    """Apply staged SQL under MIGRATION_APPLY_TIMEOUT_SECONDS."""
     run_dir = Path(run_dir)
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if run_dir.is_symlink():
@@ -994,6 +995,7 @@ def apply_batch(
             for item in frozen
         ]
         prompted = False
+        preflight_started = time.perf_counter()
         initial_inventory, initial_snapshot, initial_checks, initial_preflight = _preflight_snapshot(
             migrations, target, run_dir / "initial", capture_inventory_fn, capture_snapshot_fn, run_checks_fn,
         )
@@ -1003,6 +1005,7 @@ def apply_batch(
             "schemaVersion": 2,
             "state": "preflight-passed",
             "createdAt": _utc_now(),
+            "initialPreflightSeconds": round(time.perf_counter() - preflight_started, 3),
             "target": dict(initial_target_identity),
             "migrations": records,
         }
@@ -1076,17 +1079,19 @@ def apply_batch(
                 _verify_staged_payload(item.staged)
 
             for folder_index, item in enumerate(frozen, start=1):
+                boundary_started = time.perf_counter()
                 original = item.original
                 staged = item.staged
-                # Every folder boundary gets a fresh identity, complete inventory,
-                # generated catalog preflight, and its explicit preconditions. One exception (S6): a one-folder
-                # step of a capsule rollout that already held the writer lease during the initial preflight and
-                # was confirmed without a prompt reuses that preflight; it covered exactly this folder moments ago
-                # and no other template writer can have run since.
+                # Refresh identity and catalog evidence at each folder boundary. A one-folder capsule step
+                # can reuse its initial catalog when it already held the lease and did not pause for review;
+                # its explicit preconditions still get a fresh, independently bounded read here.
                 if folder_index == 1 and len(frozen) == 1 and writer_lease is not None and not prompted:
-                    current_inventory, current_snapshot, current_checks, current_preflight = (
-                        initial_inventory, initial_snapshot, initial_checks, initial_preflight,
+                    current_inventory, current_snapshot = initial_inventory, initial_snapshot
+                    current_checks = _check_report(
+                        target, (original,), "preconditions",
+                        run_dir / f"boundary-{folder_index:03d}" / "preconditions", run_checks_fn,
                     )
+                    current_preflight = preflight((original,), current_snapshot, current_checks)
                 else:
                     current_inventory, current_snapshot, current_checks, current_preflight = _preflight_snapshot(
                         (original,), target, run_dir / f"boundary-{folder_index:03d}",
@@ -1102,6 +1107,8 @@ def apply_batch(
                     )
                 _preflight_transport(staged.files, announce=True)
                 record = _receipt_record(original, {"migrations": records})
+                phase_seconds = {"boundary": round(time.perf_counter() - boundary_started, 3)}
+                record["phaseSeconds"] = phase_seconds
                 attempt_id = str(uuid.uuid4())
                 pending_event = _attempt_event(
                     repo_root,
@@ -1122,6 +1129,7 @@ def apply_batch(
                     "schemaVersion": 2,
                     "state": "write-attempted",
                     "createdAt": run_manifest["createdAt"],
+                    "initialPreflightSeconds": run_manifest["initialPreflightSeconds"],
                     "target": dict(initial_target_identity),
                     "migrations": records,
                     "confirmation": run_manifest.get("confirmation"),
@@ -1130,8 +1138,14 @@ def apply_batch(
                 _atomic_write_json(manifest_path, run_manifest)
 
                 folder_run_dir = run_dir / f"apply-{folder_index:03d}"
+                apply_started = time.perf_counter()
                 try:
-                    apply_evidence = apply_folder_fn(staged, target, folder_run_dir, expected_identity=initial_target_identity)
+                    try:
+                        apply_evidence = apply_folder_fn(
+                            staged, target, folder_run_dir, expected_identity=initial_target_identity,
+                        )
+                    finally:
+                        phase_seconds["apply"] = round(time.perf_counter() - apply_started, 3)
                 except KeyboardInterrupt:
                     # SQLcl may have finished or stopped part-way: the outcome is unknown.
                     record["state"] = "apply-failed-or-unknown"
@@ -1226,6 +1240,7 @@ def apply_batch(
                 operations = analyze_batch((original,), target.schema)
                 selected_keys = _selected_keys(operations)
                 retries = preflight_inventory_retries(os.environ)
+                catalog_started = time.perf_counter()
                 if selected_keys:
                     fresh_inventory, fresh_snapshot = capture_inventory_snapshot_with_retries(
                         target, selected_keys, run_dir / f"verify-inventory-{folder_index:03d}",
@@ -1238,9 +1253,14 @@ def apply_batch(
                     fresh_snapshot = SchemaSnapshot(fresh_inventory.identity, fresh_inventory.objects, {}, fresh_inventory.coverage, fresh_inventory.started_at, fresh_inventory.completed_at)
                 fresh_identity = _identity_for_receipt(fresh_inventory, target)
                 _assert_same_target(initial_target_identity, fresh_identity)
+                phase_seconds["freshCatalog"] = round(time.perf_counter() - catalog_started, 3)
+                postconditions_started = time.perf_counter()
                 post_checks = _check_report(target, (original,), "postconditions", run_dir / f"postconditions-{folder_index:03d}", run_checks_fn)
+                phase_seconds["postconditions"] = round(time.perf_counter() - postconditions_started, 3)
                 _assert_check_identity(initial_target_identity, post_checks)
+                structural_started = time.perf_counter()
                 catalog_results, catalog_errors = _verify_structural_postconditions(original, fresh_snapshot, target.schema)
+                phase_seconds["structuralVerification"] = round(time.perf_counter() - structural_started, 3)
                 if not post_checks.complete or not post_checks.passed or catalog_errors:
                     record["state"] = "committed-verification-failed"
                     record["verificationErrors"] = [*post_checks.errors, *catalog_errors]

@@ -2143,8 +2143,7 @@ def _finish_report(report: dict, started: float, status: str, exit_code: int) ->
     report["endedAt"] = _utc_now()
     report["durationSeconds"] = round(time.perf_counter() - started, 3)
     # How the scripts reached SQLcl; informational, never part of the stage proof (persistent sessions design).
-    pool = sqlcl_pool.sqlcl_session.active_pool()
-    report["sqlcl"] = pool.stats() if pool is not None else {
+    report["sqlcl"] = sqlcl_pool.sqlcl_session.session_dispatch_stats() or {
         "mode": "one-shot", "fallbackReason": None, "processesStarted": None, "databaseSessions": None, "scripts": None,
     }
 
@@ -2322,6 +2321,7 @@ def _run_legacy_rollout(
             step_report["status"] = "running"
             step_report["startedAt"] = _utc_now()
             try:
+                _write_reports(report, report_paths)
                 evidence_dir = run_evidence / f"step-{item['number']:03d}"
                 _snapshot(manifest, plan, f"before step {item['number']}", environment)
                 evidence_dir.mkdir(mode=0o700, parents=True, exist_ok=False)

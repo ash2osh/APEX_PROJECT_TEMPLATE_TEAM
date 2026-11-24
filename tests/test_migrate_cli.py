@@ -257,6 +257,13 @@ class MigrateCliTests(unittest.TestCase):
         self.assertEqual([item["kind"] for item in receipt["checks"] if item.get("kind")], ["catalog", "catalog"])
         self.assertNotIn("developer", json.dumps(receipt).casefold())
         self.assertNotIn("password", json.dumps(receipt).casefold())
+        run_path = next((self.root / "scratch").glob("migration-attempt-*/run-manifest.json"))
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        self.assertIn("initialPreflightSeconds", run)
+        self.assertGreaterEqual(run["initialPreflightSeconds"], 0)
+        timings = run["migrations"][0]["phaseSeconds"]
+        self.assertEqual(set(timings), {"boundary", "apply", "freshCatalog", "postconditions", "structuralVerification"})
+        self.assertTrue(all(isinstance(value, (int, float)) and value >= 0 for value in timings.values()))
 
     def test_inventory_retry_exhaustion_reports_live_preflight_code_and_fingerprints(self):
         folder = self.add_folder(
@@ -927,6 +934,37 @@ class MigrateCliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         before_apply = fake.calls[: next(index for index, call in enumerate(fake.calls) if call[0] == "apply")]
         self.assertEqual(1, sum(1 for call in before_apply if call[0] == "snapshot"))
+
+    def test_leased_folder_rechecks_preconditions_before_recording_attempt(self):
+        folder = self.add_folder(
+            "2026-09-28_late-precondition-r001",
+            {"001-create.sql": "CREATE TABLE LATE_T (ID NUMBER);\n"},
+            preconditions=[{"id": "still-present", "sql": "SELECT 1 FROM DUAL", "expected": 1}],
+        )
+        target = self.target()
+        fake = FakeDatabase(target)
+        scope = {"dbUniqueName": "DEVDB_UNIQUE", "containerId": "3", "schema": target.schema, "edition": "ORA$BASE"}
+
+        def checks(target, checks, run_dir, *, phase):
+            report = fake.run_checks(target, checks, run_dir, phase=phase)
+            # Simulate drift after the initial preflight, with the writer lease still held.
+            if phase == "preconditions" and not fake.check_requires_object:
+                fake.check_requires_object["still-present"] = ("MISSING", "TABLE")
+            return report
+
+        stderr = io.StringIO()
+        with target_writer_lease(self.root, scope, {"purpose": "rollout"}) as lease, contextlib.redirect_stderr(stderr):
+            status, _ = self.apply(
+                self.load(folder.name), target, fake=fake, writer_lease=lease, run_checks_fn=checks,
+            )
+
+        self.assertEqual(status, 2)
+        self.assertIn("CHECK_FAILED", stderr.getvalue())
+        self.assertEqual(2, sum(call[0] == "checks" and call[2] == "preconditions" for call in fake.calls))
+        self.assertEqual(1, sum(call[0] == "snapshot" for call in fake.calls))
+        self.assertFalse(any(call[0] == "apply" for call in fake.calls))
+        self.assertFalse(list(folder.glob("attempt-event.*.json")))
+        self.assertFalse((folder / "status.dev.json").exists())
 
     def test_folder_one_preflight_repeated_without_writer_lease(self):
         folder = self.add_folder("2026-09-28_fresh-preflight-r001", {"001-create.sql": "CREATE TABLE FRESH_T (ID NUMBER);\n"})

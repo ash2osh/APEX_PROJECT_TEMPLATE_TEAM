@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "0eb52f2fc5d0cbc872f6506a671a4cbb5798f257",
+  "coreCommit": "9421e9cf0f578f109401c4a1fb1cb3caf1dd8b38",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -274,7 +274,7 @@
     },
     {
       "path": "scripts/migrate.py",
-      "sha256": "5a7f9e7d3bd601892c8c5805e9be148c8d1c07242ffe880741e08e07fff64afd",
+      "sha256": "816a8c2697e68ffa578fee611d3c567f8c434d79f88e1ace24b8a5b5d5480a98",
       "executable": false
     },
     {
@@ -294,7 +294,7 @@
     },
     {
       "path": "scripts/migration_attempts.py",
-      "sha256": "04858d90763c139559fcb56150d5ebd38de37717c6b8d74e85aa60c299688e0a",
+      "sha256": "85044cf307850807ca3e57592985cf692b188cfbb0f6f451a8e7734d33e296e4",
       "executable": false
     },
     {
@@ -459,7 +459,7 @@
     },
     {
       "path": "scripts/sqlcl_pool.py",
-      "sha256": "f36690dff81c67539c833692163f77e8e2d2435231ec11801b368fda59c8a72f",
+      "sha256": "4f7bf1d61a06c89b93d07003d0694d487ea992500e9d0a198e9846ea20ff6c0b",
       "executable": false
     },
     {
@@ -469,7 +469,7 @@
     },
     {
       "path": "scripts/sqlcl_session.py",
-      "sha256": "7b771a6e2c7c2bdb7a89304b2fd6c042c416f8fe8067477fb62c80af725320b3",
+      "sha256": "b06a0cbc544b13bbc9e4d0950665fa687b71aa30c0a512aa095b4f088e2335e5",
       "executable": false
     },
     {
@@ -554,7 +554,7 @@
     },
     {
       "path": "scripts/windows_job.py",
-      "sha256": "056937ce237fda611af4bbe5a1c43e1d1b0e7ba258c7cc9e68ac92ae1a7173c3",
+      "sha256": "8cd1f26ad4040de651ed8bcc6cb70e4985560ea8e4e543549abd6c605be95959",
       "executable": false
     },
     {
@@ -1059,7 +1059,7 @@
     },
     {
       "path": "tests/test_live_feature_release.py",
-      "sha256": "b2cb745e2c5f5afcf3371f7137db46be2e6012cb57e6bb1162cd12178f7c7d9b",
+      "sha256": "d3e3ea29758e8b33d9f64dc73a6a5d5bae59dcdfd97e99be15e7f6bbf3ad709a",
       "executable": false
     },
     {
@@ -1089,7 +1089,7 @@
     },
     {
       "path": "tests/test_migration_attempts.py",
-      "sha256": "6adc4f6b0199fcc282c33924d8424c9eab37f9f9393c1ca814f89e18280cc952",
+      "sha256": "eb5cbf00a2418d7a811128b6af666a46e77e8548a40da3581771d7d1adbeb65f",
       "executable": false
     },
     {
@@ -1184,7 +1184,7 @@
     },
     {
       "path": "tests/test_release_capsule.py",
-      "sha256": "91eea56b4b4f4a408d82576d84dd481862036379c2907dbd9bf46f8461a1996c",
+      "sha256": "c97f054c2a9788a323596be64e41efb2f5bf9e3198bd2fd8c84d49ff2cbda81b",
       "executable": false
     },
     {
@@ -1244,7 +1244,7 @@
     },
     {
       "path": "tests/test_sqlcl_pool.py",
-      "sha256": "7c70595cd1f7464debabea3e160bdaf6cd179a04433f2ded805f12e420433791",
+      "sha256": "8222b0262238c80a60407c9e6edbfabd719669eb91eec95234114276f26fc04d",
       "executable": false
     },
     {
