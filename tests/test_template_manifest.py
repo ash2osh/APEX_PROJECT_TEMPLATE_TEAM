@@ -179,7 +179,7 @@ class TemplateManifestTests(unittest.TestCase):
         self.assertEqual(manifest["minimumSqlclVersion"], "26.3.0.0")
         self.assertEqual(
             manifest["upstream"],
-            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
         )
 
     def test_every_non_project_template_file_has_exactly_one_owner(self) -> None:

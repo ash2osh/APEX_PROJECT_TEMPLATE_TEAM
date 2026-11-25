@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "apexRelease": "26.2",
   "minimumSqlclVersion": "26.3.0.0",
-  "upstream": "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+  "upstream": "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
   "templateOwned": [
     ".agents/rules/agent-safety.md",
     ".agents/rules/graphify.md",

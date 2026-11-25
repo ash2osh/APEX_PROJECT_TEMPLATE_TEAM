@@ -54,7 +54,7 @@ class VerifyLocalTests(unittest.TestCase):
             "schemaVersion": 2,
             "apexRelease": "26.2",
             "minimumSqlclVersion": "26.3.0.0",
-            "upstream": "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "upstream": "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
             "templateOwned": [".env.example", "scripts/**"],
             "projectOwned": [".agents/rules/project.md", "apps/.gitkeep"],
             "templateOnly": []
@@ -824,7 +824,7 @@ APEX_EXPECTED_USER=DEMO
 
 
 class OriginalTemplateDetectionTests(unittest.TestCase):
-    UPSTREAM = "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git"
+    UPSTREAM = "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git"
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.mkdtemp()
@@ -898,7 +898,7 @@ class OriginalTemplateDetectionTests(unittest.TestCase):
 
 class OriginalTemplateRemoteTests(unittest.TestCase):
     """Origin and manifest upstream are compared by (host, path), not by spelling."""
-    UPSTREAM = "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git"
+    UPSTREAM = "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git"
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.mkdtemp()
@@ -928,24 +928,24 @@ class OriginalTemplateRemoteTests(unittest.TestCase):
 
     def test_equivalent_remote_spellings_match_the_same_upstream(self) -> None:
         for origin in (
-            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
-            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM",
-            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git/",
-            "https://GitHub.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/",
-            "http://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
-            "git://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
-            "ssh://git@github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
-            "ssh://git@github.com:22/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
-            "git@github.com:ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2",
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git/",
+            "https://GitHub.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2/",
+            "http://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
+            "git://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
+            "ssh://git@github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
+            "ssh://git@github.com:22/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
+            "git@github.com:ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
         ):
             self.assert_origin(origin, True)
 
     def test_a_different_repository_or_host_does_not_match(self) -> None:
         for origin in (
             "https://github.com/ash2osh/OTHER_PROJECT.git",
-            "https://github.example.invalid/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
-            "git@github.com:someone-else/APEX_PROJECT_TEMPLATE_TEAM.git",
-            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/extra.git",
+            "https://github.example.invalid/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
+            "git@github.com:someone-else/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
+            "https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2/extra.git",
         ):
             self.assert_origin(origin, False)
 
@@ -955,16 +955,16 @@ class OriginalTemplateRemoteTests(unittest.TestCase):
         self.assert_origin("/srv/git/other.git", False)
 
     def test_garbage_origin_is_never_original_and_never_raises(self) -> None:
-        for origin in ("not a remote", "https://", "ssh://", "ftp://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git",
+        for origin in ("not a remote", "https://", "ssh://", "ftp://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git",
                        "relative/path.git", "", ":::"):
             self.assert_origin(origin, False)
 
     def test_normalizer_reduces_each_form_to_host_and_path(self) -> None:
         from scripts.verify_local import _normalized_remote
-        expected = ("github.com", "ash2osh/APEX_PROJECT_TEMPLATE_TEAM")
+        expected = ("github.com", "ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2")
         self.assertEqual(_normalized_remote(self.UPSTREAM), expected)
-        self.assertEqual(_normalized_remote("git@github.com:ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git"), expected)
-        self.assertEqual(_normalized_remote("ssh://git@GitHub.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/"), expected)
+        self.assertEqual(_normalized_remote("git@github.com:ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git"), expected)
+        self.assertEqual(_normalized_remote("ssh://git@GitHub.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2/"), expected)
         self.assertIsNone(_normalized_remote("not a remote"))
         self.assertIsNone(_normalized_remote("https://github.com/"))
         self.assertIsNone(_normalized_remote(None))
