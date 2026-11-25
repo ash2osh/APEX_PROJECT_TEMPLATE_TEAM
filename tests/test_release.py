@@ -153,7 +153,10 @@ def _record_applied_objects() -> None:
             owner = cm.group(2).strip('"').upper() if cm.group(2) else cur_schema
             obj_name = cm.group(3).strip('"').upper()
             if owner == cur_schema:
-                env_state.setdefault("objects", {}).setdefault(f"{obj_type}:{obj_name}", {"source": block})
+                if env_state.get("replaceOnApply"):
+                    env_state.setdefault("objects", {})[f"{obj_type}:{obj_name}"] = {"source": block}
+                else:
+                    env_state.setdefault("objects", {}).setdefault(f"{obj_type}:{obj_name}", {"source": block})
 
 
 def _expected_objects_payload() -> list[dict[str, str]]:
@@ -205,6 +208,17 @@ if "RELEASE_BEFORE_INVALID_BEGIN" in driver and "RELEASE_POST_APPLY_BEGIN" in dr
         print("ORA-00955: name is already used by an existing object")
         sys.exit(1)
     steps = re.findall(r"PROMPT RELEASE_STEP_START:([^\n]+)", driver)
+    fail_at = env_state.get("failAtStep")
+    if fail_at in steps:
+        done = steps[:steps.index(fail_at)]
+        state.setdefault("appliedSteps", []).extend(done)
+        Path(state_path).write_text(json.dumps(state), encoding="utf-8")
+        for s in done:
+            print(f"RELEASE_STEP_START:{s}")
+            print(f"RELEASE_STEP_END:{s}")
+        print(f"RELEASE_STEP_START:{fail_at}")
+        print("ORA-00904: \"NOTE_TXT\": invalid identifier")
+        sys.exit(1)
     state.setdefault("appliedSteps", []).extend(steps)
     _record_applied_objects()
     Path(state_path).write_text(json.dumps(state), encoding="utf-8")
@@ -273,6 +287,9 @@ if "RELEASE_VERIFY_OK" in driver:
     if env_state.get("failVerify"):
         print("ORA-20001: smoke check failed")
         sys.exit(1)
+    for s in re.findall(r"PROMPT RELEASE_VERIFY_START:([^\n]+)", driver):
+        print(f"RELEASE_VERIFY_START:{s}")
+        print(f"RELEASE_VERIFY_END:{s}")
     print("RELEASE_VERIFY_OK")
     sys.exit(0)
 
@@ -584,9 +601,10 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertNotIn("SQL.SQLCODE", apply_driver)
         self.assertNotIn("PLSQL_CODE_TYPE", apply_driver)
 
-        # Staging leaves status as draft
+        # ASHARIF 2026-11-25: a successful staging run marks the bundle staged and records state/staging.json
         after_manifest = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
-        self.assertEqual(after_manifest["status"], "draft")
+        self.assertEqual(after_manifest["status"], "staged")
+        self.assertTrue((bundle / "state" / "staging.json").is_file())
 
         # New invalid object causes failure
         state["envs"]["staging"]["afterInvalids"] = [
@@ -596,7 +614,7 @@ class ReleaseBundleTests(unittest.TestCase):
         state["calls"] = []
         self._write_state(state)
         code, _, err = self._run_cli(
-            ["run", "run-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"],
+            ["run", "run-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ", "--full"],
             app_deployer=fake_deploy,
         )
         self.assertEqual(code, 1)
@@ -636,7 +654,7 @@ class ReleaseBundleTests(unittest.TestCase):
         subprocess.run(["git", "add", "releases"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "Add prod-rel"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
 
-        code, out, err = self._run_cli(["run", "prod-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        code, out, err = self._run_cli(["run", "prod-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 0, err)
         self.assertIn("succeeded", out)
         self.assertIn("Next: commit releases/prod-rel/release.json", out)
@@ -662,7 +680,7 @@ class ReleaseBundleTests(unittest.TestCase):
 
         # Post-deploy check, collect, and run all refuse
         self.assertEqual(self._run_cli(["check", "prod-rel", "--env", "prod"])[0], 1)
-        self.assertEqual(self._run_cli(["run", "prod-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])[0], 1)
+        self.assertEqual(self._run_cli(["run", "prod-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])[0], 1)
         code, _, err = self._run_cli([
             "collect", "prod-rel", "--from", "dev", "--schema", "APP_CODE",
             "--object", "PACKAGE_BODY:ORDERS_PKG", "--mode", "replace",
@@ -852,6 +870,9 @@ class ReleaseBundleTests(unittest.TestCase):
                 ("stg_code", "release-apply-ords-RUNERP_CODE.sql"),
                 ("stg_cust", "release-post-apply.sql"),
                 ("stg_code", "release-post-apply.sql"),
+                # ASHARIF 2026-11-25: read-only live-source reads for state/staging.json liveSha256
+                ("stg_code", "release-fetch.sql"),
+                ("stg_cust", "release-fetch.sql"),
             ],
         )
         # Consecutive RUNERP_CODE 02-code steps were batched into 1 SQLcl session in exact order.
@@ -1166,6 +1187,7 @@ class ReleaseBundleTests(unittest.TestCase):
 
         code, _, err = self._run_cli([
             "run", "backup-cov-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ", "--allow-unbacked-ords",
+            "--full",
         ])
         self.assertEqual(code, 1)
         self.assertIn("Backup failed before apply", err)
@@ -1200,7 +1222,7 @@ class ReleaseBundleTests(unittest.TestCase):
         (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
 
         # Not a Git repo -> refused before any SQL runs
-        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 1)
         self.assertIn("Git repository", err)
         self.assertEqual(self._read_state().get("calls", []), [])
@@ -1213,7 +1235,7 @@ class ReleaseBundleTests(unittest.TestCase):
         subprocess.run(["git", "add", "README.md"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "Init"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
 
-        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 1)
         self.assertIn("tracked in Git", err)
         self.assertEqual(self._read_state().get("calls", []), [])
@@ -1232,14 +1254,14 @@ class ReleaseBundleTests(unittest.TestCase):
         ).stdout.strip()
 
         (bundle / "01-ddl" / "untracked.sql").write_text("SELECT 1 FROM DUAL;\n", encoding="utf-8", newline="\n")
-        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 1)
         self.assertIn("clean Git working tree", err)
         self.assertEqual(self._read_state().get("calls", []), [])
 
         # Remove untracked file -> succeeds, tags exact release_commit BEFORE writing deployed status
         (bundle / "01-ddl" / "untracked.sql").unlink()
-        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        code, _, err = self._run_cli(["run", "prod-clean-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 0, err)
         tagged_sha = subprocess.run(
             ["git", "rev-list", "-n", "1", "release/prod-clean-rel"],
@@ -1339,12 +1361,25 @@ class ReleaseBundleTests(unittest.TestCase):
         }
         (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
 
-        # (a) apps non-empty on --env dev fails preflight with zero apply/backup SQL
-        code, _, err = self._run_cli(["run", "app-rel", "--env", "dev", "--confirm-target", "DEVDB_UNQ"])
-        self.assertEqual(code, 1)
-        self.assertIn("supports staging and prod only", err)
-        self.assertEqual(self._read_state().get("appliedSteps", []), [])
-        self.assertFalse((self.root / "scratch" / "backups").exists())
+        # (a) ASHARIF 2026-11-25: on --env dev the SQL runs and the apps are skipped (DEV apps go through publish)
+        deployed: list[int] = []
+        code, out, err = self._run_cli(
+            ["run", "app-rel", "--env", "dev", "--confirm-target", "DEVDB_UNQ"],
+            app_deployer=lambda _r, app_id, *_a: deployed.append(app_id),
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(deployed, [])
+        self.assertEqual(self._read_state().get("appliedSteps", []), ["01-ddl/001-t.sql"])
+        self.assertIn("APEX app 130 skipped on DEV (use 'scripts/team.sh publish 130 --env dev')", out)
+        report = Path(re.search(r"Report:\s*(.+\.md)", out).group(1).strip()).read_text(encoding="utf-8")
+        self.assertIn("- **Apps skipped on DEV:** 130", report)
+        dev_state = json.loads((bundle / "state" / "dev.json").read_text(encoding="utf-8"))
+        self.assertEqual(dev_state["apps"], {})
+        code, out, _ = self._run_cli(["check", "app-rel", "--env", "dev"])
+        self.assertIn("APEX app deploy: 130 (skipped on DEV: use publish)", out)
+        state = self._read_state()
+        state["appliedSteps"] = []
+        self._write_state(state)
 
         # (b) missing scripts/deploy.sh and missing apps/*/130/deployments/staging.json fail preflight
         (self.root / "apps" / "APP_CODE" / "130" / "deployments").mkdir(parents=True)
@@ -1419,7 +1454,7 @@ class ReleaseBundleTests(unittest.TestCase):
         code, out, _ = self._run_cli(["check", "prod-pin-rel", "--env", "prod"])
         self.assertEqual(code, 1)
         self.assertIn("Git-ignored", out)
-        code, _, err = self._run_cli(["run", "prod-pin-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        code, _, err = self._run_cli(["run", "prod-pin-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 1)
         self.assertIn("Git-ignored", err)
         self.assertEqual(self._read_state().get("appliedSteps", []), [])
@@ -1436,7 +1471,7 @@ class ReleaseBundleTests(unittest.TestCase):
 
         (bundle / "01-ddl" / "untracked.ignored.sql").write_text("SELECT 1 FROM DUAL;\n", encoding="utf-8", newline="\n")
         self._write_state(self.default_state)
-        code, _, err = self._run_cli(["run", "prod-pin-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        code, _, err = self._run_cli(["run", "prod-pin-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 1)
         self.assertIn("clean Git working tree", err)
         self.assertEqual(self._read_state().get("calls", []), [])
@@ -1462,7 +1497,7 @@ class ReleaseBundleTests(unittest.TestCase):
             return res
 
         code, _, err = self._run_cli_with_runner(
-            ["run", "prod-pin-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"],
+            ["run", "prod-pin-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"],
             runner=mutate_disk_after_preflight,
         )
         self.assertEqual(code, 0, err)
@@ -1843,7 +1878,7 @@ class ReleaseBundleTests(unittest.TestCase):
 
         # Dirty app tree on disk -> refused before any SQL runs
         (app_dir / "application.apx").write_text("app DEMO (\n  name: DirtyApp\n)\n", encoding="utf-8", newline="\n")
-        code, _, err = self._run_cli(["run", "prod-app-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        code, _, err = self._run_cli(["run", "prod-app-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 1)
         self.assertIn("clean Git working tree", err)
         self.assertEqual(self._read_state().get("calls", []), [])
@@ -1858,7 +1893,7 @@ class ReleaseBundleTests(unittest.TestCase):
             return orig_run(cmd, *args, **kwargs)
 
         with mock.patch("scripts.release.subprocess.run", side_effect=fail_check_ignore):
-            code, _, err = self._run_cli(["run", "prod-app-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+            code, _, err = self._run_cli(["run", "prod-app-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 1)
         self.assertIn("git check-ignore failed", err)
 
@@ -1879,7 +1914,7 @@ class ReleaseBundleTests(unittest.TestCase):
             release._invoke_app_deploy(repo_root, app_id, env, confirm_target, values, app_source_dir=app_source_dir)
 
         code, _, err = self._run_cli_with_runner(
-            ["run", "prod-app-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"],
+            ["run", "prod-app-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"],
             runner=mutate_app_after_preflight,
             app_deployer=record_deploy,
         )
@@ -2084,7 +2119,7 @@ class ReleaseBundleTests(unittest.TestCase):
         subprocess.run(["git", "commit", "-m", "Add bundle"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
         subprocess.run(["git", "tag", "release/tag-pre-rel"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
 
-        code, _, err = self._run_cli(["run", "tag-pre-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        code, _, err = self._run_cli(["run", "tag-pre-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ", "--no-staging-proof"])
         self.assertEqual(code, 1)
         self.assertIn("already exists", err)
         self.assertEqual(self._read_state().get("calls", []), [])
@@ -2531,7 +2566,8 @@ class ReleaseBundleTests(unittest.TestCase):
         code, out, err = self._run_cli(["run", "preflight-filter-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"])
         self.assertEqual(code, 0, out + err)
         fetch_calls = [c for c in self._read_state()["calls"] if c["driverName"] == "release-fetch.sql"]
-        self.assertEqual(len(fetch_calls), 2)
+        # ASHARIF 2026-11-25: preflight, backup, then the read-only live-source read for state/staging.json
+        self.assertEqual(len(fetch_calls), 3)
         backup_driver = fetch_calls[1]["driver"]
         self.assertIn("DBMS_OUTPUT.ENABLE(NULL);", backup_driver)
         for obj_name in ("ORDERS_PKG", "ORDERS_V", "PATCH_PKG"):
@@ -2557,6 +2593,444 @@ class ReleaseBundleTests(unittest.TestCase):
         code, out, _ = self._run_cli(["check", "preflight-filter-rel", "--env", "staging"])
         self.assertEqual(code, 1)
         self.assertIn("APP_CODE.NEW_PKG (PACKAGE) already exists in staging", out)
+
+
+    # ---- ASHARIF 2026-11-25: per-environment release state (state/<env>.json), staged status, delta reruns ----
+
+    def _make_state_bundle(self, slug: str, *, code_mode: str = "replace", apps: list[int] | None = None,
+                           base_sha: str | None = None) -> Path:
+        self.assertEqual(self._run_cli(["new", slug])[0], 0)
+        bundle = self.root / "releases" / slug
+        (bundle / "01-ddl" / "001-add-col.sql").write_text(
+            "ALTER TABLE ORDERS ADD (NOTES VARCHAR2(50));\n", encoding="utf-8", newline="\n")
+        (bundle / "02-code" / "orders_pkg_package_body.sql").write_text(
+            "CREATE OR REPLACE " + DEV_PKG_SOURCE + "/\n", encoding="utf-8", newline="\n")
+        (bundle / "04-verify" / "001-smoke.sql").write_text("SELECT 1 FROM DUAL;\n", encoding="utf-8", newline="\n")
+        code_entry = {"schema": "APP_CODE", "file": "02-code/orders_pkg_package_body.sql",
+                      "objectType": "PACKAGE BODY", "objectName": "ORDERS_PKG", "mode": code_mode}
+        if code_mode == "patch":
+            code_entry["baseSha256"] = base_sha or release.compute_source_sha256(TARGET_PKG_SOURCE)
+        manifest = {
+            "schemaVersion": 1, "slug": slug, "status": "draft", "createdAt": "2026-11-25T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [{"schema": "APP_CODE", "file": "01-ddl/001-add-col.sql"}],
+            "code": [code_entry], "ords": [],
+            "verify": [{"schema": "APP_CODE", "file": "04-verify/001-smoke.sql"}],
+            "apps": apps or [], "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+        return bundle
+
+    def _edit_code(self, bundle: Path, value: str = "3") -> None:
+        (bundle / "02-code" / "orders_pkg_package_body.sql").write_text(
+            "CREATE OR REPLACE " + DEV_PKG_SOURCE.replace("RETURN 2", f"RETURN {value}") + "/\n",
+            encoding="utf-8", newline="\n")
+
+    def _stage(self, slug: str, *extra: str, app_deployer=None) -> tuple[int, str, str]:
+        return self._run_cli(["run", slug, "--env", "staging", "--confirm-target", "STAGEDB_UNQ", *extra],
+                             app_deployer=app_deployer)
+
+    def _applied_since(self, state: dict) -> list[str]:
+        return [step for step in state.get("appliedSteps", [])]
+
+    def _reset_calls(self) -> None:
+        state = self._read_state()
+        state["calls"] = []
+        state["appliedSteps"] = []
+        self._write_state(state)
+
+    def _git_init(self) -> None:
+        for args in (["init"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.com"]):
+            subprocess.run(["git", *args], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+
+    def _git_commit_all(self, message: str) -> None:
+        subprocess.run(["git", "add", "-A", "releases", "apps"] if (self.root / "apps").exists() else ["git", "add", "-A", "releases"],
+                       cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", message], cwd=self.root, stdin=subprocess.DEVNULL,
+                       check=True, capture_output=True)
+
+    def test_manifest_accepts_staged_status(self) -> None:
+        bundle = self._make_state_bundle("status-rel")
+        manifest = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        manifest["status"] = "staged"
+        release._load_and_validate_manifest(bundle, "status-rel", manifest_override=manifest)
+        manifest["status"] = "bogus"
+        with self.assertRaisesRegex(release.ReleaseError, "'draft', 'staged' or 'deployed'"):
+            release._load_and_validate_manifest(bundle, "status-rel", manifest_override=manifest)
+
+    def test_collect_on_staged_returns_to_draft_and_drops_staged_fields(self) -> None:
+        bundle = self._make_state_bundle("collect-staged-rel")
+        manifest = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        manifest.update({"status": "staged", "stagedAt": "T", "stagedTarget": "STAGEDB_UNQ", "stagedCommit": "c"})
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+        code, out, err = self._run_cli([
+            "collect", "collect-staged-rel", "--from", "dev", "--schema", "APP_CODE",
+            "--object", "PACKAGE_BODY:ORDERS_PKG", "--mode", "replace", "--file", "orders_pkg_package_body.sql",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("status returned to draft", out)
+        after = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        self.assertEqual(after["status"], "draft")
+        for key in ("stagedAt", "stagedTarget", "stagedCommit"):
+            self.assertNotIn(key, after)
+
+    def test_list_shows_staged_stale_and_not_on_staging_counts(self) -> None:
+        bundle = self._make_state_bundle("list-rel")
+        code, out, _ = self._run_cli(["list"])
+        self.assertEqual(code, 0)
+        self.assertIn("1- list-rel [draft]", out)
+        self.assertEqual(self._stage("list-rel")[0], 0)
+        code, out, _ = self._run_cli(["list"])
+        self.assertIn("1- list-rel [staged]", out)
+        self._edit_code(bundle)
+        code, out, _ = self._run_cli(["list"])
+        self.assertIn("1- list-rel [staged (stale: 1 changed)]", out)
+        listing = json.loads(self._run_cli(["list", "--format", "json"])[1])
+        self.assertEqual(listing["draft"][0]["effectiveStatus"], "stale")
+        self.assertEqual(listing["draft"][0]["notOnStaging"], ["02-code/orders_pkg_package_body.sql"])
+        manifest = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        manifest["status"] = "draft"
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+        code, out, _ = self._run_cli(["list"])
+        self.assertIn("1- list-rel [draft: 1 of 2 steps not on staging]", out)
+
+    def test_staging_rerun_applies_only_changed_and_marks_staged(self) -> None:
+        bundle = self._make_state_bundle("delta-rel")
+        code, out, err = self._stage("delta-rel")
+        self.assertEqual(code, 0, err)
+        self.assertIn("commit releases/delta-rel/release.json and releases/delta-rel/state/staging.json", out)
+        manifest = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "staged")
+        self.assertEqual(manifest["stagedTarget"], "STAGEDB_UNQ")
+        self.assertTrue(manifest["stagedAt"])
+        self.assertTrue(manifest["stagedCommit"])
+        st = json.loads((bundle / "state" / "staging.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(st["steps"]), {"01-ddl/001-add-col.sql", "02-code/orders_pkg_package_body.sql"})
+        self.assertIn("liveSha256", st["steps"]["02-code/orders_pkg_package_body.sql"])
+        self.assertNotIn("liveSha256", st["steps"]["01-ddl/001-add-col.sql"])
+        run = st["lastRun"]
+        self.assertEqual((run["mode"], run["applied"], run["skipped"]), ("delta", 2, 0))
+        self.assertEqual(run["identities"]["APP_CODE"]["dbUniqueName"], "STAGEDB_UNQ")
+        self.assertEqual(run["identities"]["APP_CODE"]["user"], "APP_LOGIN")
+        self.assertEqual(run["identities"]["APP_CODE"]["invalidBefore"], 1)
+        self.assertEqual(run["identities"]["APP_CODE"]["newInvalid"], 0)
+        self.assertTrue({"preflight", "backup", "apply", "verify", "apps"} <= set(run["timings"]))
+        self.assertTrue(run["report"].startswith("scratch/release-reports/delta-rel-staging-"))
+
+        self._edit_code(bundle)
+        self._reset_calls()
+        code, out, err = self._stage("delta-rel")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_state()["appliedSteps"], ["02-code/orders_pkg_package_body.sql"])
+        st2 = json.loads((bundle / "state" / "staging.json").read_text(encoding="utf-8"))
+        self.assertEqual((st2["lastRun"]["applied"], st2["lastRun"]["skipped"]), (1, 1))
+        self.assertEqual(st2["steps"]["01-ddl/001-add-col.sql"], st["steps"]["01-ddl/001-add-col.sql"])
+        self.assertEqual(json.loads((bundle / "release.json").read_text(encoding="utf-8"))["status"], "staged")
+        report = Path(re.search(r"Report:\s*(.+\.md)", out).group(1).strip()).read_text(encoding="utf-8")
+        self.assertIn("- **Mode:** delta (applied 1, skipped 1)", report)
+
+    def test_noop_delta_skips_apply_runs_verify(self) -> None:
+        bundle = self._make_state_bundle("noop-rel")
+        self.assertEqual(self._stage("noop-rel")[0], 0)
+        self._reset_calls()
+        code, _, err = self._stage("noop-rel")
+        self.assertEqual(code, 0, err)
+        names = [c["driverName"] for c in self._read_state()["calls"]]
+        self.assertNotIn("release-apply.sql", names)
+        self.assertIn("release-verify.sql", names)
+        st = json.loads((bundle / "state" / "staging.json").read_text(encoding="utf-8"))
+        self.assertEqual((st["lastRun"]["applied"], st["lastRun"]["skipped"]), (0, 2))
+        self.assertEqual(self._read_state()["appliedSteps"], [])
+
+    def test_full_rerun_applies_everything(self) -> None:
+        bundle = self._make_state_bundle("full-rel")
+        self.assertEqual(self._stage("full-rel")[0], 0)
+        self._reset_calls()
+        code, _, err = self._stage("full-rel", "--full")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_state()["appliedSteps"],
+                         ["01-ddl/001-add-col.sql", "02-code/orders_pkg_package_body.sql"])
+        st = json.loads((bundle / "state" / "staging.json").read_text(encoding="utf-8"))
+        self.assertEqual(st["lastRun"]["mode"], "full")
+
+    def test_failed_run_writes_no_state_and_keeps_manifest(self) -> None:
+        bundle = self._make_state_bundle("fail-rel")
+        self.assertEqual(self._stage("fail-rel")[0], 0)
+        before_state = (bundle / "state" / "staging.json").read_bytes()
+        self._edit_code(bundle)
+        before_manifest = (bundle / "release.json").read_bytes()
+        state = self._read_state()
+        state["envs"]["staging"]["failVerify"] = True
+        self._write_state(state)
+        code, _, _ = self._stage("fail-rel")
+        self.assertEqual(code, 1)
+        self.assertEqual((bundle / "state" / "staging.json").read_bytes(), before_state)
+        self.assertEqual((bundle / "release.json").read_bytes(), before_manifest)
+
+    # ---- ASHARIF 2026-11-25: failed-run record (state/<env>.partial.json) and --resume ----
+
+    def _make_two_ddl_bundle(self, slug: str) -> Path:
+        bundle = self._make_state_bundle(slug)
+        (bundle / "01-ddl" / "002-add-note.sql").write_text(
+            "ALTER TABLE ORDERS ADD (NOTE_TXT VARCHAR2(50));\n", encoding="utf-8", newline="\n")
+        manifest = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        manifest["ddl"].append({"schema": "APP_CODE", "file": "01-ddl/002-add-note.sql"})
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+        return bundle
+
+    def _fail_at(self, step: str | None) -> None:
+        state = self._read_state()
+        if step is None:
+            state["envs"]["staging"].pop("failAtStep", None)
+        else:
+            state["envs"]["staging"]["failAtStep"] = step
+        state["calls"] = []
+        state["appliedSteps"] = []
+        self._write_state(state)
+
+    def test_ddl_steps_commit_before_their_end_marker(self) -> None:
+        self._make_two_ddl_bundle("commit-rel")
+        self.assertEqual(self._stage("commit-rel")[0], 0)
+        apply_driver = next(c["driver"] for c in self._read_state()["calls"] if c["driverName"] == "release-apply.sql")
+        self.assertIn("ALTER TABLE ORDERS ADD (NOTES VARCHAR2(50));\nCOMMIT;\nPROMPT RELEASE_STEP_END:01-ddl/001-add-col.sql", apply_driver)
+        self.assertNotIn("COMMIT;\nPROMPT RELEASE_STEP_END:02-code/", apply_driver)
+
+    def test_failed_run_records_finished_ddl_and_resume_skips_them(self) -> None:
+        bundle = self._make_two_ddl_bundle("resume-rel")
+        self._fail_at("01-ddl/002-add-note.sql")
+        code, out, err = self._stage("resume-rel")
+        self.assertEqual(code, 1)
+        # Verbose run output: a before and an after line for each file
+        self.assertIn("[Step 4/6] Apply", out)
+        self.assertIn("[1/3] start    01-ddl/001-add-col.sql  [APP_CODE, DDL]", out)
+        self.assertIn("[1/3] done     01-ddl/001-add-col.sql", out)
+        self.assertIn("[2/3] FAILED   01-ddl/002-add-note.sql", out)
+        self.assertIn("[3/3] not run  02-code/orders_pkg_package_body.sql", out)
+        self.assertIn("rerun with --resume", err)
+        # state/staging.json still describes successful runs only
+        self.assertFalse((bundle / "state" / "staging.json").exists())
+        partial = json.loads((bundle / "state" / "staging.partial.json").read_text(encoding="utf-8"))
+        self.assertEqual(partial["kind"], "partial")
+        self.assertEqual(list(partial["steps"]), ["01-ddl/001-add-col.sql"])
+        self.assertIn("ORA-00904", partial["error"])
+        self.assertNotIn(str(self.root), partial["error"])  # no local paths in a file that may be committed
+        report = Path(re.search(r"Report:\s*(.+\.md)", err).group(1).strip()).read_text(encoding="utf-8")
+        self.assertIn("staging.partial.json` (written (1 finished 01-ddl step(s)))", report)
+
+        # Without --resume, check explains the record and plans every step
+        code, out, _ = self._run_cli(["check", "resume-rel", "--env", "staging"])
+        self.assertEqual(code, 0)
+        self.assertIn("NOTE: a failed run left releases/resume-rel/state/staging.partial.json", out)
+        self.assertIn("apply: 01-ddl/001-add-col.sql", out)
+        code, out, _ = self._run_cli(["check", "resume-rel", "--env", "staging", "--resume"])
+        self.assertIn("resume: 01-ddl/001-add-col.sql (finished by the failed run; skipped by --resume)", out)
+
+        # Fixed: --resume starts at the failed file, then the run records every step and drops the partial record
+        self._fail_at(None)
+        code, out, err = self._stage("resume-rel", "--resume")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_state()["appliedSteps"],
+                         ["01-ddl/002-add-note.sql", "02-code/orders_pkg_package_body.sql"])
+        self.assertFalse((bundle / "state" / "staging.partial.json").exists())
+        st = json.loads((bundle / "state" / "staging.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(st["steps"]), {"01-ddl/001-add-col.sql", "01-ddl/002-add-note.sql",
+                                            "02-code/orders_pkg_package_body.sql"})
+        self.assertEqual(st["lastRun"]["resumed"], ["01-ddl/001-add-col.sql"])
+        self.assertEqual(json.loads((bundle / "release.json").read_text(encoding="utf-8"))["status"], "staged")
+        self.assertIn("Removed releases/resume-rel/state/staging.partial.json", out)
+        self.assertIn("[1/1] done     04-verify/001-smoke.sql", out)
+
+    def test_resume_reapplies_a_finished_ddl_file_edited_since(self) -> None:
+        bundle = self._make_two_ddl_bundle("resume-edit-rel")
+        self._fail_at("01-ddl/002-add-note.sql")
+        self.assertEqual(self._stage("resume-edit-rel")[0], 1)
+        (bundle / "01-ddl" / "001-add-col.sql").write_text(
+            "ALTER TABLE ORDERS ADD (NOTES VARCHAR2(80));\n", encoding="utf-8", newline="\n")
+        self._fail_at(None)
+        code, out, _ = self._run_cli(["check", "resume-edit-rel", "--env", "staging", "--resume"])
+        self.assertIn("apply: 01-ddl/001-add-col.sql (finished by the failed run, but edited since; runs again)", out)
+        code, _, err = self._stage("resume-edit-rel", "--resume")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_state()["appliedSteps"][0], "01-ddl/001-add-col.sql")
+
+    def test_resume_refusals(self) -> None:
+        self._make_two_ddl_bundle("resume-refuse-rel")
+        code, _, err = self._stage("resume-refuse-rel", "--resume")
+        self.assertEqual(code, 1)
+        self.assertIn("no failed-run record releases/resume-refuse-rel/state/staging.partial.json", err)
+        self._fail_at("01-ddl/002-add-note.sql")
+        self.assertEqual(self._stage("resume-refuse-rel")[0], 1)
+        code, _, err = self._stage("resume-refuse-rel", "--resume", "--full")
+        self.assertEqual(code, 1)
+        self.assertIn("--resume and --full cannot be combined", err)
+
+    def test_drifted_skipped_object_is_reapplied(self) -> None:
+        bundle = self._make_state_bundle("drift-rel")
+        self.assertEqual(self._stage("drift-rel")[0], 0)
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["PACKAGE BODY:ORDERS_PKG"] = {"source": "PACKAGE BODY ORDERS_PKG AS HOTFIX END;\n"}
+        state["calls"] = []
+        state["appliedSteps"] = []
+        self._write_state(state)
+        code, out, _ = self._run_cli(["check", "drift-rel", "--env", "staging"])
+        self.assertEqual(code, 0)
+        self.assertIn("drift: 02-code/orders_pkg_package_body.sql (changed on staging since our apply)", out)
+        self.assertIn("skip:  01-ddl/001-add-col.sql", out)
+        code, out, err = self._stage("drift-rel")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_state()["appliedSteps"], ["02-code/orders_pkg_package_body.sql"])
+        st = json.loads((bundle / "state" / "staging.json").read_text(encoding="utf-8"))
+        self.assertEqual(st["lastRun"]["drifted"], ["02-code/orders_pkg_package_body.sql"])
+
+    def test_patch_rerun_accepts_recorded_live_hash(self) -> None:
+        state = self._read_state()
+        state["envs"]["staging"]["replaceOnApply"] = True
+        self._write_state(state)
+        bundle = self._make_state_bundle("patch-rerun-rel", code_mode="patch")
+        code, _, err = self._stage("patch-rerun-rel")
+        self.assertEqual(code, 0, err)
+        self._edit_code(bundle)
+        self._reset_calls()
+        code, _, err = self._stage("patch-rerun-rel")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_state()["appliedSteps"], ["02-code/orders_pkg_package_body.sql"])
+        # A hot-fix on staging after our apply is a conflict for a patch step, not a silent overwrite
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["PACKAGE BODY:ORDERS_PKG"] = {"source": "PACKAGE BODY ORDERS_PKG AS HOTFIX END;\n"}
+        self._write_state(state)
+        self._edit_code(bundle, "4")
+        code, _, err = self._stage("patch-rerun-rel")
+        self.assertEqual(code, 1)
+        self.assertIn("patch baseSha256 mismatch", err)
+
+    def test_unchanged_app_is_not_redeployed(self) -> None:
+        bundle = self._make_state_bundle("app-delta-rel", apps=[130])
+        descriptor = self.root / "apps" / "APP_CODE" / "130" / "deployments" / "staging.json"
+        descriptor.parent.mkdir(parents=True)
+        descriptor.write_text("{}\n", encoding="utf-8")
+        deployed: list[int] = []
+
+        def deploy(_root, app_id, _env, _confirm, _vals) -> None:
+            deployed.append(app_id)
+
+        self.assertEqual(self._stage("app-delta-rel", app_deployer=deploy)[0], 0)
+        self.assertEqual(deployed, [130])
+        st = json.loads((bundle / "state" / "staging.json").read_text(encoding="utf-8"))
+        self.assertIn("130", st["apps"])
+        self._edit_code(bundle)
+        self.assertEqual(self._stage("app-delta-rel", app_deployer=deploy)[0], 0)
+        self.assertEqual(deployed, [130])
+        (self.root / "apps" / "APP_CODE" / "130" / "application.apx").write_text("changed\n", encoding="utf-8")
+        self.assertEqual(self._stage("app-delta-rel", app_deployer=deploy)[0], 0)
+        self.assertEqual(deployed, [130, 130])
+
+    def test_dev_run_records_state_without_status_change(self) -> None:
+        bundle = self._make_state_bundle("dev-state-rel")
+        code, out, err = self._run_cli(["run", "dev-state-rel", "--env", "dev", "--confirm-target", "DEVDB_UNQ"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue((bundle / "state" / "dev.json").is_file())
+        self.assertFalse((bundle / "state" / "staging.json").exists())
+        self.assertEqual(json.loads((bundle / "release.json").read_text(encoding="utf-8"))["status"], "draft")
+        self.assertIn("commit releases/dev-state-rel/state/dev.json", out)
+
+    def test_check_lists_apply_skip_and_drift(self) -> None:
+        bundle = self._make_state_bundle("check-delta-rel")
+        self.assertEqual(self._stage("check-delta-rel")[0], 0)
+        self._edit_code(bundle)
+        code, out, _ = self._run_cli(["check", "check-delta-rel", "--env", "staging"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("apply: 02-code/orders_pkg_package_body.sql", out)
+        self.assertIn("skip:  01-ddl/001-add-col.sql", out)
+        plan = json.loads(self._run_cli(["check", "check-delta-rel", "--env", "staging", "--format", "json"])[1])
+        self.assertEqual(plan["apply"], ["02-code/orders_pkg_package_body.sql"])
+        self.assertEqual(plan["skipped"], ["01-ddl/001-add-col.sql"])
+        self.assertEqual(plan["drifted"], [])
+        plan_full = json.loads(self._run_cli(["check", "check-delta-rel", "--env", "staging", "--format", "json", "--full"])[1])
+        self.assertEqual(plan_full["skipped"], [])
+
+    def test_prod_refuses_without_staged_record(self) -> None:
+        self._git_init()
+        self._make_state_bundle("prod-gate-rel")
+        self._git_commit_all("bundle")
+        code, _, err = self._run_cli(["run", "prod-gate-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("not staged", err)
+        self.assertIn("--no-staging-proof", err)
+
+    def test_prod_refuses_stale_staged_bundle_naming_file(self) -> None:
+        self._git_init()
+        bundle = self._make_state_bundle("prod-stale-rel")
+        self.assertEqual(self._stage("prod-stale-rel")[0], 0)
+        self._edit_code(bundle)
+        self._git_commit_all("staged then edited")
+        code, _, err = self._run_cli(["run", "prod-stale-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        self.assertEqual(code, 1)
+        self.assertIn("differs from what staging received: 02-code/orders_pkg_package_body.sql", err)
+
+    def test_prod_no_staging_proof_records_override(self) -> None:
+        self._git_init()
+        bundle = self._make_state_bundle("prod-override-rel")
+        self._git_commit_all("bundle")
+        code, out, err = self._run_cli(["run", "prod-override-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ",
+                                        "--no-staging-proof"])
+        self.assertEqual(code, 0, err)
+        locked = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        self.assertEqual(locked["status"], "deployed")
+        self.assertIs(locked["deployedWithoutStagingProof"], True)
+        self.assertTrue((bundle / "state" / "prod.json").is_file())
+        report = Path(re.search(r"Report:\s*(.+\.md)", out).group(1).strip()).read_text(encoding="utf-8")
+        self.assertIn("- **Staging proof:** skipped (--no-staging-proof)", report)
+
+    def test_prod_after_staging_runs_all_and_writes_prod_state(self) -> None:
+        self._git_init()
+        bundle = self._make_state_bundle("prod-staged-rel")
+        self.assertEqual(self._stage("prod-staged-rel")[0], 0)
+        self._git_commit_all("staged")
+        self._reset_calls()
+        code, out, err = self._run_cli(["run", "prod-staged-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Next: commit releases/prod-staged-rel/release.json and releases/prod-staged-rel/state/prod.json", out)
+        self.assertEqual(self._read_state()["appliedSteps"],
+                         ["01-ddl/001-add-col.sql", "02-code/orders_pkg_package_body.sql"])
+        locked = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        self.assertEqual(locked["status"], "deployed")
+        self.assertNotIn("deployedWithoutStagingProof", locked)
+        prod_state = json.loads((bundle / "state" / "prod.json").read_text(encoding="utf-8"))
+        self.assertEqual((prod_state["lastRun"]["mode"], prod_state["lastRun"]["applied"]), ("full", 2))
+
+
+    def test_status_table_text_and_json(self) -> None:
+        bundle = self._make_state_bundle("status-tbl-rel")
+        self.assertEqual(self._stage("status-tbl-rel")[0], 0)
+        self._edit_code(bundle)
+        code, out, err = self._run_cli(["status", "status-tbl-rel"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("status-tbl-rel   status: staged (effective: stale)", out)
+        self.assertIn("last runs: dev -, staging ", out)
+        self.assertRegex(out, r"01-ddl/001-add-col\.sql\s+-\s+ok\s+-")
+        self.assertRegex(out, r"02-code/orders_pkg_package_body\.sql\s+-\s+old\s+-")
+        self.assertIn("legend: ok = current version applied, old = an older version applied, - = never applied", out)
+        doc = json.loads(self._run_cli(["status", "status-tbl-rel", "--format", "json"])[1])
+        self.assertEqual(doc["effectiveStatus"], "stale")
+        rows = {r["item"]: r for r in doc["rows"]}
+        self.assertEqual(rows["01-ddl/001-add-col.sql"], {"item": "01-ddl/001-add-col.sql", "dev": "-", "staging": "ok", "prod": "-"})
+        self.assertEqual(rows["02-code/orders_pkg_package_body.sql"]["staging"], "old")
+        calls = self._read_state()["calls"]
+        self.assertFalse(any(c["driverName"] != "release-fetch.sql" and "release-run" in c["driverName"] for c in calls))
+
+    def test_status_live_reports_drift(self) -> None:
+        self._make_state_bundle("status-live-rel")
+        self.assertEqual(self._stage("status-live-rel")[0], 0)
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["PACKAGE BODY:ORDERS_PKG"] = {"source": "PACKAGE BODY ORDERS_PKG AS HOTFIX END;\n"}
+        state["calls"] = []
+        self._write_state(state)
+        code, out, err = self._run_cli(["status", "status-live-rel", "--live", "--env", "staging"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("drift on staging: 02-code/orders_pkg_package_body.sql (changed since our apply)", out)
+        names = [c["driverName"] for c in self._read_state()["calls"]]
+        self.assertEqual(names, ["release-fetch.sql"])
+        self.assertEqual(self._run_cli(["status", "status-live-rel", "--live"])[0], 2)
 
 
 if __name__ == "__main__":

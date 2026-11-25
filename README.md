@@ -51,7 +51,7 @@ operational scripts, `.env`, manifest and lock.
 | APEX apps as text in Git | `export` copies a live app into APEXlang files you can review, diff and commit. |
 | Two ways to work | **Builder-first** (change it in APEX, export it) or **file-first** (edit the files, publish them). |
 | Safe publish | Refuses newer Builder work, restores only automations that were active before import, then verifies normalized source. |
-| Lean 6-step release bundles | `releases/<slug>/` holds `release.json`, `01-ddl/`, `02-code/`, `03-ords/`, and `04-verify/` checks; preflights live state with `release check` and deploys zero-prompt via `release run --confirm-target`. |
+| Lean 6-step release bundles | `releases/<slug>/` holds `release.json`, `01-ddl/`, `02-code/`, `03-ords/`, and `04-verify/` checks; preflights live state with `release check`, deploys zero-prompt via `release run --confirm-target`, keeps per-environment state (`state/<env>.json`, staged status, changed-only reruns, production staging gate, `--resume` after a failed run) and reports it with `release status`. |
 | DEV test runner | Read-only planning and explicit schema-owner fixture runs (`datatype-roundtrip`, `compiler-settings`, or a project suite) with durable reports and retained results; see [DEV test runner](docs/dev-test.md). |
 | Schema comparison | Read-only comparison of selected tables, views and code between DEV, staging and production (`compare-schema` / `compare-env`). |
 | Several schemas per workspace | Comma-separated lists in `.env` and `--schema`; apps and database copies are kept per schema, and release bundles declare schema per entry. |
