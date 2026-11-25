@@ -515,7 +515,7 @@ The lock also records the selected `templateRef` and `apexRelease`. Later runs
 reuse the recorded ref when `--ref` is omitted. Keep a 26.1 project on the 26.1
 repository with `--source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_26_1.git --ref main --apex-release 26.1`.
 Moving to the 26.2 line requires an explicit
-`--source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git --ref main --apex-release 26.2`.
+`--source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git --ref main --apex-release 26.2`.
 Unknown or different release lines are refused before files change. This is
 an offline choice: `doctor` and APEX operations still check the live release.
 A legacy upgrader refuses schema-2 manifests; bootstrap the newer reviewed
@@ -555,8 +555,8 @@ repository has no `.template-lock.json`, the source resolves from its own
 is used when no explicit source is supplied:
 
 ```bash
-git clone https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git /tmp/apex-template
-python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git --ref main --apex-release 26.2
+git clone https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git /tmp/apex-template
+python3 /tmp/apex-template/scripts/upgrade_template.py --project-root . --source https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git --ref main --apex-release 26.2
 ```
 
 The example selects the 26.2 template explicitly. For a project remaining on

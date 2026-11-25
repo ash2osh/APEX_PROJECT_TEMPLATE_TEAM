@@ -231,7 +231,7 @@ The ignored report is `scratch/synonym-namespace-qualification-20261012-r6/quali
 
 This qualifies those dictionary routes on this one Oracle release and target;
 offline fixtures remain necessary for impossible catalog combinations. Sanitized
-native evidence was added to [issue #19](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM/issues/19#issuecomment-6118260901),
+native evidence was added to [issue #19](https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2/issues/19#issuecomment-6118260901),
 which is now closed as completed.
 
 ## Automation action qualification on 2026-10-12

@@ -192,7 +192,7 @@ under *Settings → General → Template repository*.)
 **B. From the command line:**
 
 ```bash
-git clone https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM.git my-apex-project
+git clone https://github.com/ash2osh/APEX_PROJECT_TEMPLATE_TEAM_26_2.git my-apex-project
 cd my-apex-project
 git remote rename origin template     # keep the template as a separate remote
 git remote add origin <your-new-repository-url>
@@ -220,7 +220,7 @@ does not verify the database: run `doctor` before any APEX operation. `main`
 is the release route after the 26.2 upgrade has been reviewed and merged.
 
 Do this in your new downstream project before its first push. The original
-`APEX_PROJECT_TEMPLATE_TEAM` repository retains its tests, workflows and
+`APEX_PROJECT_TEMPLATE_TEAM_26_2` repository retains its tests, workflows and
 Dependabot for template development. The cleanup below is for a fresh clone;
 in an established project, preserve any project-specific tests or CI first.
 
