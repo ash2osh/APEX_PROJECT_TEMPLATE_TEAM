@@ -34,10 +34,13 @@ Commands:
   release new <slug>                          Create a new draft release bundle under releases/<slug>/
   release collect <bundle> --from <env> --schema <SCHEMA> --object <TYPE:NAME> --mode <new|replace|patch> [--target-env <env>] [--file <relpath>]
                                               Export live source into 02-code/ and update release.json
-  release check <bundle> --env <dev|staging|prod> [--format text|json] [--allow-existing]
-                                              Read-only preflight, patch SHA-256 check, and plan preview
-  release run <bundle> --env <dev|staging|prod> --confirm-target <db_unique_name> [--allow-existing] [--skip-backup] [--allow-unbacked-ords] [--report <path>]
-                                              Zero-prompt 6-step backup, apply, invalid-delta check, verify, app deploy, report & prod lock
+  release check <bundle> --env <dev|staging|prod> [--format text|json] [--allow-existing] [--full] [--resume]
+                                              Read-only preflight, patch SHA-256 check, and plan preview (apply/skip/drift)
+  release run <bundle> --env <dev|staging|prod> --confirm-target <db_unique_name> [--allow-existing] [--skip-backup] [--allow-unbacked-ords] [--report <path>] [--full] [--no-staging-proof] [--resume]
+                                              Zero-prompt 6-step backup, apply, invalid-delta check, verify, app deploy, report & prod lock;
+                                              DEV/staging apply only steps changed since state/<env>.json (--resume skips DDL a failed run finished); prod requires a matching staging record
+  release status <bundle> [--format text|json] [--live --env <env>]
+                                              What each environment holds of a bundle (offline; --live reads drift read-only)
   dev-test [--plan|--run|--report RUN_ID|--cleanup RUN_ID] [--env dev] [--schema NAME]
            [--suite FILE] [--scenario ID ...] [--format text|json|markdown]
                                               Plan, run, inspect or explicitly clean retained DEV fixtures
