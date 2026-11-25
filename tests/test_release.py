@@ -639,6 +639,8 @@ class ReleaseBundleTests(unittest.TestCase):
         code, out, err = self._run_cli(["run", "prod-rel", "--env", "prod", "--confirm-target", "PRODDB_UNQ"])
         self.assertEqual(code, 0, err)
         self.assertIn("succeeded", out)
+        self.assertIn("Next: commit releases/prod-rel/release.json", out)
+        self.assertIn("push the tag", out)
 
         locked = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
         self.assertEqual(locked["status"], "deployed")
@@ -2274,6 +2276,128 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertIn("AND attribute = 'ERROR'", apply_calls[0]["driver"])
         reports = sorted((self.root / "scratch" / "release-reports").glob("p2-rel-staging-*.md"))
         self.assertIn("PLW-06002: Unreachable code", reports[-1].read_text(encoding="utf-8"))
+
+    def test_unterminated_plsql_is_refused_offline_and_terminated_sql_is_accepted(self) -> None:
+        def step(section: str, text_name: str, object_type: str | None = None) -> release.BundleStep:
+            subdir = dict(release.SECTION_DIRS)[section]
+            return release.BundleStep(
+                section=section,
+                schema="APP_CODE",
+                rel_file=f"{subdir}/{text_name}.sql",
+                path=self.root / text_name,
+                object_type=object_type,
+                object_name="OBJ" if object_type else None,
+                mode="replace" if object_type else None,
+            )
+
+        refused = {
+            "proc_no_slash": ("code", "PROCEDURE", "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n"),
+            "pkg_named_end": ("code", "PACKAGE BODY", "CREATE OR REPLACE PACKAGE BODY orders_pkg AS\nEND orders_pkg;\n\n"),
+            "end_then_comment": ("code", "FUNCTION", "CREATE FUNCTION f RETURN NUMBER IS\nBEGIN\n  RETURN 1;\nEND; -- done\n"),
+            "spec_no_slash": ("code", "PACKAGE", "CREATE OR REPLACE PACKAGE p AS\n  c CONSTANT NUMBER := 1;\nEND p;\n"),
+            "second_unit_after_slash": (
+                "code",
+                "PROCEDURE",
+                "CREATE PROCEDURE p AS BEGIN NULL; END;\n/\nCREATE OR REPLACE PROCEDURE q AS BEGIN NULL; END;\n",
+            ),
+            "type_without_slash": ("code", "TYPE", "CREATE OR REPLACE TYPE t AS OBJECT (id NUMBER);\n"),
+            "ddl_block": ("ddl", None, "CREATE TABLE t (id NUMBER);\nBEGIN\n  NULL;\nEND;\n"),
+            "ords_block": ("ords", None, "BEGIN\n  ORDS.define_module(p_module_name => 'm');\nEND;\n"),
+        }
+        for name, (section, object_type, sql) in refused.items():
+            with self.subTest(refused=name):
+                s = step(section, name, object_type)
+                with self.assertRaises(release.ReleaseError) as ctx:
+                    release._check_bundle_contents([s], [], step_texts={s.rel_file: sql})
+                self.assertIn("'/'", str(ctx.exception))
+
+        accepted = {
+            "proc_with_slash": ("code", "PROCEDURE", "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n/\n"),
+            "trigger_disable_tail": (
+                "code",
+                "TRIGGER",
+                'CREATE OR REPLACE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW\nBEGIN\n  NULL;\nEND;\n/\nALTER TRIGGER "TRG" DISABLE;\n',
+            ),
+            "grant_after_slash": ("code", "PROCEDURE", "CREATE PROCEDURE p AS BEGIN NULL; END;\n/\nGRANT EXECUTE ON p TO app_role;\n"),
+            "comment_after_slash": ("code", "PROCEDURE", "CREATE PROCEDURE p AS BEGIN NULL; END;\n/\n-- END;\n"),
+            "view": ("code", "VIEW", "CREATE OR REPLACE VIEW v AS SELECT 1 AS id FROM dual;\n"),
+            "dml_case_end": ("ddl", None, "UPDATE t SET a = 1\n WHERE b = CASE WHEN c = 1 THEN 2 ELSE 3\nEND;\n"),
+            "ddl_block_then_sql": ("ddl", None, "BEGIN\n  NULL;\nEND;\n/\nCREATE TABLE t (id NUMBER);\n"),
+            "end_in_string": ("ddl", None, "INSERT INTO t (txt) VALUES ('BEGIN\nEND;');\n"),
+        }
+        for name, (section, object_type, sql) in accepted.items():
+            with self.subTest(accepted=name):
+                s = step(section, name, object_type)
+                release._check_bundle_contents([s], [], step_texts={s.rel_file: sql})
+
+    def test_unterminated_code_step_refused_before_any_sqlcl_session(self) -> None:
+        self.assertEqual(self._run_cli(["new", "noslash-rel"])[0], 0)
+        bundle = self.root / "releases" / "noslash-rel"
+        (bundle / "02-code" / "orders_pkg_package_body.sql").write_text(
+            "CREATE OR REPLACE " + DEV_PKG_SOURCE, encoding="utf-8", newline="\n"
+        )
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "noslash-rel",
+            "status": "draft",
+            "createdAt": "2026-11-25T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [],
+            "code": [{
+                "schema": "APP_CODE",
+                "file": "02-code/orders_pkg_package_body.sql",
+                "objectType": "PACKAGE BODY",
+                "objectName": "ORDERS_PKG",
+                "mode": "replace",
+            }],
+            "ords": [],
+            "verify": [],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        def runner(*_args, **_kwargs):
+            raise AssertionError("no SQLcl session may start for an unterminated PL/SQL step")
+
+        code, _, err = self._run_cli_with_runner(
+            ["run", "noslash-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"], runner=runner
+        )
+        self.assertEqual(code, 1, err)
+        self.assertIn("is not followed by a '/' line", err)
+        self.assertFalse((self.root / "scratch" / "backups").exists())
+
+    def test_preflight_sqlcl_failure_in_run_preserves_log(self) -> None:
+        self.assertEqual(self._run_cli(["new", "pre-fail-rel"])[0], 0)
+        bundle = self.root / "releases" / "pre-fail-rel"
+        (bundle / "01-ddl" / "001-t.sql").write_text("CREATE TABLE T (ID NUMBER);\n", encoding="utf-8", newline="\n")
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "pre-fail-rel",
+            "status": "draft",
+            "createdAt": "2026-11-25T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [{"schema": "APP_CODE", "file": "01-ddl/001-t.sql"}],
+            "code": [],
+            "ords": [],
+            "verify": [],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        def runner(target, driver, run_dir, **_kwargs):
+            raise release.SqlclError("SQLcl failed", run_dir, "ORA-12541: Cannot connect. No listener\n")
+
+        code, _, err = self._run_cli_with_runner(
+            ["run", "pre-fail-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"], runner=runner
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("ORA-12541", err)
+        logs = list((self.root / "scratch" / "release-logs").glob("*-preflight-APP_CODE-sqlcl-output.log"))
+        self.assertEqual(len(logs), 1, err)
+        self.assertIn("ORA-12541", logs[0].read_text(encoding="utf-8"))
+        self.assertIn(str(logs[0]), err)
 
     def test_dbms_output_enable_null_in_all_clob_emitting_drivers(self) -> None:
         target = release.Target("staging", "stage_conn", "APP_LOGIN", "APP_CODE", "staging")
