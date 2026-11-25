@@ -2275,6 +2275,165 @@ class ReleaseBundleTests(unittest.TestCase):
         reports = sorted((self.root / "scratch" / "release-reports").glob("p2-rel-staging-*.md"))
         self.assertIn("PLW-06002: Unreachable code", reports[-1].read_text(encoding="utf-8"))
 
+    def test_dbms_output_enable_null_in_all_clob_emitting_drivers(self) -> None:
+        target = release.Target("staging", "stage_conn", "APP_LOGIN", "APP_CODE", "staging")
+        items = [("PACKAGE", "ORDERS_PKG")]
+
+        fetch_sql = release._render_fetch_objects_driver(target, items)
+        self.assertIn("BEGIN\n  DBMS_OUTPUT.ENABLE(NULL);", fetch_sql)
+
+        before_lines = "\n".join(release._before_invalids_lines(target))
+        self.assertIn("BEGIN\n  DBMS_OUTPUT.ENABLE(NULL);", before_lines)
+        self.assertIn("BEGIN\n  DBMS_OUTPUT.ENABLE(NULL);", release._render_before_invalids_driver(target))
+
+        post_lines = "\n".join(release._post_apply_lines(target, []))
+        self.assertIn("BEGIN\n  DBMS_OUTPUT.ENABLE(NULL);", post_lines)
+        self.assertIn("BEGIN\n  DBMS_OUTPUT.ENABLE(NULL);", release._render_post_apply_driver(target, []))
+
+        apply_sql = release._render_apply_driver(target, [])
+        self.assertEqual(apply_sql.count("DBMS_OUTPUT.ENABLE(NULL);"), 2)
+
+    def test_render_fetch_objects_driver_source_items_filters_source_and_ddl_only(self) -> None:
+        target = release.Target("staging", "stage_conn", "APP_LOGIN", "APP_CODE", "staging")
+        items = [
+            ("PACKAGE", "NEW_PKG"),
+            ("PACKAGE BODY", "REPLACE_PKG"),
+            ("PACKAGE", "PATCH_PKG"),
+            ("VIEW", "REPLACE_V"),
+            ("VIEW", "PATCH_V"),
+        ]
+
+        filtered_sql = release._render_fetch_objects_driver(
+            target,
+            items,
+            include_ddl=True,
+            source_items={("PACKAGE", "PATCH_PKG"), ("VIEW", "PATCH_V")},
+        )
+        for obj_type, obj_name in items:
+            self.assertIn(f"l_item.put('objectName', '{obj_name}');", filtered_sql)
+            self.assertIn(f"AND OBJECT_TYPE = '{obj_type}' AND OBJECT_NAME = '{obj_name}';", filtered_sql)
+
+        # ALL_SOURCE only queried for source_items
+        self.assertIn("AND TYPE = 'PACKAGE' AND NAME = 'PATCH_PKG'", filtered_sql)
+        self.assertIn("AND TYPE = 'VIEW' AND NAME = 'PATCH_V'", filtered_sql)
+        self.assertNotIn("AND TYPE = 'PACKAGE' AND NAME = 'NEW_PKG'", filtered_sql)
+        self.assertNotIn("AND TYPE = 'PACKAGE BODY' AND NAME = 'REPLACE_PKG'", filtered_sql)
+        self.assertNotIn("AND TYPE = 'VIEW' AND NAME = 'REPLACE_V'", filtered_sql)
+
+        # GET_DDL only queried for source_items
+        self.assertIn("DBMS_METADATA.GET_DDL('PACKAGE', 'PATCH_PKG', 'APP_CODE')", filtered_sql)
+        self.assertIn("DBMS_METADATA.GET_DDL('VIEW', 'PATCH_V', 'APP_CODE')", filtered_sql)
+        self.assertNotIn("DBMS_METADATA.GET_DDL('PACKAGE', 'NEW_PKG', 'APP_CODE')", filtered_sql)
+        self.assertNotIn("DBMS_METADATA.GET_DDL('VIEW', 'REPLACE_V', 'APP_CODE')", filtered_sql)
+
+        # Empty source_items skips all ALL_SOURCE / GET_DDL while keeping ALL_OBJECTS checks
+        empty_src_sql = release._render_fetch_objects_driver(target, items, include_ddl=True, source_items=set())
+        self.assertEqual(empty_src_sql.count("FROM ALL_OBJECTS"), len(items))
+        self.assertNotIn("FROM ALL_SOURCE", empty_src_sql)
+        self.assertNotIn("DBMS_METADATA.GET_DDL", empty_src_sql)
+
+        # source_items=None (default) fetches source/DDL for all items
+        full_sql = release._render_fetch_objects_driver(target, items, include_ddl=True)
+        self.assertEqual(full_sql.count("FROM ALL_SOURCE"), len(items))
+        self.assertEqual(full_sql.count("DBMS_METADATA.GET_DDL"), len(items))
+
+    def test_preflight_fetches_source_only_for_patch_while_backup_fetches_all_existing(self) -> None:
+        patch_base = "PACKAGE PATCH_PKG AS FUNCTION f RETURN NUMBER; END PATCH_PKG;\n"
+        patch_new = "CREATE OR REPLACE PACKAGE PATCH_PKG AS FUNCTION f RETURN NUMBER; FUNCTION g RETURN NUMBER; END PATCH_PKG;\n/\n"
+        view_sql = "CREATE OR REPLACE FORCE VIEW ORDERS_V AS SELECT 1 AS ID FROM DUAL;\n"
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["PACKAGE:PATCH_PKG"] = {"source": patch_base}
+        state["envs"]["staging"]["objects"]["VIEW:ORDERS_V"] = {"source": "", "ddl": view_sql}
+        self._write_state(state)
+
+        self.assertEqual(self._run_cli(["new", "preflight-filter-rel"])[0], 0)
+        bundle = self.root / "releases" / "preflight-filter-rel"
+        (bundle / "02-code" / "001-new.sql").write_text(
+            "CREATE OR REPLACE PACKAGE NEW_PKG AS PROCEDURE p; END NEW_PKG;\n/\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        (bundle / "02-code" / "002-replace.sql").write_text(
+            "CREATE OR REPLACE " + DEV_PKG_SOURCE + "/\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        (bundle / "02-code" / "003-replace-view.sql").write_text(view_sql, encoding="utf-8", newline="\n")
+        (bundle / "02-code" / "004-patch.sql").write_text(patch_new, encoding="utf-8", newline="\n")
+        manifest = {
+            "schemaVersion": 1,
+            "slug": "preflight-filter-rel",
+            "status": "draft",
+            "createdAt": "2026-11-24T00:00:00Z",
+            "schemas": ["APP_CODE"],
+            "ddl": [],
+            "code": [
+                {"schema": "APP_CODE", "file": "02-code/001-new.sql", "objectType": "PACKAGE", "objectName": "NEW_PKG", "mode": "new"},
+                {"schema": "APP_CODE", "file": "02-code/002-replace.sql", "objectType": "PACKAGE BODY", "objectName": "ORDERS_PKG", "mode": "replace"},
+                {"schema": "APP_CODE", "file": "02-code/003-replace-view.sql", "objectType": "VIEW", "objectName": "ORDERS_V", "mode": "replace"},
+                {
+                    "schema": "APP_CODE",
+                    "file": "02-code/004-patch.sql",
+                    "objectType": "PACKAGE",
+                    "objectName": "PATCH_PKG",
+                    "mode": "patch",
+                    "baseSha256": release.compute_source_sha256(patch_base),
+                },
+            ],
+            "ords": [],
+            "verify": [],
+            "apps": [],
+            "forbiddenPatterns": [],
+        }
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+
+        # 1) release check: preflight checks existence for all items, but requests ALL_SOURCE only for patch
+        code, out, err = self._run_cli(["check", "preflight-filter-rel", "--env", "staging"])
+        self.assertEqual(code, 0, out + err)
+        fetch_calls = [c for c in self._read_state()["calls"] if c["driverName"] == "release-fetch.sql"]
+        self.assertEqual(len(fetch_calls), 1)
+        preflight_driver = fetch_calls[0]["driver"]
+        self.assertIn("DBMS_OUTPUT.ENABLE(NULL);", preflight_driver)
+        for obj_name in ("NEW_PKG", "ORDERS_PKG", "ORDERS_V", "PATCH_PKG"):
+            self.assertIn(f"l_item.put('objectName', '{obj_name}');", preflight_driver)
+        self.assertIn("AND TYPE = 'PACKAGE' AND NAME = 'PATCH_PKG'", preflight_driver)
+        self.assertNotIn("AND TYPE = 'PACKAGE' AND NAME = 'NEW_PKG'", preflight_driver)
+        self.assertNotIn("AND TYPE = 'PACKAGE BODY' AND NAME = 'ORDERS_PKG'", preflight_driver)
+        self.assertNotIn("AND TYPE = 'VIEW' AND NAME = 'ORDERS_V'", preflight_driver)
+        self.assertNotIn("DBMS_METADATA.GET_DDL", preflight_driver)
+
+        # 2) release run: Step 3 backup still uses source_items=None so all existing objects get full DDL/source backup
+        self._write_state(state)
+        code, out, err = self._run_cli(["run", "preflight-filter-rel", "--env", "staging", "--confirm-target", "STAGEDB_UNQ"])
+        self.assertEqual(code, 0, out + err)
+        fetch_calls = [c for c in self._read_state()["calls"] if c["driverName"] == "release-fetch.sql"]
+        self.assertEqual(len(fetch_calls), 2)
+        backup_driver = fetch_calls[1]["driver"]
+        self.assertIn("DBMS_OUTPUT.ENABLE(NULL);", backup_driver)
+        for obj_name in ("ORDERS_PKG", "ORDERS_V", "PATCH_PKG"):
+            self.assertIn(f"AND NAME = '{obj_name}'", backup_driver)
+            self.assertIn(f"'{obj_name}', 'APP_CODE'", backup_driver)
+        self.assertNotIn("NEW_PKG", backup_driver)
+
+        backups = sorted((self.root / "scratch" / "backups").glob("preflight-filter-rel-staging-*"))
+        self.assertEqual(len(backups), 1)
+        bmanifest = json.loads((backups[0] / "backup-manifest.json").read_text(encoding="utf-8"))
+        backed_names = {(o["objectType"], o["objectName"]) for o in bmanifest["objects"]}
+        self.assertEqual(
+            backed_names,
+            {("PACKAGE BODY", "ORDERS_PKG"), ("VIEW", "ORDERS_V"), ("PACKAGE", "PATCH_PKG")},
+        )
+        for entry in bmanifest["objects"]:
+            self.assertTrue((backups[0] / entry["file"]).read_text(encoding="utf-8").strip())
+
+        # 3) mode: "new" existence check still fails when the object exists, even without fetching its source
+        state_existing_new = json.loads(json.dumps(state))
+        state_existing_new["envs"]["staging"]["objects"]["PACKAGE:NEW_PKG"] = {"source": "PACKAGE NEW_PKG AS END;"}
+        self._write_state(state_existing_new)
+        code, out, _ = self._run_cli(["check", "preflight-filter-rel", "--env", "staging"])
+        self.assertEqual(code, 1)
+        self.assertIn("APP_CODE.NEW_PKG (PACKAGE) already exists in staging", out)
+
 
 if __name__ == "__main__":
     unittest.main()

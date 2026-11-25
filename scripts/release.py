@@ -25,7 +25,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import groupby
@@ -898,6 +898,7 @@ def _render_fetch_objects_driver(
     items: Sequence[tuple[str, str]],
     *,
     include_ddl: bool = False,
+    source_items: Collection[tuple[str, str]] | None = None,
 ) -> str:
     """Render a read-only SQLcl driver fetching identity, ALL_OBJECTS existence, and source/DDL."""
     lines = [
@@ -923,6 +924,7 @@ def _render_fetch_objects_driver(
         "  l_exists  NUMBER;",
         "  l_out     CLOB;",
         "BEGIN",
+        "  DBMS_OUTPUT.ENABLE(NULL);",
         *_plsql_identity_lines("l_id"),
         "  l_payload.put('identity', l_id);",
     ])
@@ -932,6 +934,7 @@ def _render_fetch_objects_driver(
         q_name = _sql_literal(object_name)
         meta_type = object_type.replace(" ", "_")
         q_meta_type = _sql_literal(meta_type)
+        want_source = source_items is None or (object_type, object_name) in source_items
         lines.extend([
             "  l_item := JSON_OBJECT_T();",
             f"  l_item.put('objectType', {q_type});",
@@ -939,28 +942,31 @@ def _render_fetch_objects_driver(
             "  SELECT COUNT(*) INTO l_exists FROM ALL_OBJECTS",
             f"   WHERE OWNER = {q_schema} AND OBJECT_TYPE = {q_type} AND OBJECT_NAME = {q_name};",
             "  l_item.put('exists', l_exists > 0);",
-            "  l_src := EMPTY_CLOB();",
-            "  DBMS_LOB.CREATETEMPORARY(l_src, TRUE);",
-            "  FOR r IN (SELECT text FROM ALL_SOURCE",
-            f"             WHERE OWNER = {q_schema} AND TYPE = {q_type} AND NAME = {q_name}",
-            "             ORDER BY line) LOOP",
-            "    DBMS_LOB.APPEND(l_src, TO_CLOB(r.text));",
-            "  END LOOP;",
-            "  l_item.put('source', l_src);",
-            "  DBMS_LOB.FREETEMPORARY(l_src);",
         ])
-        if include_ddl or object_type in {"VIEW", "TRIGGER"}:
+        if want_source:
             lines.extend([
-                "  IF l_exists > 0 THEN",
-                "    BEGIN",
-                "      DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE);",
-                f"      l_ddl := DBMS_METADATA.GET_DDL({q_meta_type}, {q_name}, {q_schema});",
-                "      l_item.put('ddl', l_ddl);",
-                "    EXCEPTION WHEN OTHERS THEN",
-                "      l_item.put('ddlError', SQLERRM);",
-                "    END;",
-                "  END IF;",
+                "  l_src := EMPTY_CLOB();",
+                "  DBMS_LOB.CREATETEMPORARY(l_src, TRUE);",
+                "  FOR r IN (SELECT text FROM ALL_SOURCE",
+                f"             WHERE OWNER = {q_schema} AND TYPE = {q_type} AND NAME = {q_name}",
+                "             ORDER BY line) LOOP",
+                "    DBMS_LOB.APPEND(l_src, TO_CLOB(r.text));",
+                "  END LOOP;",
+                "  l_item.put('source', l_src);",
+                "  DBMS_LOB.FREETEMPORARY(l_src);",
             ])
+            if include_ddl or object_type in {"VIEW", "TRIGGER"}:
+                lines.extend([
+                    "  IF l_exists > 0 THEN",
+                    "    BEGIN",
+                    "      DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE);",
+                    f"      l_ddl := DBMS_METADATA.GET_DDL({q_meta_type}, {q_name}, {q_schema});",
+                    "      l_item.put('ddl', l_ddl);",
+                    "    EXCEPTION WHEN OTHERS THEN",
+                    "      l_item.put('ddlError', SQLERRM);",
+                    "    END;",
+                    "  END IF;",
+                ])
         lines.append("  l_items.append(l_item);")
     lines.extend([
         "  l_payload.put('objects', l_items);",
@@ -1047,9 +1053,10 @@ def _fetch_schema_objects(
     items: Sequence[tuple[str, str]],
     *,
     include_ddl: bool = False,
+    source_items: Collection[tuple[str, str]] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, str], dict[tuple[str, str], dict[str, Any]]]:
-    driver_sql = _render_fetch_objects_driver(target, items, include_ddl=include_ddl)
+    driver_sql = _render_fetch_objects_driver(target, items, include_ddl=include_ddl, source_items=source_items)
     output = _run_driver(runner, target, run_dir, "release-fetch.sql", driver_sql, phase="inventory", environ=environ)
     payload = _extract_framed_json(output, "FETCH")
     identity = _verify_live_identity(payload.get("identity") or {}, target)
@@ -1897,13 +1904,19 @@ def _preflight_bundle(
         target = targets[schema]
         schema_code_steps = [s for s in steps if s.schema == schema and s.section == "code"]
         items = items_by_schema[schema]
-        need_ddl = any(obj_type in {"VIEW", "TRIGGER"} for obj_type, _ in items)
+        patch_items = {
+            (s.object_type, s.object_name)
+            for s in schema_code_steps
+            if s.mode == "patch" and s.object_type and s.object_name
+        }
+        need_ddl = any(obj_type in {"VIEW", "TRIGGER"} for obj_type, _ in patch_items)
         identity, fetched = _fetch_schema_objects(
             runner,
             target,
             work_dir / f"preflight-{schema}",
             items,
             include_ddl=need_ddl,
+            source_items=patch_items,
             environ=values,
         )
         identities[schema] = identity
@@ -2205,6 +2218,7 @@ def _before_invalids_lines(target: Target) -> list[str]:
         "  l_obj     JSON_OBJECT_T;",
         "  l_out     CLOB;",
         "BEGIN",
+        "  DBMS_OUTPUT.ENABLE(NULL);",
         *_plsql_identity_lines("l_id"),
         "  l_payload.put('identity', l_id);",
         f"  FOR r IN (SELECT object_type, object_name FROM ALL_OBJECTS WHERE owner = {q_schema} AND status <> 'VALID' ORDER BY object_type, object_name) LOOP",
@@ -2454,6 +2468,7 @@ def _post_apply_lines(target: Target, code_steps: Sequence[BundleStep]) -> list[
         "  l_row     JSON_OBJECT_T;",
         "  l_out     CLOB;",
         "BEGIN",
+        "  DBMS_OUTPUT.ENABLE(NULL);",
     ]
     unique_code = list(dict.fromkeys((s.object_type, s.object_name) for s in code_steps if s.object_type and s.object_name))
     if unique_code:
