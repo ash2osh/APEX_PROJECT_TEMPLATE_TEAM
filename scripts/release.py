@@ -746,6 +746,48 @@ def _find_explicit_create_owners(sql_text: str) -> list[tuple[str, str, str]]:
     return found
 
 
+_PLSQL_UNIT_TYPES = frozenset({"PACKAGE", "PACKAGE BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE BODY"})
+_BLOCK_END_LINE_RE = re.compile(r'(?i)^\s*END(?:\s+[A-Za-z_"][A-Za-z0-9_$#".]*)?\s*;\s*\Z')
+_PLSQL_BLOCK_OPEN_RE = re.compile(
+    r"(?is)\b(?:BEGIN|DECLARE)\b"
+    r"|\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?"
+    r"(?:PACKAGE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b"
+)
+
+
+def _check_block_terminators(step: BundleStep, masked_sql: str) -> None:
+    """Refuse PL/SQL that is not closed by a '/' line.
+
+    The apply driver concatenates every step into one SQLcl script. An unterminated
+    block absorbs the next step's PROMPT marker and SQL, and CREATE OR REPLACE then
+    stores the broken unit with only a compilation warning, so the damage happens
+    before the step markers are checked. Checked on comment- and string-masked text.
+    """
+    lines = masked_sql.split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return
+    slash_idx = next((idx for idx in range(len(lines) - 1, -1, -1) if lines[idx].strip() == "/"), None)
+    open_segment = "\n".join(lines[(slash_idx + 1) if slash_idx is not None else 0 :])
+    if _BLOCK_END_LINE_RE.match(lines[-1]) and _PLSQL_BLOCK_OPEN_RE.search(open_segment):
+        raise ReleaseError(
+            f"{step.rel_file} line {len(lines)}: PL/SQL block ends with END; but is not followed by a '/' line"
+        )
+    if step.section != "code" or step.object_type not in _PLSQL_UNIT_TYPES:
+        return
+    if slash_idx is None:
+        raise ReleaseError(
+            f"{step.rel_file}: {step.object_type} {step.object_name} must be terminated by a line containing only '/'"
+        )
+    tail = "\n".join(lines[slash_idx + 1 :]).strip()
+    if tail and (not tail.endswith(";") or _PLSQL_BLOCK_OPEN_RE.search(tail)):
+        raise ReleaseError(
+            f"{step.rel_file} line {slash_idx + 2}: content after the closing '/' must be plain SQL statements "
+            "ending with ';' (another PL/SQL unit needs its own '/' line)"
+        )
+
+
 def _check_bundle_contents(
     steps: Sequence[BundleStep],
     forbidden_patterns: Sequence[str],
@@ -767,13 +809,14 @@ def _check_bundle_contents(
                 f"{step.rel_file} contains ALTER SESSION SET PLSQL_CODE_TYPE = INTERPRETED; "
                 "strip it (or re-collect) so ADB non-ADMIN logins do not fail with ORA-01031"
             )
-        nested, _ = _scan_sql_text(sql_text)
+        nested, masked = _scan_sql_text(sql_text)
         if nested is not None:
             line_no, preview = nested
             raise ReleaseError(
                 f"{step.rel_file} line {line_no}: nested SQLcl script-loading directive ({preview}) "
                 "is not allowed in release bundles"
             )
+        _check_block_terminators(step, masked)
         if forbidden_patterns:
             name_candidates = [step.rel_file, step.path.name]
             if step.object_name:
@@ -999,8 +1042,10 @@ def _preserve_sqlcl_failure_log(run_dir: Path, exc: BaseException) -> tuple[Path
     output_text = output if isinstance(output, str) else ""
 
     saved_log: Path | None = None
-    scratch_root = run_dir.parent.parent
-    if scratch_root.name == "scratch" and (log_src.is_file() or output_text):
+    # Run folders sit at different depths under scratch/ (for example
+    # scratch/release-run-*/preflight/preflight-<schema>), so find the nearest scratch/.
+    scratch_root = next((parent for parent in run_dir.parents if parent.name == "scratch"), None)
+    if scratch_root is not None and (log_src.is_file() or output_text):
         logs_dir = scratch_root / "release-logs"
         logs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         saved_log = logs_dir / f"{_utc_stamp()}-{run_dir.name}-sqlcl-output.log"
@@ -1775,24 +1820,6 @@ def cmd_collect(
     return 0
 
 
-def _validate_basic_app_descriptor(path: Path, expected_app_id: int) -> None:
-    data = _read_json_object(path, path.as_posix())
-    workspace = data.get("workspace")
-    ws_name = workspace.get("name") if isinstance(workspace, dict) else None
-    if not isinstance(ws_name, str) or not ws_name.strip() or any(c in ws_name for c in "\t\r\n"):
-        raise ReleaseError("deployment workspace.name must be a non-empty single-line string")
-    app = data.get("app")
-    if not isinstance(app, dict):
-        raise ReleaseError("deployment app object is required")
-    app_id = app.get("id")
-    if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id != expected_app_id:
-        raise ReleaseError(f"deployment app.id must equal {expected_app_id}, got {app_id!r}")
-    db_sess = app.get("databaseSession")
-    parsing_schema = db_sess.get("parsingSchema") if isinstance(db_sess, dict) else None
-    if not isinstance(parsing_schema, str) or ORACLE_IDENTIFIER.fullmatch(parsing_schema) is None:
-        raise ReleaseError("deployment app.databaseSession.parsingSchema must be an uppercase Oracle identifier")
-
-
 def _write_preflight_env_file(work_dir: Path, values: Mapping[str, str]) -> Path:
     work_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     env_path = work_dir / "preflight.env"
@@ -2186,10 +2213,6 @@ def cmd_check(
         else:
             print("  Preflight checks passed.")
     return 1 if failures else 0
-
-
-def _render_backup_driver(target: Target, existing_items: Sequence[tuple[str, str]]) -> str:
-    return _render_fetch_objects_driver(target, existing_items, include_ddl=True)
 
 
 def _apply_session_prelude(target: Target) -> list[str]:
@@ -3274,6 +3297,12 @@ def cmd_run(
             report_path.write_text("\n".join(report_lines), encoding="utf-8", newline="\n")
             if outcome == "SUCCEEDED":
                 print(f"Release {slug} -> {env} succeeded. Report: {report_path}")
+                if "prod-lock" in completed_phases:
+                    print(
+                        f"Next: commit releases/{slug}/release.json (now status 'deployed'); "
+                        f"tag release/{slug} points at the release commit {release_commit[:12]}, "
+                        "so push the tag along with that commit."
+                    )
             else:
                 print(f"Release {slug} -> {env} failed. Report: {report_path}", file=sys.stderr)
 

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "b704f28b684d6a30ccac117fe03199795b8a2007",
+  "coreCommit": "57e8f2a6f3f3103be27bd06f1f40db52137bf883",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -239,7 +239,7 @@
     },
     {
       "path": "scripts/release.py",
-      "sha256": "4404f090494dbb431c8a632aec46b4278ed5016d29115420f3b2c13b3a555c03",
+      "sha256": "2be653454aa845ce3624e32b0e1125a45a2941ae9935cc55b0d85e5257fa0ff0",
       "executable": false
     },
     {
@@ -689,7 +689,7 @@
     },
     {
       "path": "tests/test_release.py",
-      "sha256": "a544f6959633cf54f75a0239855788771ed3f1f93a1d08e576a025180b057df5",
+      "sha256": "a7b64d0c2b9add68d2f39103109a135cd4ed67203356c4df3bca9b91980f8ed4",
       "executable": false
     },
     {
