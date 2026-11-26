@@ -404,6 +404,50 @@ class StaleLockParkTests(unittest.TestCase):
             self.assertEqual(["lock"], sorted(p.name for p in root.iterdir()))
 
 
+@unittest.skipUnless(PWSH, "PowerShell is not available")
+class PwshStaleLockParkTests(unittest.TestCase):
+    """ASHARIF 2026-11-26: Move-StaleMirrorLock removes a stale lock only when it is the one that was read."""
+
+    def run_park(self, root: Path, *, replaced_after_read: str | None) -> subprocess.CompletedProcess:
+        script = (ROOT / "scripts" / "replace_mirror.ps1").read_text(encoding="utf-8")
+        function = re.search(r"^function Move-StaleMirrorLock\(.*?^\}\n", script, re.S | re.M).group(0)
+        replace = "" if replaced_after_read is None else (
+            "[System.IO.File]::WriteAllText($lock, '" + replaced_after_read + "')\n"
+        )
+        body = (
+            function
+            + "$lock = $args[0]\n"
+            + "$snap = [System.IO.File]::ReadAllText($lock)\n"
+            + replace
+            + "$ok = Move-StaleMirrorLock -LockPath $lock -Snapshot $snap\n"
+            + "Write-Output \"rc=$ok\"\n"
+        )
+        runner = root / "park.ps1"
+        runner.write_text(body, encoding="utf-8")
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-File", str(runner), str(root / "lock")],
+            text=True, encoding="utf-8", capture_output=True, check=False,
+        )
+
+    def test_the_lock_that_was_read_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "lock").write_text("version=1\nimpl=sh\npid=1\nepoch=1\n", encoding="utf-8")
+            result = self.run_park(root, replaced_after_read=None)
+            self.assertIn("rc=True", result.stdout, result.stdout + result.stderr)
+            self.assertEqual(["park.ps1"], sorted(p.name for p in root.iterdir()))
+
+    def test_a_lock_replaced_after_the_read_is_put_back_and_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "lock").write_text("version=1\nimpl=sh\npid=1\nepoch=1\n", encoding="utf-8")
+            fresh = "version=1\nimpl=ps1\npid=2\nepoch=2\n"
+            result = self.run_park(root, replaced_after_read=fresh)
+            self.assertIn("rc=False", result.stdout, result.stdout + result.stderr)
+            self.assertEqual(fresh, (root / "lock").read_text(encoding="utf-8").replace("\r\n", "\n"))
+            self.assertEqual(["lock", "park.ps1"], sorted(p.name for p in root.iterdir()))
+
+
 class PreserveDeploymentsTests(unittest.TestCase):
     def test_authored_files_survive_and_generated_default_is_not_kept(self) -> None:
         # ASHARIF 2026-11-26: every authored file in deployments/ is kept; the authored copy wins

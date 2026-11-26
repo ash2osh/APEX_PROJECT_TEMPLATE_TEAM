@@ -248,6 +248,27 @@ function Get-MirrorLockField([string]$Path, [string]$Key) {
   return $null
 }
 
+# ASHARIF 2026-11-26: a stale lock is parked under a unique name before it is removed, as in
+# replace_mirror.sh. The rename takes whatever lock is there now; when that is not the stale holder we read
+# (a contender just replaced it), the lock is moved back. File.Move never overwrites, so a lock created in
+# the meantime is never lost. Returns $true when the slot may be retried, $false to refuse.
+function Move-StaleMirrorLock([string]$LockPath, [string]$Snapshot) {
+  $parked = "$LockPath.broken.$PID." + [System.Guid]::NewGuid().ToString('N').Substring(0, 8)
+  try { [System.IO.File]::Move($LockPath, $parked) } catch { return $true }
+  $parkedText = $null
+  try { $parkedText = [System.IO.File]::ReadAllText($parked) } catch { $parkedText = $null }
+  if ($null -ne $parkedText -and $parkedText -ceq $Snapshot) {
+    Remove-Item -LiteralPath $parked -Force -ErrorAction SilentlyContinue
+    return $true
+  }
+  try {
+    [System.IO.File]::Move($parked, $LockPath)
+  } catch {
+    [Console]::Error.WriteLine("a new mirror lock appeared while the stale one was being replaced; its holder is kept in $parked")
+  }
+  return $false
+}
+
 function Enter-MirrorLock([string]$LockPath, [string]$CanonicalRelative) {
   foreach ($attempt in 1, 2) {
     try {
@@ -262,6 +283,8 @@ function Enter-MirrorLock([string]$LockPath, [string]$CanonicalRelative) {
       return $stream
     } catch [System.IO.IOException] {
       if ($attempt -eq 2) { break }
+      $snapshot = $null
+      try { $snapshot = [System.IO.File]::ReadAllText($LockPath) } catch { $snapshot = $null }
       $holderVersion = Get-MirrorLockField -Path $LockPath -Key "version"
       $holderImpl = Get-MirrorLockField -Path $LockPath -Key "impl"
       $holderPid = Get-MirrorLockField -Path $LockPath -Key "pid"
@@ -284,7 +307,9 @@ function Enter-MirrorLock([string]$LockPath, [string]$CanonicalRelative) {
       $age = [long][double]::Parse((Get-Date -UFormat %s)) - $holderEpochValue
       if ($age -gt $mirrorLockStaleSeconds) {
         [Console]::Error.WriteLine("WARNING: " + "breaking stale mirror lock for $CanonicalRelative (impl=$holderImpl pid=$holderPid age=${age}s)")
-        Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+        if (-not (Move-StaleMirrorLock -LockPath $LockPath -Snapshot $snapshot)) {
+          throw "another mirror replacement is already running for $CanonicalRelative"
+        }
         continue
       }
       throw ("another mirror replacement is already running for $CanonicalRelative; " +
