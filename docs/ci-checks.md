@@ -20,8 +20,8 @@ A first job, `changes`, decides this and prints why. A job skipped on purpose co
 
 The Windows suite runs on three runners at once (`windows-offline (1/3)` to `(3/3)`):
 `scripts/ci_run_tests.py --shard K/N` (or `CI_TEST_SHARD=K/N`) deals the test modules largest first to the share
-with the least total size, so the three shares are the whole suite with no module twice. Only shard 1 runs the lint
-and line-ending steps. To run one share locally: `CI_TEST_JOBS=4 python3 scripts/ci_run_tests.py --shard 2/3`.
+with the least total size, so the three shares are the whole suite with no module twice. Every shard installs and runs Ruff
+(some tests need it); only shard 1 runs the other lint and line-ending steps. To run one share locally: `CI_TEST_JOBS=4 python3 scripts/ci_run_tests.py --shard 2/3`.
 
 The jobs are `offline` (Linux, Python 3.10), `offline (latest Python 3.x)` (Linux, the newest Python 3.x, with the same
 compile and behavioural-test steps but not lint or the other checks), `graphify (pinned set, Python 3.12)`,
