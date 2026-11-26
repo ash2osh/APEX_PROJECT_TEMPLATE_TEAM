@@ -256,10 +256,33 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("python3 scripts/ci_run_tests.py", workflow)
         self.assertIn("python scripts/ci_run_tests.py", workflow)
         linux_job = workflow.split("  offline:", 1)[1].split("  offline-latest-python:", 1)[0]
-        windows_job = workflow.split("  windows-offline:", 1)[1].split("  macos-installer:", 1)[0]
+        windows_job = workflow.split("  windows-tests:", 1)[1].split("  windows-offline:", 1)[0]
         self.assertIn("CI_TEST_JOBS: '4'", linux_job)
         self.assertIn("CI_TEST_JOBS: '2'", windows_job)
         self.assertIn('"discover", "-s", "tests", "-v"', (ROOT / "scripts" / "ci_run_tests.py").read_text(encoding="utf-8"))
+
+    def test_ci_shards_windows_and_scopes_each_run(self) -> None:
+        # ASHARIF 2026-11-26: three Windows shards, one required `windows-offline` result, docs-only and push runs
+        # skip the heavy jobs, and the full matrix runs nightly.
+        workflow = (ROOT / ".github" / "workflows" / "template-checks.yml").read_text(encoding="utf-8")
+        headers = [(match.start(), match.group(1)) for match in re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):$", workflow)]
+        jobs = {}
+        for index, (start, name) in enumerate(headers):
+            end = headers[index + 1][0] if index + 1 < len(headers) else len(workflow)
+            jobs[name] = workflow[start:end]
+        self.assertIn("schedule:", workflow)
+        self.assertIn("full: ${{ steps.scope.outputs.full }}", jobs["changes"])
+        self.assertIn("shard: [1, 2, 3]", jobs["windows-tests"])
+        self.assertIn("CI_TEST_SHARD: ${{ matrix.shard }}/3", jobs["windows-tests"])
+        self.assertIn("python scripts/ci_run_tests.py", jobs["windows-tests"])
+        self.assertIn("needs: [changes, windows-tests]", jobs["windows-offline"])
+        self.assertIn("if: always()", jobs["windows-offline"])
+        for heavy in ("windows-tests", "offline-latest-python", "windows-powershell-51"):
+            with self.subTest(job=heavy):
+                self.assertIn("if: needs.changes.outputs.full == 'true'", jobs[heavy])
+        # `offline` and `macos-installer` are required checks and always run.
+        self.assertNotIn("needs:", jobs["offline"])
+        self.assertNotIn("needs:", jobs["macos-installer"])
 
     def test_ci_runs_the_suite_on_the_oldest_and_the_newest_linux_python(self) -> None:
         # `offline` keeps its name (a required check) on the oldest supported Python; the newest 3.x runs beside it.

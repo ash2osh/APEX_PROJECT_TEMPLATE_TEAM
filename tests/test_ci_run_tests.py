@@ -12,7 +12,7 @@ from pathlib import Path
 
 from scripts.ci_run_tests import (
     failed_test_ids, forbidden_skips, hermetic_environment, hermetic_git_config, load_known, main, ordered_modules, parse_forbid_skip,
-    parse_jobs, run_parallel, run_unittest,
+    parse_jobs, parse_shard, run_parallel, run_unittest, shard_modules,
 )
 
 KNOWN_TEXT = "# comment\n\nmod_a.ClassA.test_one  # reason\nmod_b.ClassB.test_two\n"
@@ -247,6 +247,53 @@ class ParallelRunTests(unittest.TestCase):
 
     def test_modules_run_largest_first_and_helpers_are_left_out(self):
         self.assertEqual(ordered_modules(self.tests), ["test_big", "test_mid", "test_small", "test_tiny"])
+
+    def test_shards_cover_every_module_once_and_balance_by_size(self):
+        # ASHARIF 2026-11-26: big 900 -> 1; mid 500 -> 2; small 400 -> 2 (now 900); tiny 100 -> tie, lowest share 1
+        self.assertEqual(shard_modules(self.tests, (1, 2)), ["test_big", "test_tiny"])
+        self.assertEqual(shard_modules(self.tests, (2, 2)), ["test_mid", "test_small"])
+        for total in (1, 2, 3, 4, 5):
+            with self.subTest(total=total):
+                shares = [shard_modules(self.tests, (index, total)) for index in range(1, total + 1)]
+                flat = [module for share in shares for module in share]
+                self.assertEqual(sorted(flat), sorted(ordered_modules(self.tests)))
+                self.assertEqual(len(flat), len(set(flat)))
+        self.assertEqual(shard_modules(self.tests, None), ordered_modules(self.tests))
+
+    def test_shard_comes_from_the_option_then_the_variable_and_bad_values_are_refused(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(parse_shard([]), (None, []))
+            self.assertEqual(parse_shard(["--shard", "2/3", "-v"]), ((2, 3), ["-v"]))
+            self.assertEqual(parse_shard(["--shard=1/1"]), ((1, 1), []))
+        with patch.dict(os.environ, {"CI_TEST_SHARD": "3/3"}):
+            self.assertEqual(parse_shard([]), ((3, 3), []))
+        for bad in (["--shard", "0/2"], ["--shard", "3/2"], ["--shard", "x"], ["--shard"], ["--shard=2"]):
+            with self.subTest(bad=bad), patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
+                parse_shard(bad)
+
+    def test_a_shard_run_runs_only_its_modules_and_names_them(self):
+        seen = []
+
+        def module_runner(modules):
+            seen.extend(modules)
+            return 0, "ok\nRan 1 test in 0.0s\nOK\n"
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            code, _ = run_parallel(2, module_runner, self.tests, shard=(2, 2))
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(seen), ["test_mid", "test_small"])
+        self.assertIn("===== Shard 2/2: 2 module(s): test_mid, test_small", printed.getvalue())
+
+    def test_main_passes_the_shard_to_the_parallel_run_even_with_one_job(self):
+        calls = []
+
+        def parallel(jobs, shard=None):
+            calls.append((jobs, shard))
+            return 0, ""
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(main(["--shard", "1/3"], runner=Runner(), parallel=parallel), 0)
+            self.assertEqual(calls, [(1, (1, 3))])
+            with self.assertRaises(SystemExit):
+                main(["--shard", "1/3", "-k", "x"], runner=Runner(), parallel=parallel)
 
     def test_jobs_come_from_the_option_then_the_variable_then_default_one(self):
         with patch.dict(os.environ, {}, clear=True):

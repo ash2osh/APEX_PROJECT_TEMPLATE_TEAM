@@ -11,6 +11,11 @@ failing test, or a failed rerun fails the job exactly as before. A rerun is repo
 process, N at a time, largest module first. Each module's output is printed whole, in
 that order, and the job fails when any module fails.
 
+`--shard K/N` (default: the CI_TEST_SHARD variable; unset means the whole suite) runs only the K-th of N
+shares of the test modules, so N CI jobs on separate runners can share the suite. Modules are dealt largest
+first to the share with the least total file size, the same way in every job, so the N shares together are
+the whole suite with no module twice. A shard run is always a parallel run (one process per module).
+
 `--forbid-skip REGEX` (default: the CI_FORBID_SKIP variable; unset or empty means off) fails the run when the
 reason of any skipped test matches REGEX, even if every test passed. Every run this script makes is checked,
 including the flaky rerun, so a rerun cannot hide a forbidden skip.
@@ -175,6 +180,26 @@ def ordered_modules(tests_dir: Path) -> list[str]:
     return [path.stem for path in paths]
 
 
+# ASHARIF 2026-11-26: CI shares the slow Windows suite across several runners (`--shard K/N`).
+def shard_modules(tests_dir: Path, shard: tuple[int, int] | None) -> list[str]:
+    """The modules of share K of N (largest first), or every module when shard is None.
+
+    Modules are dealt largest first to the share with the smallest total file size so far (ties go to the
+    lowest share number). The result depends only on the files, so every job computes the same split.
+    """
+    modules = ordered_modules(tests_dir)
+    if shard is None:
+        return modules
+    index, total = shard
+    loads = [0] * total
+    owner: dict[str, int] = {}
+    for module in modules:
+        target = min(range(total), key=lambda share: (loads[share], share))
+        owner[module] = target + 1
+        loads[target] += (tests_dir / f"{module}.py").stat().st_size
+    return [module for module in modules if owner[module] == index]
+
+
 def run_modules(modules: Sequence[str]) -> tuple[int, str]:
     """Run test modules in one process, as `discover -s tests` would import them; return (exit code, output)."""
     timeout = 900
@@ -201,9 +226,12 @@ def run_modules(modules: Sequence[str]) -> tuple[int, str]:
         return 124, output
 
 
-def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path = ROOT / "tests") -> tuple[int, str]:
-    """Run every test module in its own process, `jobs` at a time; print each one's output in order."""
-    modules = ordered_modules(tests_dir)
+def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path = ROOT / "tests",
+                 shard: tuple[int, int] | None = None) -> tuple[int, str]:
+    """Run every test module (or one share of them) in its own process, `jobs` at a time; print each one's output in order."""
+    modules = shard_modules(tests_dir, shard)
+    if shard is not None:
+        print(f"===== Shard {shard[0]}/{shard[1]}: {len(modules)} module(s): {', '.join(modules)}", flush=True)
     outputs: list[str] = []
     tests_run = skipped = failures = errors = reported_modules = 0
     code = 0
@@ -258,6 +286,28 @@ def parse_jobs(args: list[str]) -> tuple[int, list[str]]:
     return int(jobs), rest
 
 
+def parse_shard(args: list[str]) -> tuple[tuple[int, int] | None, list[str]]:
+    """Take `--shard K/N` out of the arguments; the default comes from CI_TEST_SHARD, where unset or empty means off."""
+    value = os.environ.get("CI_TEST_SHARD", "")
+    rest = []
+    iterator = iter(args)
+    for argument in iterator:
+        if argument == "--shard":
+            value = next(iterator, "")
+            if not value:
+                raise SystemExit("--shard needs K/N, for example 2/3")
+        elif argument.startswith("--shard="):
+            value = argument.split("=", 1)[1]
+        else:
+            rest.append(argument)
+    if not value:
+        return None, rest
+    match = re.fullmatch(r"(\d+)/(\d+)", value.strip())
+    if not match or not 1 <= int(match.group(1)) <= int(match.group(2)):
+        raise SystemExit(f"--shard needs K/N with 1 <= K <= N, got {value!r}")
+    return (int(match.group(1)), int(match.group(2))), rest
+
+
 def parse_forbid_skip(args: list[str]) -> tuple[re.Pattern[str] | None, list[str]]:
     """Take `--forbid-skip REGEX` out of the arguments; the default comes from CI_FORBID_SKIP, where unset or empty means off."""
     pattern = os.environ.get("CI_FORBID_SKIP", "")
@@ -294,10 +344,13 @@ def report_forbidden(lines: Sequence[str], code: int = 0) -> int:
 def main(argv: Sequence[str] | None = None, *, runner: Runner = run_unittest, known_path: Path = KNOWN_FLAKY,
          parallel: Callable[[int], tuple[int, str]] = run_parallel) -> int:
     forbid, rest = parse_forbid_skip(list(argv) if argv is not None else sys.argv[1:])
+    shard, rest = parse_shard(rest)
     jobs, args = parse_jobs(rest)
-    parallel_run = jobs > 1 and not args
+    if shard is not None and args:
+        raise SystemExit("--shard runs whole test modules; it cannot be combined with unittest arguments")
+    parallel_run = (jobs > 1 or shard is not None) and not args
     if parallel_run:
-        code, output = parallel(jobs)
+        code, output = parallel(jobs) if shard is None else parallel(jobs, shard=shard)
     else:
         code, output = runner(["discover", "-s", "tests", "-v", *args])
     forbidden = forbidden_skips(output, forbid)
