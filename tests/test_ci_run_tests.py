@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import subprocess
 import _test_subprocess_safety  # noqa: F401
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from scripts.ci_run_tests import (
     failed_test_ids, forbidden_skips, hermetic_environment, hermetic_git_config, load_known, main, ordered_modules, parse_forbid_skip,
-    parse_jobs, parse_shard, run_parallel, run_unittest, shard_modules,
+    module_weights, parse_jobs, parse_shard, run_parallel, run_unittest, shard_modules,
 )
 
 KNOWN_TEXT = "# comment\n\nmod_a.ClassA.test_one  # reason\nmod_b.ClassB.test_two\n"
@@ -275,6 +276,37 @@ class ParallelRunTests(unittest.TestCase):
                 self.assertEqual(sorted(flat), sorted(ordered_modules(self.tests)))
                 self.assertEqual(len(flat), len(set(flat)))
         self.assertEqual(shard_modules(self.tests, None), ordered_modules(self.tests))
+
+    def test_recorded_seconds_decide_the_split_and_unlisted_modules_are_scaled_by_size(self):
+        # ASHARIF 2026-11-26: tiny (100 bytes) is recorded as the slowest module, so it leads share 1.
+        # Weights: tiny 300, mid 195, small 156, big 90 -> 1: tiny, big (390); 2: mid, small (351).
+        (self.tests / "ci_module_seconds.json").write_text(
+            '{"test_tiny": 300, "test_big": 90, "test_gone": 5, "test_mid": "x"}', encoding="utf-8")
+        weights = module_weights(self.tests, ordered_modules(self.tests))
+        self.assertEqual(weights["test_tiny"], 300)
+        self.assertEqual(weights["test_big"], 90)
+        rate = (300 + 90) / (100 + 900)
+        self.assertAlmostEqual(weights["test_mid"], 500 * rate)
+        self.assertAlmostEqual(weights["test_small"], 400 * rate)
+        self.assertEqual(shard_modules(self.tests, (1, 2)), ["test_tiny", "test_big"])
+        self.assertEqual(shard_modules(self.tests, (2, 2)), ["test_mid", "test_small"])
+        for total in (1, 2, 3, 5):
+            with self.subTest(total=total):
+                flat = [module for index in range(1, total + 1) for module in shard_modules(self.tests, (index, total))]
+                self.assertEqual(sorted(flat), sorted(ordered_modules(self.tests)))
+
+    def test_an_unreadable_seconds_file_falls_back_to_file_sizes(self):
+        for text in ("not json", "[1, 2]", '{"test_big": 0, "test_mid": true}'):
+            with self.subTest(text=text):
+                (self.tests / "ci_module_seconds.json").write_text(text, encoding="utf-8")
+                self.assertEqual(shard_modules(self.tests, (1, 2)), ["test_big", "test_tiny"])
+
+    def test_a_parallel_run_prints_each_module_time(self):
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            run_parallel(2, lambda _modules: (0, "Ran 1 test in 0.0s\nOK\n"), self.tests, shard=(2, 2))
+        line = next(row for row in printed.getvalue().splitlines() if row.startswith("===== Module seconds: "))
+        recorded = json.loads(line.split(": ", 1)[1])
+        self.assertEqual(sorted(recorded), ["test_mid", "test_small"])
 
     def test_shard_comes_from_the_option_then_the_variable_and_bad_values_are_refused(self):
         with patch.dict(os.environ, {}, clear=True):
