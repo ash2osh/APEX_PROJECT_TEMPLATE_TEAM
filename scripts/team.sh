@@ -41,6 +41,8 @@ Commands:
                                               DEV/staging apply only steps changed since state/<env>.json (--resume skips DDL a failed run finished); prod requires a matching staging record
   release status <bundle> [--format text|json] [--live --env <env>]
                                               What each environment holds of a bundle (offline; --live reads drift read-only)
+  release adopt <bundle> --env <dev|staging> [--report <path>] [--commit <sha>] [--replace] [--dry-run] [--format text|json]
+                                              Record what a bundle that ran before release state already holds (read-only; applies nothing)
   dev-test [--plan|--run|--report RUN_ID|--cleanup RUN_ID] [--env dev] [--schema NAME]
            [--suite FILE] [--scenario ID ...] [--format text|json|markdown]
                                               Plan, run, inspect or explicitly clean retained DEV fixtures
@@ -353,7 +355,7 @@ case "$command_name" in
     if [ "$release_help" = false ]; then
       case "$release_subcommand" in
         list|new) ;;
-        collect|check|run)
+        collect|check|run|adopt)
           PROJECT_ENV_FILE="${PROJECT_ENV_FILE:-$REPO_ROOT/.env}"
           # shellcheck source=load_env.sh
           source "$REPO_ROOT/scripts/load_env.sh" "$PROJECT_ENV_FILE"
