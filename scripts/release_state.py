@@ -13,6 +13,7 @@ import json
 import os
 import tempfile
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,20 @@ def _app_dirs(repo_root: Path, app_id: int) -> list[Path]:
     return sorted(found)
 
 
+# ASHARIF 2026-11-26: an app ID with two source folders (apps/OLD/<id> left behind after the app moved
+# schema) would be fingerprinted as one mixed tree. check/run refuse that until the stale folder is removed.
+def app_dir_conflict(repo_root: Path, app_id: int) -> str | None:
+    """Refusal text when more than one folder holds app_id, else None."""
+    dirs = _app_dirs(repo_root, app_id)
+    if len(dirs) <= 1:
+        return None
+    names = ", ".join(d.relative_to(repo_root).as_posix() for d in dirs)
+    return (
+        f"APEX app {app_id} has more than one source folder ({names}); "
+        "remove the stale one (for example the folder left behind after the app moved schema), then rerun"
+    )
+
+
 def app_source_sha256(repo_root: Path, app_id: int, app_dir: Path | None = None) -> str:
     """Fingerprint of an app's source tree: sorted relative paths and bytes. No source → sha256 of nothing."""
     digest = hashlib.sha256()
@@ -57,6 +72,28 @@ def app_source_sha256(repo_root: Path, app_id: int, app_dir: Path | None = None)
             digest.update(len(rel).to_bytes(8, "big") + rel)
             digest.update(len(data).to_bytes(8, "big") + data)
     return digest.hexdigest()
+
+
+# ASHARIF 2026-11-26: state and partial records name the database they were written on, per schema.
+# A record with no name (older files) is never refused.
+def recorded_databases(identities: Mapping[str, Any] | None) -> dict[str, str]:
+    """{schema: DB_UNIQUE_NAME} from a record's identities map; entries without a name are left out."""
+    out: dict[str, str] = {}
+    for schema, entry in (identities or {}).items():
+        name = entry.get("dbUniqueName") if isinstance(entry, dict) else None
+        if isinstance(name, str) and name.strip():
+            out[str(schema)] = name.strip()
+    return out
+
+
+def database_conflicts(recorded: Mapping[str, str], live: Mapping[str, str]) -> list[tuple[str, str, str]]:
+    """(schema, recorded, live) for every schema whose recorded database differs from the live one."""
+    out: list[tuple[str, str, str]] = []
+    for schema, name in recorded.items():
+        now = live.get(schema, "")
+        if now and name.casefold() != now.casefold():
+            out.append((schema, name, now))
+    return out
 
 
 def state_path(bundle_dir: Path, env: str) -> Path:
@@ -234,6 +271,20 @@ def load_partial(bundle_dir: Path, slug: str, env: str) -> dict[str, Any] | None
     return data
 
 
+PARTIAL_STALE_DAYS = 7
+
+
+def record_age_days(at: Any, now: datetime) -> float | None:
+    """Whole-second age in days of an ISO-8601 UTC timestamp ('...Z'), or None when it cannot be read."""
+    if not isinstance(at, str):
+        return None
+    try:
+        when = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return round((now - when).total_seconds() / 86400, 1)
+
+
 def resumable_steps(
     partial: Mapping[str, Any] | None, current: Mapping[str, str], ddl_files: Iterable[str]
 ) -> tuple[list[str], list[str]]:
@@ -260,9 +311,17 @@ def build_partial(
     at: str,
     commit: str,
     error: str,
+    identities: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Partial record after a failed run: earlier finished steps that still match, plus this run's finished steps."""
+    """Partial record after a failed run: earlier finished steps that still match, plus this run's finished steps.
+
+    Earlier steps are carried over only when the earlier record names the same databases: a step finished
+    on another database must not be skipped by --resume here.
+    """
+    live = recorded_databases({schema: {"dbUniqueName": ident.get("db_unique_name", "")} for schema, ident in (identities or {}).items()})
     old = (previous or {}).get("steps") or {}
+    if database_conflicts(recorded_databases((previous or {}).get("identities")), live):
+        old = {}
     steps: dict[str, Any] = {}
     for rel_file, entry in old.items():
         if isinstance(entry, dict) and current.get(rel_file) == entry.get("sha256"):
@@ -278,6 +337,7 @@ def build_partial(
         "at": at,
         "commit": commit,
         "error": error[:500],
+        "identities": {schema: {"dbUniqueName": name} for schema, name in live.items()},
         "steps": steps,
     }
 

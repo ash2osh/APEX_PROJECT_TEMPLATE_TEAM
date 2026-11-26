@@ -220,9 +220,30 @@ lock_field() {
   sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1 | tr -d '\r'
 }
 
+# ASHARIF 2026-11-26: a stale lock is parked under a unique name before it is removed. The rename takes
+# whatever lock is there now; when that is not the stale holder we read (a contender just replaced it), the
+# lock goes back with a hard link, which never overwrites. Returns 0 when the slot may be retried, 1 to refuse.
+park_stale_mirror_lock() {
+  local lock_file="$1" snapshot="$2" parked
+  parked="$lock_file.broken.$$.$RANDOM"
+  if ! mv -- "$lock_file" "$parked" 2>/dev/null; then
+    return 0
+  fi
+  if [ "$(cat -- "$parked" 2>/dev/null)" = "$snapshot" ]; then
+    rm -f -- "$parked"
+    return 0
+  fi
+  if ln -- "$parked" "$lock_file" 2>/dev/null; then
+    rm -f -- "$parked"
+  else
+    echo "a new mirror lock appeared while the stale one was being replaced; its holder is kept in $parked" >&2
+  fi
+  return 1
+}
+
 acquire_mirror_lock() {
   local lock_file="$1" canonical="$2"
-  local attempt holder_version holder_impl holder_pid holder_epoch now age
+  local attempt holder_version holder_impl holder_pid holder_epoch now age snapshot
   for attempt in 1 2; do
     if ( set -o noclobber
          printf 'version=1\nimpl=sh\npid=%s\nepoch=%s\n' "$$" "$(date +%s)" \
@@ -232,6 +253,7 @@ acquire_mirror_lock() {
     if [ "$attempt" -eq 2 ]; then
       break
     fi
+    snapshot="$(cat -- "$lock_file" 2>/dev/null || true)"
     holder_version="$(lock_field "$lock_file" version)"
     holder_impl="$(lock_field "$lock_file" impl)"
     holder_pid="$(lock_field "$lock_file" pid)"
@@ -252,7 +274,10 @@ acquire_mirror_lock() {
     age=$(( now - 10#$holder_epoch ))
     if [ "$age" -gt "$MIRROR_LOCK_STALE_SECONDS" ]; then
       echo "breaking stale mirror lock for $canonical (impl=${holder_impl:-unknown} pid=${holder_pid:-unknown} age=${age}s)" >&2
-      rm -f -- "$lock_file"
+      if ! park_stale_mirror_lock "$lock_file" "$snapshot"; then
+        echo "another mirror replacement is already running for $canonical" >&2
+        return 1
+      fi
       continue
     fi
     echo "another mirror replacement is already running for $canonical" >&2

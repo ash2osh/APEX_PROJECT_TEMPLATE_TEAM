@@ -327,6 +327,28 @@ class OrdsMirrorTests(unittest.TestCase):
                     self.assertEqual("old\n", (mirror / "tables" / "t.sql").read_text(encoding="utf-8"))
                     self.assertEqual("old ords\n", (mirror / "ords" / "schema.sql").read_text(encoding="utf-8"))
 
+    def test_a_stale_schema_lock_is_broken_and_the_replacement_runs(self) -> None:
+        # ASHARIF 2026-11-26: the stale lock is parked under a unique name before it is removed
+        import hashlib
+        import time
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged, mirror = self.make_repo(root)
+            locks = root / "scratch" / ".mirror-locks"
+            locks.mkdir(parents=True)
+            digest = hashlib.sha256(b"database/DEMO").hexdigest()[:16]
+            # impl=ps1 holds no liveness check on the Bash side, so only the age decides
+            (locks / f"{digest}.lock").write_text(
+                f"version=1\nimpl=ps1\npid=1\nepoch={int(time.time()) - 100000}\n", encoding="utf-8")
+            result = subprocess.run(
+                [BASH, str(root / "scripts" / "replace_mirror.sh"), str(staged), "database/DEMO/ords"],
+                cwd=root, text=True, encoding="utf-8", capture_output=True, check=False)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("breaking stale mirror lock for database/DEMO", result.stderr)
+            self.assertEqual("new ords\n", (mirror / "ords" / "schema.sql").read_text(encoding="utf-8"))
+            self.assertEqual([], sorted(p.name for p in locks.iterdir()), "no lock or parked lock may remain")
+
     def test_a_held_schema_lock_blocks_an_ords_only_replacement(self) -> None:
         import hashlib
         import time
@@ -348,7 +370,75 @@ class OrdsMirrorTests(unittest.TestCase):
                     self.assertTrue((locks / f"{digest}.lock").exists(), "a lock this call did not take must stay")
 
 
+class StaleLockParkTests(unittest.TestCase):
+    """ASHARIF 2026-11-26: park_stale_mirror_lock removes a stale lock only when it is the one that was read."""
+
+    def run_park(self, root: Path, *, replaced_after_read: str | None) -> subprocess.CompletedProcess:
+        script = (ROOT / "scripts" / "replace_mirror.sh").read_text(encoding="utf-8")
+        function = re.search(r"^park_stale_mirror_lock\(\) \{.*?^\}\n", script, re.S | re.M).group(0)
+        replace = "true" if replaced_after_read is None else f"printf '%s' '{replaced_after_read}' > \"$lock\""
+        body = (
+            function
+            + '\nlock="$1"\nsnap="$(cat -- "$lock")"\n'
+            + replace + "\n"
+            + 'park_stale_mirror_lock "$lock" "$snap"\necho "rc=$?"\n'
+        )
+        return subprocess.run([BASH, "-c", body, "park", str(root / "lock")], text=True, encoding="utf-8", capture_output=True, check=False)
+
+    def test_the_lock_that_was_read_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "lock").write_text("version=1\nimpl=ps1\npid=1\nepoch=1\n", encoding="utf-8")
+            result = self.run_park(root, replaced_after_read=None)
+            self.assertIn("rc=0", result.stdout, result.stdout + result.stderr)
+            self.assertEqual([], sorted(p.name for p in root.iterdir()))
+
+    def test_a_lock_replaced_after_the_read_is_put_back_and_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "lock").write_text("version=1\nimpl=ps1\npid=1\nepoch=1\n", encoding="utf-8")
+            fresh = "version=1\nimpl=sh\npid=2\nepoch=2\n"
+            result = self.run_park(root, replaced_after_read=fresh)
+            self.assertIn("rc=1", result.stdout, result.stdout + result.stderr)
+            self.assertEqual(fresh, (root / "lock").read_text(encoding="utf-8"))
+            self.assertEqual(["lock"], sorted(p.name for p in root.iterdir()))
+
+
 class PreserveDeploymentsTests(unittest.TestCase):
+    def test_authored_files_survive_and_generated_default_is_not_kept(self) -> None:
+        # ASHARIF 2026-11-26: every authored file in deployments/ is kept; the authored copy wins
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            existing = root / "existing" / "deployments"
+            existing.mkdir(parents=True)
+            (existing / "dev.json").write_text('{"authored": true}\n', encoding="utf-8")
+            (existing / "custom.json").write_text("{}\n", encoding="utf-8")
+            (existing / "default.json").write_text('{"authored": "default"}\n', encoding="utf-8")
+            staged = root / "staged" / "deployments"
+            staged.mkdir(parents=True)
+            (staged / "dev.json").write_text('{"exported": true}\n', encoding="utf-8")
+            (staged / "default.json").write_text('{"exported": "default"}\n', encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "preserve_deployments.py"), str(root / "existing"), str(root / "staged")],
+                text=True, encoding="utf-8", capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((staged / "dev.json").read_text(encoding="utf-8"), '{"authored": true}\n')
+            self.assertEqual((staged / "custom.json").read_text(encoding="utf-8"), "{}\n")
+            self.assertEqual((staged / "default.json").read_text(encoding="utf-8"), '{"exported": "default"}\n')
+
+    def test_subfolder_in_deployments_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "existing" / "deployments" / "nested").mkdir(parents=True)
+            (root / "staged").mkdir()
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "preserve_deployments.py"), str(root / "existing"), str(root / "staged")],
+                text=True, encoding="utf-8", capture_output=True, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("subfolders are not kept", result.stderr)
+
     def test_symlinked_deployments_directory_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -365,7 +455,7 @@ class PreserveDeploymentsTests(unittest.TestCase):
             staged.mkdir()
             result = subprocess.run(
                 [sys.executable, str(ROOT / "scripts" / "preserve_deployments.py"), str(existing), str(staged)],
-                text=True, capture_output=True, check=False,
+                text=True, encoding="utf-8", capture_output=True, check=False,
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("must not be a symbolic link", result.stderr)

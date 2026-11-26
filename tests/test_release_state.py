@@ -6,6 +6,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 import _test_subprocess_safety  # noqa: F401
@@ -24,6 +25,50 @@ class ReleaseStateTests(unittest.TestCase):
         self.root = Path(self.tmp.name).resolve()
         self.bundle = self.root / "releases" / "rel-a"
         self.bundle.mkdir(parents=True)
+
+    # ASHARIF 2026-11-26: database names on records, app folder conflicts, partial age
+
+    def test_recorded_databases_skip_entries_without_a_name(self) -> None:
+        recorded = rs.recorded_databases({"A": {"dbUniqueName": "FREE"}, "B": {"dbUniqueName": ""}, "C": {}, "D": "x"})
+        self.assertEqual(recorded, {"A": "FREE"})
+        self.assertEqual(rs.database_conflicts(recorded, {"A": "FREEX"}), [("A", "FREE", "FREEX")])
+        self.assertEqual(rs.database_conflicts(recorded, {"A": "free"}), [])
+        self.assertEqual(rs.database_conflicts(recorded, {}), [])
+
+    def test_partial_from_another_database_keeps_no_finished_steps(self) -> None:
+        sha = _sha("ALTER TABLE t ADD (c NUMBER);\n")
+        current = {"01-ddl/001.sql": sha}
+        old = {
+            "steps": {"01-ddl/001.sql": {"sha256": sha, "at": "T", "commit": "c"}},
+            "identities": {"APP": {"dbUniqueName": "OLD_DB"}},
+        }
+        other = rs.build_partial(
+            slug="rel-a", env="staging", current=current, finished=[], previous=old, at="T2", commit="c2",
+            error="ORA-00904", identities={"APP": {"db_unique_name": "NEW_DB"}},
+        )
+        self.assertEqual(other["steps"], {})
+        self.assertEqual(other["identities"], {"APP": {"dbUniqueName": "NEW_DB"}})
+        same = rs.build_partial(
+            slug="rel-a", env="staging", current=current, finished=[], previous=old, at="T2", commit="c2",
+            error="ORA-00904", identities={"APP": {"db_unique_name": "OLD_DB"}},
+        )
+        self.assertEqual(list(same["steps"]), ["01-ddl/001.sql"])
+
+    def test_record_age_in_days(self) -> None:
+        now = datetime(2026, 11, 26, tzinfo=timezone.utc)
+        self.assertEqual(rs.record_age_days("2026-11-19T00:00:00Z", now), 7.0)
+        self.assertIsNone(rs.record_age_days("not a time", now))
+        self.assertIsNone(rs.record_age_days(None, now))
+
+    def test_app_id_in_two_folders_names_both(self) -> None:
+        (self.root / "apps" / "APP_CODE" / "130").mkdir(parents=True)
+        (self.root / "apps" / "OLD_CODE" / "130").mkdir(parents=True)
+        message = rs.app_dir_conflict(self.root, 130)
+        self.assertIsNotNone(message)
+        self.assertIn("apps/APP_CODE/130, apps/OLD_CODE/130", message)
+        self.assertIn("remove the stale one", message)
+        (self.root / "apps" / "OLD_CODE" / "130").rmdir()
+        self.assertIsNone(rs.app_dir_conflict(self.root, 130))
 
     def test_text_sha256_normalises_line_endings(self) -> None:
         self.assertEqual(rs.text_sha256("a\r\nb\rc\n"), rs.text_sha256("a\nb\nc\n"))
