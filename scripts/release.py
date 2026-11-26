@@ -42,14 +42,19 @@ from .db_targets import (
 from .local_config import ConfigError, read_project_env
 from .path_utils import PathReparseError, relative_to_root
 from .release_state import (
+    PARTIAL_STALE_DAYS,
     StateError,
+    app_dir_conflict,
     app_source_sha256,
     build_partial,
     clear_partial,
+    database_conflicts,
     effective_status,
     load_partial,
     load_state,
     merge_state,
+    record_age_days,
+    recorded_databases,
     resumable_steps,
     select_steps,
     staging_mismatches,
@@ -165,6 +170,8 @@ class PreflightResult:
     resumed: list[str] = field(default_factory=list)
     resume_changed: list[str] = field(default_factory=list)
     partial: dict[str, Any] | None = None
+    # ASHARIF 2026-11-26: every 01-ddl file of the bundle in order (not only the ones this run applies)
+    ddl_files: list[str] = field(default_factory=list)
 
 
 def _utc_now() -> str:
@@ -818,6 +825,39 @@ def _check_block_terminators(step: BundleStep, masked_sql: str) -> None:
         )
 
 
+# ASHARIF 2026-11-26: SQL*Plus / SQLcl lines that are not SQL statements and may follow the last statement.
+_SQLCL_NON_SQL_RE = re.compile(
+    r"(?i)^(?:PROMPT|REM|REMARK|WHENEVER)\b"
+    r"|^SET\s+(?:DEFINE|SQLBLANKLINES|SERVEROUTPUT|ECHO|FEEDBACK|VERIFY|TIMING|SQLPROMPT|PAGESIZE|LINESIZE"
+    r"|TRIMSPOOL|SQLFORMAT|SQLTERMINATOR|CONCAT|SCAN|HEADING|TERMOUT|SQLCASE|TAB|TRIMOUT|COLSEP|NULL|PAUSE|LONG)\b"
+)
+
+
+def _check_ddl_statement_terminated(step: BundleStep, masked_sql: str) -> None:
+    """Refuse a 01-ddl file whose last SQL statement has no ';' or closing '/' line.
+
+    The apply driver appends COMMIT; after every 01-ddl file. Without a terminator the COMMIT
+    joins the last statement, so the file fails inside SQLcl instead of at preflight.
+    Checked on comment- and string-masked text.
+    """
+    if step.section != "ddl":
+        return
+    candidates = [
+        (number, line.strip())
+        for number, line in enumerate(masked_sql.split("\n"), 1)
+        if line.strip() and not _SQLCL_NON_SQL_RE.match(line.strip())
+    ]
+    if not candidates:
+        return
+    number, last = candidates[-1]
+    if last == "/" or last.endswith(";"):
+        return
+    raise ReleaseError(
+        f"{step.rel_file} line {number}: the last SQL statement is not terminated by ';' "
+        "(the runner's COMMIT would join it; add the ';' or a '/' line)"
+    )
+
+
 def _check_bundle_contents(
     steps: Sequence[BundleStep],
     forbidden_patterns: Sequence[str],
@@ -847,6 +887,7 @@ def _check_bundle_contents(
                 "is not allowed in release bundles"
             )
         _check_block_terminators(step, masked)
+        _check_ddl_statement_terminated(step, masked)
         if forbidden_patterns:
             name_candidates = [step.rel_file, step.path.name]
             if step.object_name:
@@ -1638,7 +1679,13 @@ def _bundle_fingerprints(
 ) -> tuple[dict[str, str], dict[int, str]]:
     """ASHARIF 2026-11-25: current fingerprints of the applied sections (verify excluded) and of each app."""
     current = {s.rel_file: text_sha256(_step_text(s, step_texts)) for s in steps if s.section != "verify"}
-    app_shas = {app_id: app_source_sha256(repo_root, app_id, (app_dirs or {}).get(app_id)) for app_id in apps}
+    app_shas: dict[int, str] = {}
+    for app_id in apps:
+        if (app_dirs or {}).get(app_id) is None:
+            conflict = app_dir_conflict(repo_root, app_id)
+            if conflict is not None:
+                raise ReleaseError(conflict)
+        app_shas[app_id] = app_source_sha256(repo_root, app_id, (app_dirs or {}).get(app_id))
     return current, app_shas
 
 
@@ -1718,6 +1765,11 @@ def cmd_list(repo_root: Path, fmt: str) -> int:
     return 0
 
 
+def _state_database(state: Mapping[str, Any] | None) -> str | None:
+    names = sorted(set(recorded_databases(((state or {}).get("lastRun") or {}).get("identities")).values()))
+    return ", ".join(names) if names else None
+
+
 def cmd_status(
     repo_root: Path,
     bundle_arg: str,
@@ -1791,6 +1843,8 @@ def cmd_status(
         drift[env] = drifted
 
     last_runs = {name: ((st or {}).get("lastRun") or {}).get("at") for name, st in states.items()}
+    # ASHARIF 2026-11-26: the database each environment's record was written on (blank = never run)
+    databases = {name: _state_database(st) for name, st in states.items()}
     if fmt == "json":
         print(json.dumps({
             "schemaVersion": SCHEMA_VERSION,
@@ -1798,12 +1852,14 @@ def cmd_status(
             "status": manifest.get("status"),
             "effectiveStatus": effective,
             "lastRuns": last_runs,
+            "databases": databases,
             "rows": rows,
             "drift": drift,
         }, indent=2))
         return 0
     print(f"{slug}   status: {manifest.get('status')} (effective: {effective})")
     print("last runs: " + ", ".join(f"{name} {last_runs[name] or '-'}" for name in ENVIRONMENTS))
+    print("databases: " + ", ".join(f"{name} {databases[name] or '-'}" for name in ENVIRONMENTS))
     width = max([len("STEP")] + [len(r["item"]) for r in rows]) + 2
     print("STEP".ljust(width) + "DEV".ljust(9) + "STAGING".ljust(9) + "PROD")
     for row in rows:
@@ -2108,6 +2164,7 @@ def _preflight_bundle(
         raise ReleaseError(f"release bundle '{slug}' is already deployed and locked")
     _check_bundle_contents(steps, forbidden_patterns, step_texts=pinned_step_texts)
     all_steps = list(steps)
+    ddl_files = [s.rel_file for s in all_steps if s.section == "ddl"]
     env_state = None if env == "prod" else _load_env_state(bundle_dir, slug, env)
     staging_state = env_state if env == "staging" else _load_env_state(bundle_dir, slug, "staging")
 
@@ -2152,9 +2209,7 @@ def _preflight_bundle(
                 f"--resume: no failed-run record releases/{slug}/state/{env}.partial.json "
                 "(only a failed DEV or staging run writes one)"
             )
-        finished, resume_changed = resumable_steps(
-            partial, current_shas, [s.rel_file for s in all_steps if s.section == "ddl"]
-        )
+        finished, resume_changed = resumable_steps(partial, current_shas, ddl_files)
         resumed = [rel for rel in finished if rel in to_apply]
         to_apply = [rel for rel in to_apply if rel not in set(resumed)]
     recorded_steps = (env_state or {}).get("steps") or {}
@@ -2252,6 +2307,26 @@ def _preflight_bundle(
                         f"patch baseSha256 mismatch for {schema}.{step.object_name} ({step.object_type}): "
                         f"expected {step.base_sha256[:12]}..., live {live_sha[:12]}... (diff: {diff_path.relative_to(repo_root).as_posix()})"
                     )
+
+    # ASHARIF 2026-11-26: a state or partial record written on another database is refused, unless --full
+    # (which replaces the state record). Never applied to prod: its gate compares files, not databases.
+    if env != "prod" and not full:
+        live_dbs = {schema: ident.get("db_unique_name", "") for schema, ident in identities.items()}
+        recorded_state_dbs = recorded_databases(((env_state or {}).get("lastRun") or {}).get("identities"))
+        for schema, recorded, now in database_conflicts(recorded_state_dbs, live_dbs):
+            raise ReleaseError(
+                f"releases/{slug}/state/{env}.json was recorded on database {recorded} (schema {schema}); "
+                f"this target is {now}. Rerun with --full to apply every step (the record is then replaced), "
+                "or move the state file aside."
+            )
+    if env != "prod" and resume and partial is not None:
+        live_dbs = {schema: ident.get("db_unique_name", "") for schema, ident in identities.items()}
+        for schema, recorded, now in database_conflicts(recorded_databases(partial.get("identities")), live_dbs):
+            raise ReleaseError(
+                f"--resume: releases/{slug}/state/{env}.partial.json was recorded on database {recorded} "
+                f"(schema {schema}); this target is {now}. Run without --resume (every step runs again), "
+                "or move the partial record aside."
+            )
 
     run_set = set(to_apply) | set(drifted)
     steps = [s for s in all_steps if s.section == "verify" or s.rel_file in run_set]
@@ -2427,6 +2502,7 @@ def _preflight_bundle(
         resumed=resumed,
         resume_changed=resume_changed,
         partial=partial,
+        ddl_files=ddl_files,
     )
 
 
@@ -2566,12 +2642,28 @@ def _plan_lines(pre: PreflightResult, slug: str, env: str, *, resume: bool) -> l
         lines.append(f"    resume: {rel} (finished by the failed run; skipped by --resume)")
     for rel in plain_skipped:
         lines.append(f"    skip:  {rel} (already applied on {env}, unchanged)")
+    if pre.partial is not None:
+        # ASHARIF 2026-11-26: the file the failed run stopped in runs again in full, and old records get a warning
+        finished_now, _changed = resumable_steps(pre.partial, pre.current_shas, pre.ddl_files)
+        first_open = next((rel for rel in pre.ddl_files if rel not in set(finished_now)), None)
+        if first_open is not None:
+            lines.append(
+                f"    first unfinished 01-ddl: {first_open} (runs again in full, from its first statement)"
+            )
     if pre.partial is not None and not resume:
         done = len(pre.partial.get("steps") or {})
+        at = pre.partial.get("at")
+        age = record_age_days(at, datetime.now(timezone.utc))
+        age_text = f", {age:g} day(s) old" if age is not None else ""
         lines.append(
             f"  NOTE: a failed run left releases/{slug}/state/{env}.partial.json ({done} finished 01-ddl step(s), "
-            f"at {pre.partial.get('at')}). Add --resume to skip them; without it every step runs again."
+            f"at {at}{age_text}). Add --resume to skip them; without it every step runs again."
         )
+        if age is not None and age > PARTIAL_STALE_DAYS:
+            lines.append(
+                f"  WARNING: that failed-run record is older than {PARTIAL_STALE_DAYS} days; confirm the target "
+                "still holds the finished files before using --resume"
+            )
     return lines
 
 
@@ -3934,6 +4026,7 @@ def cmd_run(
                 at=_utc_now(),
                 commit=release_commit,
                 error=_short_error(error_message),
+                identities=identities,
             )
             if partial["steps"]:
                 try:

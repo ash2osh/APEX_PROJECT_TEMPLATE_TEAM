@@ -10,6 +10,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -2863,6 +2864,105 @@ class ReleaseBundleTests(unittest.TestCase):
         code, _, err = self._stage("resume-refuse-rel", "--resume", "--full")
         self.assertEqual(code, 1)
         self.assertIn("--resume and --full cannot be combined", err)
+
+    # ASHARIF 2026-11-26: state and partial records name their database; a record from another one is refused
+
+    def _set_staging_db(self, name: str) -> None:
+        state = self._read_state()
+        state["envs"]["staging"]["identity"]["db_unique_name"] = name
+        self._write_state(state)
+
+    def _run_staging(self, slug: str, db: str, *extra: str) -> tuple[int, str, str]:
+        return self._run_cli(["run", slug, "--env", "staging", "--confirm-target", db, *extra])
+
+    def test_state_from_another_database_is_refused_unless_full(self) -> None:
+        bundle = self._make_state_bundle("db-rel")
+        self.assertEqual(self._stage("db-rel")[0], 0)
+        st = json.loads((bundle / "state" / "staging.json").read_text(encoding="utf-8"))
+        self.assertEqual(st["lastRun"]["identities"]["APP_CODE"]["dbUniqueName"], "STAGEDB_UNQ")
+        self._set_staging_db("STAGEDB2_UNQ")
+        code, out, err = self._run_cli(["check", "db-rel", "--env", "staging"])
+        self.assertEqual(code, 1)
+        expected = ("releases/db-rel/state/staging.json was recorded on database STAGEDB_UNQ (schema APP_CODE); "
+                    "this target is STAGEDB2_UNQ")
+        self.assertIn(expected, out + err)
+        code, _, err = self._run_staging("db-rel", "STAGEDB2_UNQ")
+        self.assertEqual(code, 1)
+        self.assertIn(expected, err)
+        self.assertIn("Rerun with --full", err)
+        # --full is allowed and replaces the record with the new database's name
+        code, _, err = self._run_staging("db-rel", "STAGEDB2_UNQ", "--full")
+        self.assertEqual(code, 0, err)
+        st = json.loads((bundle / "state" / "staging.json").read_text(encoding="utf-8"))
+        self.assertEqual(st["lastRun"]["identities"]["APP_CODE"]["dbUniqueName"], "STAGEDB2_UNQ")
+        code, out, _ = self._run_cli(["status", "db-rel"])
+        self.assertEqual(code, 0)
+        self.assertIn("databases: dev -, staging STAGEDB2_UNQ, prod -", out)
+        # A record written without a database name keeps working unchanged
+        st["lastRun"]["identities"] = {}
+        (bundle / "state" / "staging.json").write_text(json.dumps(st), encoding="utf-8", newline="\n")
+        code, _, err = self._run_staging("db-rel", "STAGEDB2_UNQ")
+        self.assertEqual(code, 0, err)
+
+    def test_partial_record_from_another_database_refuses_resume(self) -> None:
+        bundle = self._make_two_ddl_bundle("db-partial-rel")
+        self._fail_at("01-ddl/002-add-note.sql")
+        self.assertEqual(self._stage("db-partial-rel")[0], 1)
+        partial_path = bundle / "state" / "staging.partial.json"
+        partial = json.loads(partial_path.read_text(encoding="utf-8"))
+        self.assertEqual(partial["identities"], {"APP_CODE": {"dbUniqueName": "STAGEDB_UNQ"}})
+        self._set_staging_db("STAGEDB2_UNQ")
+        self._fail_at(None)
+        code, _, err = self._run_staging("db-partial-rel", "STAGEDB2_UNQ", "--resume")
+        self.assertEqual(code, 1)
+        self.assertIn("--resume: releases/db-partial-rel/state/staging.partial.json was recorded on database "
+                      "STAGEDB_UNQ (schema APP_CODE); this target is STAGEDB2_UNQ", err)
+        self.assertEqual(self._read_state()["appliedSteps"], [])
+        # A partial record written without a database name still resumes
+        partial.pop("identities")
+        partial_path.write_text(json.dumps(partial), encoding="utf-8", newline="\n")
+        code, _, err = self._run_staging("db-partial-rel", "STAGEDB2_UNQ", "--resume")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_state()["appliedSteps"],
+                         ["01-ddl/002-add-note.sql", "02-code/orders_pkg_package_body.sql"])
+
+    def test_plan_names_first_unfinished_ddl_and_flags_old_partial_records(self) -> None:
+        bundle = self._make_two_ddl_bundle("plan-age-rel")
+        self._fail_at("01-ddl/002-add-note.sql")
+        self.assertEqual(self._stage("plan-age-rel")[0], 1)
+        code, out, _ = self._run_cli(["check", "plan-age-rel", "--env", "staging"])
+        self.assertIn("first unfinished 01-ddl: 01-ddl/002-add-note.sql (runs again in full, from its first statement)", out)
+        self.assertNotIn("WARNING: that failed-run record", out)
+        partial_path = bundle / "state" / "staging.partial.json"
+        partial = json.loads(partial_path.read_text(encoding="utf-8"))
+        partial["at"] = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        partial_path.write_text(json.dumps(partial), encoding="utf-8", newline="\n")
+        code, out, _ = self._run_cli(["check", "plan-age-rel", "--env", "staging"])
+        self.assertIn("day(s) old", out)
+        self.assertIn("WARNING: that failed-run record is older than 7 days", out)
+
+    def test_unterminated_ddl_statement_is_refused_before_any_session(self) -> None:
+        bundle = self._make_state_bundle("noterm-ddl-rel")
+        ddl = bundle / "01-ddl" / "001-add-col.sql"
+        ddl.write_text("ALTER TABLE ORDERS ADD (NOTES VARCHAR2(50))\n", encoding="utf-8", newline="\n")
+        code, out, err = self._run_cli(["check", "noterm-ddl-rel", "--env", "staging"])
+        self.assertEqual(code, 1)
+        self.assertIn("01-ddl/001-add-col.sql line 1: the last SQL statement is not terminated by ';'", out + err)
+        # Trailing PROMPT and SQLcl SET lines after the terminated statement are fine
+        ddl.write_text("ALTER TABLE ORDERS ADD (NOTES VARCHAR2(50));\nSET DEFINE OFF\nPROMPT done\n",
+                       encoding="utf-8", newline="\n")
+        code, out, err = self._run_cli(["check", "noterm-ddl-rel", "--env", "staging"])
+        self.assertEqual(code, 0, out + err)
+
+    def test_app_id_in_two_folders_is_refused(self) -> None:
+        self._make_state_bundle("appdup-rel", apps=[130])
+        for schema in ("APP_CODE", "OLD_CODE"):
+            descriptor = self.root / "apps" / schema / "130" / "deployments" / "staging.json"
+            descriptor.parent.mkdir(parents=True)
+            descriptor.write_text("{}\n", encoding="utf-8")
+        code, out, err = self._run_cli(["check", "appdup-rel", "--env", "staging"])
+        self.assertEqual(code, 1)
+        self.assertIn("APEX app 130 has more than one source folder (apps/APP_CODE/130, apps/OLD_CODE/130)", out + err)
 
     def test_drifted_skipped_object_is_reapplied(self) -> None:
         bundle = self._make_state_bundle("drift-rel")
