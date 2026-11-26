@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "4ecb05a0ddf46dc14308570582c762b27cc10344",
+  "coreCommit": "1093ffd4f89a68c0bd5757f81126dcf9d71e64be",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -44,7 +44,7 @@
     },
     {
       "path": "scripts/ci_run_tests.py",
-      "sha256": "429f2fd41f41f57c761495b499f882e8fbddd8fd361f60c3ea7479de90860bf4",
+      "sha256": "e08c8183100b901a1f4ad8ced42ec2c64faaed0faa590ff920da25905d6f3b6a",
       "executable": false
     },
     {
@@ -484,7 +484,7 @@
     },
     {
       "path": "tests/test_ci_run_tests.py",
-      "sha256": "5f993a3c671dc1be33a4f19fce2f2a912c28f5fad3fe3f53b5d322892f90c191",
+      "sha256": "efa4f40f27b2965a0e29c90774c4aea8a5ec1acb48da78b4c5799cb66265b798",
       "executable": false
     },
     {

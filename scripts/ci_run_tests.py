@@ -12,9 +12,12 @@ process, N at a time, largest module first. Each module's output is printed whol
 that order, and the job fails when any module fails.
 
 `--shard K/N` (default: the CI_TEST_SHARD variable; unset means the whole suite) runs only the K-th of N
-shares of the test modules, so N CI jobs on separate runners can share the suite. Modules are dealt largest
-first to the share with the least total file size, the same way in every job, so the N shares together are
-the whole suite with no module twice. A shard run is always a parallel run (one process per module).
+shares of the test modules, so N CI jobs on separate runners can share the suite. Modules are dealt slowest
+first to the share with the least total weight, the same way in every job, so the N shares together are the
+whole suite with no module twice. A module's weight is its time in tests/ci_module_seconds.json when listed
+there, else its file size scaled to seconds by the listed modules. A shard run is always a parallel run (one
+process per module). Every parallel run ends with a `===== Module seconds: {...}` line: merge the shards'
+lines into tests/ci_module_seconds.json to refresh the weights.
 
 `--forbid-skip REGEX` (default: the CI_FORBID_SKIP variable; unset or empty means off) fails the run when the
 reason of any skipped test matches REGEX, even if every test passed. Every run this script makes is checked,
@@ -24,18 +27,21 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 KNOWN_FLAKY = ROOT / "tests" / "known_flaky.txt"
+MODULE_SECONDS_FILE = "ci_module_seconds.json"
 FAILURE = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)")
 FAILED_SUMMARY = re.compile(r"^FAILED \([^\r\n]+\)\s*\Z", re.MULTILINE)
 RAN_SUMMARY = re.compile(r"^Ran (\d+) tests? in [\d.]+s$", re.MULTILINE)
@@ -180,23 +186,48 @@ def ordered_modules(tests_dir: Path) -> list[str]:
     return [path.stem for path in paths]
 
 
+# ASHARIF 2026-11-26: recorded module times balance the shards; file size stands in for modules not listed.
+def module_weights(tests_dir: Path, modules: Sequence[str]) -> dict[str, float]:
+    """Weight of each module: its recorded seconds, else its file size scaled to seconds by the recorded ones.
+
+    tests/ci_module_seconds.json is {"test_module": seconds}. A missing or unreadable file, or one with no usable
+    entry, leaves plain file sizes, which balances the same way the first version did.
+    """
+    sizes = {module: float((tests_dir / f"{module}.py").stat().st_size) for module in modules}
+    recorded: dict[str, float] = {}
+    try:
+        data = json.loads((tests_dir / MODULE_SECONDS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if isinstance(data, dict):
+        for module, seconds in data.items():
+            if module in sizes and isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and seconds > 0:
+                recorded[module] = float(seconds)
+    if not recorded:
+        return sizes
+    rate = sum(recorded.values()) / sum(sizes[module] for module in recorded)
+    return {module: recorded.get(module, sizes[module] * rate) for module in modules}
+
+
 # ASHARIF 2026-11-26: CI shares the slow Windows suite across several runners (`--shard K/N`).
 def shard_modules(tests_dir: Path, shard: tuple[int, int] | None) -> list[str]:
-    """The modules of share K of N (largest first), or every module when shard is None.
+    """The modules of share K of N (heaviest first), or every module (largest file first) when shard is None.
 
-    Modules are dealt largest first to the share with the smallest total file size so far (ties go to the
-    lowest share number). The result depends only on the files, so every job computes the same split.
+    Modules are dealt heaviest first to the share with the smallest total weight so far (ties go to the lowest
+    share number). The result depends only on the files, so every job computes the same split.
     """
     modules = ordered_modules(tests_dir)
     if shard is None:
         return modules
+    weights = module_weights(tests_dir, modules)
+    modules = sorted(modules, key=lambda module: (-weights[module], module))
     index, total = shard
-    loads = [0] * total
+    loads = [0.0] * total
     owner: dict[str, int] = {}
     for module in modules:
         target = min(range(total), key=lambda share: (loads[share], share))
         owner[module] = target + 1
-        loads[target] += (tests_dir / f"{module}.py").stat().st_size
+        loads[target] += weights[module]
     return [module for module in modules if owner[module] == index]
 
 
@@ -237,8 +268,16 @@ def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path
     outputs: list[str] = []
     tests_run = skipped = failures = errors = reported_modules = 0
     code = 0
+    seconds: dict[str, float] = {}
+
+    def timed(name: str) -> tuple[int, str]:
+        started = time.monotonic()
+        result = module_runner([name])
+        seconds[name] = round(time.monotonic() - started, 1)
+        return result
+
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        for module, (module_code, output) in zip(modules, pool.map(lambda name: module_runner([name]), modules), strict=True):
+        for module, (module_code, output) in zip(modules, pool.map(timed, modules), strict=True):
             print(f"===== {module}: exit {module_code}", flush=True)
             _write_output(output, end="" if output.endswith("\n") else "\n")
             outputs.append(output)
@@ -261,6 +300,8 @@ def run_parallel(jobs: int, module_runner: Runner = run_modules, tests_dir: Path
                 if code in (0, 1):
                     code = outcome
     incomplete = len(modules) - reported_modules
+    # ASHARIF 2026-11-26: the input for tests/ci_module_seconds.json (merge the lines of every shard).
+    print("===== Module seconds: " + json.dumps(dict(sorted(seconds.items())), separators=(",", ":")), flush=True)
     print(
         f"===== Combined: Ran {tests_run} tests; skipped={skipped}; failures={failures}; "
         f"errors={errors}; incomplete_modules={incomplete}",

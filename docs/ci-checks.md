@@ -19,8 +19,11 @@ A first job, `changes`, decides this and prints why. A job skipped on purpose co
 `windows-offline` itself is a small job that passes when all Windows shards passed or were skipped on purpose.
 
 The Windows suite runs on three runners at once (`windows-offline (1/3)` to `(3/3)`):
-`scripts/ci_run_tests.py --shard K/N` (or `CI_TEST_SHARD=K/N`) deals the test modules largest first to the share
-with the least total size, so the three shares are the whole suite with no module twice. Every shard installs and runs Ruff
+`scripts/ci_run_tests.py --shard K/N` (or `CI_TEST_SHARD=K/N`) deals the test modules slowest first to the share
+with the least total time, so the three shares are the whole suite with no module twice. The times come from
+`tests/ci_module_seconds.json` (measured on the Windows runners); a module not listed there is estimated from its
+file size. When a shard runs much longer than the others, refresh the file: each shard's log ends with a
+`===== Module seconds: {...}` line; merge the three lines into that file. Every shard installs and runs Ruff
 (some tests need it); only shard 1 runs the other lint and line-ending steps. To run one share locally: `CI_TEST_JOBS=4 python3 scripts/ci_run_tests.py --shard 2/3`.
 
 The jobs are `offline` (Linux, Python 3.10), `offline (latest Python 3.x)` (Linux, the newest Python 3.x, with the same
