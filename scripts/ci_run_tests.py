@@ -211,6 +211,8 @@ def run_modules(modules: Sequence[str]) -> tuple[int, str]:
             environment = hermetic_environment(os.environ, git_config)
             # A module that runs this script again (its own tests) must not start a second parallel run.
             environment["CI_TEST_JOBS"] = "1"
+            # ASHARIF 2026-11-26: the shard belongs to the outer run; a test that calls main() must see the whole suite.
+            environment.pop("CI_TEST_SHARD", None)
             # The forbidden-skip list belongs to the outer run, which checks the skip lines these children print.
             environment.pop("CI_FORBID_SKIP", None)
             environment["PYTHONPATH"] = os.pathsep.join(

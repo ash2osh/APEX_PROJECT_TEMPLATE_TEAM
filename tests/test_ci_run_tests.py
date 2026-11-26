@@ -23,6 +23,21 @@ SKIP_MODULE = "test_b (unittest.loader.ModuleSkipped.test_b) ... skipped 'no Pow
 OK_SKIPPED = "Ran 1 test in 0.0s\n\nOK (skipped=1)\n"
 
 
+# ASHARIF 2026-11-26: a shard CI job sets CI_TEST_SHARD; these tests call main() and must never inherit it, or
+# main() would start a real shard run from inside a test. run_modules also drops it for its children.
+_saved_shard = None
+
+
+def setUpModule():
+    global _saved_shard
+    _saved_shard = os.environ.pop("CI_TEST_SHARD", None)
+
+
+def tearDownModule():
+    if _saved_shard is not None:
+        os.environ["CI_TEST_SHARD"] = _saved_shard
+
+
 class Runner:
     def __init__(self, *results):
         self.results = list(results)
@@ -41,6 +56,7 @@ class CiRunTestsTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         os.environ.pop("CI_TEST_JOBS", None)
         os.environ.pop("CI_FORBID_SKIP", None)
+        os.environ.pop("CI_TEST_SHARD", None)
         self.temporary = tempfile.TemporaryDirectory()
         self.known = Path(self.temporary.name) / "known_flaky.txt"
         self.known.write_text(KNOWN_TEXT, encoding="utf-8")
@@ -457,10 +473,12 @@ class JobsFromEnvironmentTests(unittest.TestCase):
             seen["stdin"] = kwargs["stdin"]
             seen["timeout"] = kwargs["timeout"]
             return Done()
-        with patch.dict(os.environ, {"CI_TEST_JOBS": "4"}), patch("scripts.ci_run_tests.subprocess.run", fake_run):
+        with patch.dict(os.environ, {"CI_TEST_JOBS": "4", "CI_TEST_SHARD": "2/3"}), patch("scripts.ci_run_tests.subprocess.run", fake_run):
             from scripts.ci_run_tests import run_modules
             run_modules(["test_x"])
         self.assertEqual(seen["CI_TEST_JOBS"], "1")
+        # ASHARIF 2026-11-26: a child never inherits the shard, or a test calling main() would run a real shard
+        self.assertNotIn("CI_TEST_SHARD", seen)
         self.assertIs(seen["stdin"], subprocess.DEVNULL)
         self.assertEqual(seen["timeout"], 900)
 
@@ -482,6 +500,7 @@ class ForbiddenSkipTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         os.environ.pop("CI_TEST_JOBS", None)
         os.environ.pop("CI_FORBID_SKIP", None)
+        os.environ.pop("CI_TEST_SHARD", None)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.known = Path(self.temporary.name) / "known.txt"
