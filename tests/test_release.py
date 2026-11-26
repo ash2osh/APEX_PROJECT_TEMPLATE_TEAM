@@ -3132,6 +3132,476 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertEqual(names, ["release-fetch.sql"])
         self.assertEqual(self._run_cli(["status", "status-live-rel", "--live"])[0], 2)
 
+    # ASHARIF 2026-11-26: release adopt (object text, report reader, adopt command)
+
+    def test_object_text_from_file_strips_header_and_grants(self) -> None:
+        bundle_text = (
+            "ALTER SESSION SET PLSQL_CODE_TYPE = INTERPRETED;\n"
+            "CREATE OR REPLACE   PACKAGE BODY APP_CODE.ORDERS_PKG AS\n"
+            "  FUNCTION get_count RETURN NUMBER IS BEGIN RETURN 2; END;\n"
+            "END ORDERS_PKG;\n"
+            "/\n"
+            "GRANT EXECUTE ON APP_CODE.ORDERS_PKG TO APP_LOGIN;\n"
+            "CREATE OR REPLACE PUBLIC SYNONYM ORDERS_PKG FOR APP_CODE.ORDERS_PKG;\n"
+        )
+        got = release._object_text_from_file("PACKAGE BODY", "APP_CODE", bundle_text)
+        self.assertEqual(got, DEV_PKG_SOURCE)
+        self.assertEqual(release.compute_source_sha256(got), release.compute_source_sha256(DEV_PKG_SOURCE))
+        foreign = release._object_text_from_file("PACKAGE BODY", "APP_CODE", "CREATE OR REPLACE PACKAGE BODY OTHER.X AS\nEND;\n/\n")
+        self.assertTrue(foreign.startswith("PACKAGE BODY OTHER.X AS"), foreign)
+
+    def test_object_text_view_stops_at_semicolon(self) -> None:
+        view = (
+            "ALTER SESSION SET PLSQL_CODE_TYPE = INTERPRETED;\n"
+            "CREATE OR REPLACE FORCE VIEW APP_CODE.ORDERS_V (\"ID\", \"LABEL\") AS\n"
+            "  SELECT 1 AS ID,\n"
+            "         'x;y' AS LABEL\n"
+            "    FROM DUAL;\n"
+            "GRANT SELECT ON APP_CODE.ORDERS_V TO APP_LOGIN;\n"
+        )
+        expected = "SELECT 1 AS ID,\n         'x;y' AS LABEL\n    FROM DUAL\n"
+        self.assertEqual(release._object_text_from_file("VIEW", "APP_CODE", view), expected)
+        # The live side for a view is DBMS_METADATA DDL; it reduces to the same query text.
+        live_ddl = "CREATE OR REPLACE FORCE VIEW APP_CODE.ORDERS_V (\"ID\", \"LABEL\") AS\n  SELECT 1 AS ID,\n         'x;y' AS LABEL\n    FROM DUAL;\n"
+        self.assertEqual(release._object_text_from_file("VIEW", "APP_CODE", live_ddl), expected)
+
+    def test_object_text_trigger_matches_all_source(self) -> None:
+        bundle_text = (
+            "CREATE OR REPLACE TRIGGER APP_CODE.ORDERS_TRG\n"
+            "BEFORE INSERT ON APP_CODE.ORDERS\n"
+            "FOR EACH ROW\n"
+            "BEGIN\n"
+            "  NULL;\n"
+            "END;\n"
+            "/\n"
+            "ALTER TRIGGER APP_CODE.ORDERS_TRG ENABLE;\n"
+        )
+        all_source = (
+            "TRIGGER ORDERS_TRG\n"
+            "BEFORE INSERT ON APP_CODE.ORDERS\n"
+            "FOR EACH ROW\n"
+            "BEGIN\n"
+            "  NULL;\n"
+            "END;\n"
+        )
+        self.assertEqual(release._object_text_from_file("TRIGGER", "APP_CODE", bundle_text), all_source)
+        self.assertEqual(release._object_text_from_file("TRIGGER", "APP_CODE", all_source), all_source)
+
+    def test_read_report_ok(self) -> None:
+        bundle = self._make_state_bundle("report-rel")
+        code, out, err = self._stage("report-rel")
+        self.assertEqual(code, 0, err)
+        report_path = Path(re.search(r"Report:\s*(.+\.md)", out).group(1).strip())
+        if not report_path.is_absolute():
+            report_path = self.root / report_path
+        parsed = release._read_run_report(report_path, slug="report-rel", env="staging")
+        self.assertEqual(parsed["outcome"], "SUCCEEDED")
+        self.assertEqual(parsed["apps"], [])
+        self.assertEqual(parsed["identities"]["APP_CODE"],
+                         {"dbUniqueName": "STAGEDB_UNQ", "conName": "STAGEPDB", "user": "APP_LOGIN"})
+        self.assertTrue(bundle.is_dir())
+        synthetic = self.root / "synthetic-report.md"
+        synthetic.write_text(_synthetic_report("report-rel", "staging", apps="130, 131"), encoding="utf-8")
+        parsed = release._read_run_report(synthetic, slug="report-rel", env="staging")
+        self.assertEqual(parsed["apps"], [130, 131])
+
+    def test_read_report_refuses_failed_wrong_slug_env(self) -> None:
+        self._make_state_bundle("report-refuse-rel")
+        path = self.root / "report.md"
+        cases = {
+            "FAILED outcome": (_synthetic_report("report-refuse-rel", "staging", outcome="FAILED"), "report-refuse-rel", "staging"),
+            "other slug": (_synthetic_report("other-rel", "staging"), "report-refuse-rel", "staging"),
+            "other env": (_synthetic_report("report-refuse-rel", "dev"), "report-refuse-rel", "staging"),
+        }
+        for label, (text, slug, env) in cases.items():
+            with self.subTest(label):
+                path.write_text(text, encoding="utf-8", newline="\n")
+                with self.assertRaises(release.ReleaseError):
+                    release._read_run_report(path, slug=slug, env=env)
+
+    def _adopt_code_object(self, live_source: str = DEV_PKG_SOURCE) -> None:
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["PACKAGE BODY:ORDERS_PKG"] = {"source": live_source}
+        self._write_state(state)
+
+    def _adopt_state(self, slug: str) -> dict:
+        return json.loads((self.root / "releases" / slug / "state" / "staging.json").read_text(encoding="utf-8"))
+
+    def _head(self) -> str:
+        proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, stdin=subprocess.DEVNULL,
+                              check=True, capture_output=True)
+        return proc.stdout.decode("utf-8").strip()
+
+    def _write_report(self, slug: str, **fields) -> Path:
+        path = self.root / "scratch" / "release-reports" / f"{slug}-staging-test.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_synthetic_report(slug, "staging", **fields), encoding="utf-8", newline="\n")
+        return path
+
+    def test_adopt_records_matching_code_only_without_report(self) -> None:
+        bundle = self._make_state_bundle("adopt-code-rel")
+        self._adopt_code_object()
+        self._reset_calls()
+        code, out, err = self._run_cli(["adopt", "adopt-code-rel", "--env", "staging"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("adopted (live-source): 02-code/orders_pkg_package_body.sql", out)
+        self.assertIn("not proven: 01-ddl/001-add-col.sql", out)
+        self.assertIn("Next: commit releases/adopt-code-rel/state/staging.json", out)
+        st = self._adopt_state("adopt-code-rel")
+        self.assertEqual(set(st["steps"]), {"02-code/orders_pkg_package_body.sql"})
+        entry = st["steps"]["02-code/orders_pkg_package_body.sql"]
+        self.assertEqual(entry["sha256"], release.text_sha256((bundle / "02-code" / "orders_pkg_package_body.sql").read_text(encoding="utf-8")))
+        self.assertEqual(entry["liveSha256"], release.compute_source_sha256(DEV_PKG_SOURCE))
+        self.assertEqual(entry["adopted"]["by"], "live-source")
+        self.assertEqual(st["apps"], {})
+        self.assertEqual(st["lastRun"]["mode"], "adopt")
+        self.assertEqual((st["lastRun"]["adopted"], st["lastRun"]["notProven"]), (1, 1))
+        self.assertEqual(json.loads((bundle / "release.json").read_text(encoding="utf-8"))["status"], "draft")
+        self.assertEqual({c["driverName"] for c in self._read_state()["calls"]}, {"release-fetch.sql"})
+        self.assertEqual(self._read_state()["appliedSteps"], [])
+
+    def test_adopt_code_with_different_live_source_is_not_proven(self) -> None:
+        self._make_state_bundle("adopt-diff-rel")
+        code, out, err = self._run_cli(["adopt", "adopt-diff-rel", "--env", "staging"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("not proven: 02-code/orders_pkg_package_body.sql (live source differs from the bundle file)", out)
+        self.assertEqual(self._adopt_state("adopt-diff-rel")["steps"], {})
+
+    def test_adopt_with_report_records_ddl_when_objects_exist_and_file_unchanged(self) -> None:
+        bundle = self._make_state_bundle("adopt-ddl-rel")
+        self._adopt_code_object()
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["TABLE:ORDERS"] = {"source": ""}
+        self._write_state(state)
+        self._git_init()
+        self._git_commit_all("bundle")
+        commit = self._head()
+        report = self._write_report("adopt-ddl-rel", commit=commit)
+        code, out, err = self._run_cli(["adopt", "adopt-ddl-rel", "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("adopted (report): 01-ddl/001-add-col.sql", out)
+        st = self._adopt_state("adopt-ddl-rel")
+        ddl = st["steps"]["01-ddl/001-add-col.sql"]
+        self.assertEqual(ddl["adopted"]["by"], "report")
+        self.assertEqual(ddl["commit"], commit)
+        self.assertEqual(ddl["sha256"], release.text_sha256((bundle / "01-ddl" / "001-add-col.sql").read_text(encoding="utf-8")))
+        self.assertNotIn("liveSha256", ddl)
+        self.assertEqual(st["steps"]["02-code/orders_pkg_package_body.sql"]["adopted"]["by"], "live-source")
+        self.assertEqual(st["lastRun"]["reportCommit"], commit)
+        self.assertTrue(st["lastRun"]["report"].endswith("adopt-ddl-rel-staging-test.md"))
+
+    def test_adopt_skips_ddl_changed_after_commit(self) -> None:
+        bundle = self._make_state_bundle("adopt-moved-rel")
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["TABLE:ORDERS"] = {"source": ""}
+        self._write_state(state)
+        self._git_init()
+        self._git_commit_all("bundle")
+        commit = self._head()
+        (bundle / "01-ddl" / "001-add-col.sql").write_text(
+            "ALTER TABLE ORDERS ADD (NOTES VARCHAR2(60));\n", encoding="utf-8", newline="\n")
+        report = self._write_report("adopt-moved-rel", commit=commit)
+        code, out, err = self._run_cli(["adopt", "adopt-moved-rel", "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("not proven: 01-ddl/001-add-col.sql (file differs from Git commit", out)
+        self.assertNotIn("01-ddl/001-add-col.sql", self._adopt_state("adopt-moved-rel")["steps"])
+
+    def test_adopt_ddl_is_not_proven_when_object_missing_or_identity_differs(self) -> None:
+        bundle = self._make_state_bundle("adopt-missing-rel")
+        self._git_init()
+        self._git_commit_all("bundle")
+        commit = self._head()
+        report = self._write_report("adopt-missing-rel", commit=commit)
+        code, out, err = self._run_cli(["adopt", "adopt-missing-rel", "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("not proven: 01-ddl/001-add-col.sql (object missing on staging: APP_CODE.ORDERS)", out)
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["TABLE:ORDERS"] = {"source": ""}
+        self._write_state(state)
+        report = self._write_report("adopt-missing-rel", commit=commit, db="OTHER_UNQ")
+        code, out, err = self._run_cli(["adopt", "adopt-missing-rel", "--env", "staging", "--report", str(report), "--replace"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("not proven: 01-ddl/001-add-col.sql (report identity differs from live APP_CODE)", out)
+        self.assertTrue(bundle.is_dir())
+
+    def test_adopt_records_app_from_report(self) -> None:
+        bundle = self._make_state_bundle("adopt-app-rel", apps=[130])
+        app_dir = self.root / "apps" / "APP_CODE" / "130"
+        (app_dir / "deployments").mkdir(parents=True)
+        (app_dir / "deployments" / "staging.json").write_text("{}\n", encoding="utf-8")
+        (app_dir / "application.apx").write_text("application: 130\n", encoding="utf-8")
+        self._adopt_code_object()
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["TABLE:ORDERS"] = {"source": ""}
+        self._write_state(state)
+        self._git_init()
+        self._git_commit_all("bundle with app")
+        commit = self._head()
+        report = self._write_report("adopt-app-rel", commit=commit, apps="130")
+        code, out, err = self._run_cli(["adopt", "adopt-app-rel", "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("adopted app 130 (report)", out)
+        st = self._adopt_state("adopt-app-rel")
+        self.assertEqual(st["apps"]["130"]["sourceSha256"], release.app_source_sha256(self.root, 130))
+        self.assertEqual(st["apps"]["130"]["adopted"]["by"], "report")
+        self.assertTrue(bundle.is_dir())
+        # An app edited after the report's commit is not proven.
+        (app_dir / "application.apx").write_text("application: 130 changed\n", encoding="utf-8")
+        code, out, err = self._run_cli(["adopt", "adopt-app-rel", "--env", "staging", "--report", str(report), "--replace"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("not proven: app 130 (app source differs from Git commit", out)
+        self.assertNotIn("130", self._adopt_state("adopt-app-rel")["apps"])
+
+    def test_adopt_refuses_prod_and_existing_state(self) -> None:
+        bundle = self._make_state_bundle("adopt-refuse-rel")
+        with self.assertRaises(SystemExit):
+            self._run_cli(["adopt", "adopt-refuse-rel", "--env", "prod"])
+        self.assertEqual(self._run_cli(["adopt", "adopt-refuse-rel", "--env", "staging"])[0], 0)
+        code, _, err = self._run_cli(["adopt", "adopt-refuse-rel", "--env", "staging"])
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+        self.assertEqual(self._run_cli(["adopt", "adopt-refuse-rel", "--env", "staging", "--replace"])[0], 0)
+        self.assertTrue((bundle / "state" / "staging.json").is_file())
+
+    def test_adopt_dry_run_writes_nothing(self) -> None:
+        bundle = self._make_state_bundle("adopt-dry-rel")
+        self._adopt_code_object()
+        before = (bundle / "release.json").read_bytes()
+        code, out, err = self._run_cli(["adopt", "adopt-dry-rel", "--env", "staging", "--dry-run", "--format", "json"])
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out)
+        self.assertTrue(doc["dryRun"])
+        self.assertEqual([item["file"] for item in doc["adopted"]], ["02-code/orders_pkg_package_body.sql"])
+        self.assertEqual(doc["stateFile"], "releases/adopt-dry-rel/state/staging.json")
+        self.assertFalse((bundle / "state").exists())
+        self.assertEqual((bundle / "release.json").read_bytes(), before)
+
+    def test_adopt_then_run_applies_only_unproven(self) -> None:
+        bundle = self._make_state_bundle("adopt-run-rel")
+        self._adopt_code_object()
+        self.assertEqual(self._run_cli(["adopt", "adopt-run-rel", "--env", "staging"])[0], 0)
+        self._reset_calls()
+        code, out, err = self._stage("adopt-run-rel")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._read_state()["appliedSteps"], ["01-ddl/001-add-col.sql"])
+        st = self._adopt_state("adopt-run-rel")
+        self.assertEqual(st["lastRun"]["mode"], "delta")
+        self.assertEqual((st["lastRun"]["applied"], st["lastRun"]["skipped"]), (1, 1))
+        self.assertEqual(json.loads((bundle / "release.json").read_text(encoding="utf-8"))["status"], "staged")
+
+    # ASHARIF 2026-11-26: adopt fixes from the staging dry run (owner prefix, view comments, candidate types,
+    # no-object DDL, git-ignored app files).
+
+    def test_object_text_owner_prefix_dropped_from_first_line_both_sides(self) -> None:
+        file_text = 'CREATE OR REPLACE TRIGGER "T1"\nBEFORE INSERT ON APP_CODE.ORDERS\nBEGIN\n  NULL;\nEND;\n/\n'
+        file_unquoted = "CREATE OR REPLACE TRIGGER T1\nBEFORE INSERT ON APP_CODE.ORDERS\nBEGIN\n  NULL;\nEND;\n/\n"
+        live_quoted = 'TRIGGER "APP_CODE"."T1"\nBEFORE INSERT ON APP_CODE.ORDERS\nBEGIN\n  NULL;\nEND;\n'
+        live_unquoted = "TRIGGER APP_CODE.T1\nBEFORE INSERT ON APP_CODE.ORDERS\nBEGIN\n  NULL;\nEND;\n"
+        live_lower_owner = "TRIGGER app_code.T1\nBEFORE INSERT ON APP_CODE.ORDERS\nBEGIN\n  NULL;\nEND;\n"
+        sha = release.compute_source_sha256
+        pairs = (
+            (live_quoted, file_text),  # TRIGGER "APP_CODE"."T1"  <->  CREATE OR REPLACE TRIGGER "T1"
+            (live_unquoted, file_unquoted),  # TRIGGER APP_CODE.T1  <->  CREATE OR REPLACE TRIGGER T1
+            (live_lower_owner, file_unquoted),  # owner case does not matter
+        )
+        for live, file_form in pairs:
+            with self.subTest(live=live.splitlines()[0]):
+                self.assertEqual(
+                    sha(release._object_text_from_file("TRIGGER", "APP_CODE", live)),
+                    sha(release._object_text_from_file("TRIGGER", "APP_CODE", file_form)),
+                )
+        # Quoting stays as written on each side: a quoted live name does not match an unquoted file name.
+        self.assertNotEqual(
+            sha(release._object_text_from_file("TRIGGER", "APP_CODE", live_quoted)),
+            sha(release._object_text_from_file("TRIGGER", "APP_CODE", file_unquoted)),
+        )
+        # Only the first line loses the owner; a different owner stays; other lines are untouched.
+        self.assertEqual(
+            release._object_text_from_file("TRIGGER", "APP_CODE", live_quoted),
+            'TRIGGER "T1"\nBEFORE INSERT ON APP_CODE.ORDERS\nBEGIN\n  NULL;\nEND;\n',
+        )
+        other = release._object_text_from_file("TRIGGER", "APP_CODE", "TRIGGER OTHER.T1\nBEGIN NULL; END;\n")
+        self.assertEqual(other, "TRIGGER OTHER.T1\nBEGIN NULL; END;\n")
+
+    def test_object_text_view_drops_leading_comments_both_sides(self) -> None:
+        file_text = (
+            'CREATE OR REPLACE FORCE VIEW APP_CODE.V ("ID") AS\n'
+            "-- ASHARIF 2026-11-22: why this view exists;\n"
+            "\n"
+            "/* block\n   comment */\n"
+            "  SELECT 1 AS ID\n"
+            "    FROM DUAL;\n"
+            "GRANT SELECT ON APP_CODE.V TO APP_LOGIN;\n"
+        )
+        live = 'CREATE OR REPLACE FORCE VIEW APP_CODE.V ("ID") AS\n  SELECT 1 AS ID\n    FROM DUAL;\n'
+        expected = "SELECT 1 AS ID\n    FROM DUAL\n"
+        self.assertEqual(release._object_text_from_file("VIEW", "APP_CODE", file_text), expected)
+        self.assertEqual(release._object_text_from_file("VIEW", "APP_CODE", live), expected)
+        same_line = "CREATE OR REPLACE VIEW APP_CODE.V AS -- note\nSELECT 1 AS ID FROM DUAL;\n"
+        self.assertEqual(release._object_text_from_file("VIEW", "APP_CODE", same_line), "SELECT 1 AS ID FROM DUAL\n")
+
+    def test_adopt_ddl_object_present_as_any_candidate_type(self) -> None:
+        # GRANT names one object under several candidate types; a TABLE of that name is enough.
+        bundle = self._make_state_bundle("adopt-any-rel")
+        (bundle / "01-ddl" / "001-add-col.sql").write_text(
+            "GRANT SELECT ON APP_CODE.ORDERS TO APP_LOGIN;\n", encoding="utf-8", newline="\n")
+        self._adopt_code_object()
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["TABLE:ORDERS"] = {"source": ""}
+        self._write_state(state)
+        self._git_init()
+        self._git_commit_all("bundle")
+        report = self._write_report("adopt-any-rel", commit=self._head())
+        code, out, err = self._run_cli(["adopt", "adopt-any-rel", "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("adopted (report): 01-ddl/001-add-col.sql", out)
+        self.assertEqual(self._adopt_state("adopt-any-rel")["steps"]["01-ddl/001-add-col.sql"]["adopted"]["objectCheck"],
+                         "any-type")
+
+    def test_adopt_missing_candidate_message_names_objects_not_types(self) -> None:
+        bundle = self._make_state_bundle("adopt-anymiss-rel")
+        (bundle / "01-ddl" / "001-add-col.sql").write_text(
+            "GRANT SELECT ON APP_CODE.ORDERS TO APP_LOGIN;\n", encoding="utf-8", newline="\n")
+        self._git_init()
+        self._git_commit_all("bundle")
+        report = self._write_report("adopt-anymiss-rel", commit=self._head())
+        code, out, err = self._run_cli(["adopt", "adopt-anymiss-rel", "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("not proven: 01-ddl/001-add-col.sql (object missing on staging: APP_CODE.ORDERS)", out)
+        self.assertNotIn("SEQUENCE", out)
+
+    def test_adopt_explicit_objects_keep_exact_type(self) -> None:
+        bundle = self._make_state_bundle("adopt-exact-rel")
+        (bundle / "01-ddl" / "001-add-col.sql").write_text(
+            "GRANT SELECT ON APP_CODE.ORDERS TO APP_LOGIN;\n", encoding="utf-8", newline="\n")
+        manifest = json.loads((bundle / "release.json").read_text(encoding="utf-8"))
+        manifest["ddl"][0]["objects"] = ["VIEW:ORDERS"]
+        (bundle / "release.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
+        self._adopt_code_object()
+        state = self._read_state()
+        state["envs"]["staging"]["objects"]["TABLE:ORDERS"] = {"source": ""}
+        self._write_state(state)
+        self._git_init()
+        self._git_commit_all("bundle")
+        report = self._write_report("adopt-exact-rel", commit=self._head())
+        code, out, err = self._run_cli(["adopt", "adopt-exact-rel", "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("not proven: 01-ddl/001-add-col.sql (object missing on staging: APP_CODE.ORDERS (VIEW))", out)
+
+    def test_adopt_ddl_with_no_object_is_adopted_by_report(self) -> None:
+        bundle = self._make_state_bundle("adopt-noobj-rel")
+        (bundle / "01-ddl" / "001-add-col.sql").write_text(
+            "INSERT INTO ORDERS (ID) VALUES (1);\n", encoding="utf-8", newline="\n")
+        self._adopt_code_object()
+        self._git_init()
+        self._git_commit_all("bundle")
+        report = self._write_report("adopt-noobj-rel", commit=self._head())
+        code, out, err = self._run_cli(["adopt", "adopt-noobj-rel", "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("adopted (report, no object to check): 01-ddl/001-add-col.sql", out)
+        adopted = self._adopt_state("adopt-noobj-rel")["steps"]["01-ddl/001-add-col.sql"]["adopted"]
+        self.assertEqual((adopted["by"], adopted["objectCheck"]), ("report", "none"))
+
+    def test_adopt_app_ignored_file_does_not_block_untracked_file_does(self) -> None:
+        self._make_state_bundle("adopt-ignore-rel", apps=[130])
+        app_dir = self.root / "apps" / "APP_CODE" / "130"
+        (app_dir / "deployments").mkdir(parents=True)
+        (app_dir / "deployments" / "staging.json").write_text("{}\n", encoding="utf-8")
+        (app_dir / "application.apx").write_text("application: 130\n", encoding="utf-8")
+        self._adopt_code_object()
+        (self.root / ".gitignore").write_text("apex-team-export.json\n", encoding="utf-8", newline="\n")
+        self._git_init()
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.root, stdin=subprocess.DEVNULL, check=True, capture_output=True)
+        self._git_commit_all("bundle with app and ignore rule")
+        report = self._write_report("adopt-ignore-rel", commit=self._head(), apps="130")
+        (app_dir / "apex-team-export.json").write_text("{}\n", encoding="utf-8")  # git-ignored local file
+        code, out, err = self._run_cli(["adopt", "adopt-ignore-rel", "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("adopted app 130 (report)", out)
+        (app_dir / "notes.txt").write_text("untracked\n", encoding="utf-8")  # not ignored
+        code, out, err = self._run_cli([
+            "adopt", "adopt-ignore-rel", "--env", "staging", "--report", str(report), "--replace",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertIn("not proven: app 130 (app source differs from Git commit", out)
+
+    # ASHARIF 2026-11-26: a step that drops an object (also inside EXECUTE IMMEDIATE) must find it absent live.
+    _DROP_TRIGGER_STEP = (
+        "DECLARE\n"
+        "  l_n NUMBER;\n"
+        "BEGIN\n"
+        "  SELECT COUNT(*) INTO l_n\n"
+        "    FROM ALL_TRIGGERS\n"
+        "   WHERE OWNER = 'APP_CODE'\n"
+        "     AND TRIGGER_NAME = 'TRG_X';\n"
+        "  IF l_n > 0 THEN\n"
+        "    EXECUTE IMMEDIATE 'DROP TRIGGER APP_CODE.TRG_X';\n"
+        "  END IF;\n"
+        "END;\n"
+        "/\n"
+    )
+
+    def _adopt_drop_bundle(self, slug: str, ddl_text: str, live_trigger: bool) -> tuple[int, str]:
+        bundle = self._make_state_bundle(slug)
+        (bundle / "01-ddl" / "001-add-col.sql").write_text(ddl_text, encoding="utf-8", newline="\n")
+        self._adopt_code_object()
+        state = self._read_state()
+        if live_trigger:
+            state["envs"]["staging"]["objects"]["TRIGGER:TRG_X"] = {"source": "TRIGGER TRG_X\nEND;\n"}
+        self._write_state(state)
+        self._git_init()
+        self._git_commit_all("bundle")
+        report = self._write_report(slug, commit=self._head())
+        code, out, err = self._run_cli(["adopt", slug, "--env", "staging", "--report", str(report)])
+        self.assertEqual(code, 0, err)
+        return code, out
+
+    def test_adopt_drop_only_step_absent_object_is_adopted(self) -> None:
+        _, out = self._adopt_drop_bundle("adopt-drop-absent-rel", self._DROP_TRIGGER_STEP, live_trigger=False)
+        self.assertIn("adopted (report): 01-ddl/001-add-col.sql", out)
+        step = self._adopt_state("adopt-drop-absent-rel")["steps"]["01-ddl/001-add-col.sql"]
+        self.assertEqual(step["adopted"]["objectCheck"], "any-type")
+
+    def test_adopt_drop_only_step_present_object_is_not_proven(self) -> None:
+        _, out = self._adopt_drop_bundle("adopt-drop-present-rel", self._DROP_TRIGGER_STEP, live_trigger=True)
+        self.assertIn(
+            "not proven: 01-ddl/001-add-col.sql (object still present on staging although the step drops it: APP_CODE.TRG_X)",
+            out,
+        )
+        self.assertNotIn("01-ddl/001-add-col.sql", self._adopt_state("adopt-drop-present-rel")["steps"])
+
+    def test_adopt_drop_and_recreate_absent_object_is_not_proven(self) -> None:
+        recreate = self._DROP_TRIGGER_STEP.replace(
+            "END;\n/\n",
+            "END;\n/\nCREATE OR REPLACE TRIGGER APP_CODE.TRG_X\nBEFORE INSERT ON APP_CODE.ORDERS\n"
+            "BEGIN\n  NULL;\nEND;\n/\n",
+        )
+        _, out = self._adopt_drop_bundle("adopt-recreate-rel", recreate, live_trigger=False)
+        self.assertIn("not proven: 01-ddl/001-add-col.sql (object missing on staging: APP_CODE.TRG_X)", out)
+        self.assertNotIn("01-ddl/001-add-col.sql", self._adopt_state("adopt-recreate-rel")["steps"])
+
+
+def _synthetic_report(slug: str, env: str, *, outcome: str = "SUCCEEDED", commit: str = "0" * 40,
+                      apps: str = "none", schema: str = "APP_CODE", db: str = "STAGEDB_UNQ",
+                      con: str = "STAGEPDB", user: str = "APP_LOGIN") -> str:
+    """A run report in the layout cmd_run writes (see the Target Identities section)."""
+    return "\n".join([
+        f"# Release Report: {slug} ({env})",
+        "",
+        f"- **Outcome:** {outcome}",
+        "- **Status:** draft",
+        f"- **Commit:** `{commit}`",
+        "- **Backup:** `scratch/backups/test-backup`",
+        "- **Completed phases:** preflight, backup, apply, verify, apps",
+        f"- **Apps deployed:** {apps}",
+        "",
+        "## Target Identities",
+        "",
+        f"- `{schema}`: `DB_UNIQUE_NAME={db}`, `CON_NAME={con}`, `USER={user}`, "
+        "before_invalid=0, after_invalid=0, new_invalid=0",
+        "",
+    ])
+
 
 if __name__ == "__main__":
     unittest.main()

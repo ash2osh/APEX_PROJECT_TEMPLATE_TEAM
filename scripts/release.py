@@ -43,6 +43,7 @@ from .local_config import ConfigError, read_project_env
 from .path_utils import PathReparseError, relative_to_root
 from .release_state import (
     PARTIAL_STALE_DAYS,
+    STATE_SCHEMA_VERSION,
     StateError,
     app_dir_conflict,
     app_source_sha256,
@@ -63,7 +64,6 @@ from .release_state import (
     write_state,
 )
 from .sqlcl_session import SqlclError, SqlclTimeout, bash_command, driver_epilogue, run_sqlcl
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 1
@@ -482,6 +482,90 @@ def normalize_source_for_hash(text: str) -> str:
 
 def compute_source_sha256(text: str) -> str:
     return hashlib.sha256(normalize_source_for_hash(text).encode("utf-8")).hexdigest()
+
+
+# ASHARIF 2026-11-26: release adopt compares a bundle file with live source. Both sides are reduced to the
+# text Oracle keeps (see _object_text_from_file) before hashing.
+_ADOPT_IDENT = r'(?:"[^"\n]+"|[A-Za-z][A-Za-z0-9_$#]*)'
+_ADOPT_ALTER_SESSION_RE = re.compile(r"(?im)^[ \t]*ALTER[ \t]+SESSION\b[^\n]*(?:\n|\Z)")
+_ADOPT_PLSQL_END_RE = re.compile(r"(?m)^[ \t]*/[ \t]*$")
+_ADOPT_FILE_TAIL_RE = re.compile(r"(?m)^(?:GRANT|CREATE\s+(?:OR\s+REPLACE\s+)?(?:PUBLIC\s+)?SYNONYM|ALTER\s+TRIGGER)\b")
+_ADOPT_VIEW_END_RE = re.compile(r"(?m);[ \t]*$")
+
+
+def _adopt_create_re(object_type: str) -> re.Pattern[str]:
+    type_pattern = r"\s+".join(re.escape(word) for word in object_type.split())
+    return re.compile(
+        rf"(?im)^[ \t]*CREATE[ \t]+(?:OR[ \t]+REPLACE[ \t]+)?(?:(?:EDITIONABLE|NONEDITIONABLE|FORCE|NOFORCE)[ \t]+)*"
+        rf"{type_pattern}[ \t]+(?:({_ADOPT_IDENT})[ \t]*\.[ \t]*)?({_ADOPT_IDENT})"
+    )
+
+
+def _adopt_view_query(rest: str) -> str:
+    """Text after the view's own AS (the one outside any column list parentheses)."""
+    start = 0
+    depth = 0
+    for token in re.finditer(r"[()]|\bAS\b", rest, re.IGNORECASE):
+        if token.group(0) == "(":
+            depth += 1
+        elif token.group(0) == ")":
+            depth -= 1
+        elif depth == 0:
+            start = token.end()
+            break
+    return rest[start:]
+
+
+def _adopt_first_end(text: str, patterns: Sequence[re.Pattern[str]]) -> int:
+    starts = [m.start() for m in (p.search(text) for p in patterns) if m is not None]
+    return min(starts) if starts else len(text)
+
+
+_ADOPT_LEADING_COMMENT_RE = re.compile(r"\A(?:\s+|--[^\n]*|/\*.*?\*/)*", re.DOTALL)
+
+
+def _adopt_strip_owner(kind: str, schema: str, first_line: str) -> str:
+    """Remove the own-schema owner from the first line, directly before the object name (quoted or not).
+
+    `TRIGGER "APP_CODE"."T1"` and `TRIGGER APP_CODE.T1` both become `TRIGGER "T1"` / `TRIGGER T1`; the name
+    keeps its quoting as written. A different owner, and every other line, is left alone.
+    """
+    kind_pattern = r"\s+".join(re.escape(word) for word in kind.split())
+    owner_pattern = re.compile(
+        rf'(?i)^{kind_pattern}[ \t]+(?:"{re.escape(schema)}"|{re.escape(schema)})[ \t]*\.[ \t]*'
+    )
+    return owner_pattern.sub(lambda _m: kind + " ", first_line, count=1)
+
+
+def _object_text_from_file(object_type: str, schema: str, text: str) -> str:
+    """ASHARIF 2026-11-26: the text Oracle keeps for a bundle file, so it can be hashed against live source.
+
+    Drops ALTER SESSION lines and the CREATE OR REPLACE prefix, cuts a PL/SQL unit at its terminating '/'
+    line (GRANT and synonym lines after it are dropped), and keeps only a VIEW's query: leading comments
+    removed, cut at the first ';' at a line end. The owner is removed from the first line in every case
+    (see _adopt_strip_owner), so a live `TRIGGER "SCHEMA"."T1"` matches a file `CREATE OR REPLACE TRIGGER T1`.
+    ALL_SOURCE has no view rows, so a view's live text is DBMS_METADATA DDL; running it through this function
+    gives the same query text. Live ALL_SOURCE text has no header or terminator and passes through.
+    """
+    kind = " ".join(object_type.upper().split())
+    body = _ADOPT_ALTER_SESSION_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+    head = _adopt_create_re(kind).search(body)
+    if kind == "VIEW":
+        query = _adopt_view_query(body[head.end():]) if head is not None else body
+        query = query[_ADOPT_LEADING_COMMENT_RE.match(query).end():]
+        cut = _adopt_first_end(query, (_ADOPT_VIEW_END_RE, _ADOPT_PLSQL_END_RE))
+        out = query[:cut].strip()
+    else:
+        if head is not None:
+            owner, name = head.group(1), head.group(2)
+            keep_owner = owner is not None and _clean_ddl_ident(owner) != schema.upper()
+            header = f"{kind} {owner}.{name}" if keep_owner else f"{kind} {name}"
+            body = header + body[head.end():]
+        cut = _adopt_first_end(body, (_ADOPT_PLSQL_END_RE, _ADOPT_FILE_TAIL_RE))
+        out = body[:cut].strip()
+    first, sep, rest = out.partition("\n")
+    first = _adopt_strip_owner(kind, schema, re.sub(r"[ \t]+", " ", first))
+    return first + sep + rest + "\n"
 
 
 def _resolve_env_file(repo_root: Path, environ: Mapping[str, str] | None) -> Path | None:
@@ -1871,6 +1955,425 @@ def cmd_status(
                 print(f"drift on {name}: {rel} (changed since our apply)")
         else:
             print(f"drift on {name}: none")
+    return 0
+
+
+# ASHARIF 2026-11-26: release adopt reads the run report that proves DDL, ORDS and app steps. The layout
+# is the one cmd_run writes in its finally block.
+_REPORT_HEADER_RE = re.compile(r"(?m)^# Release Report: (\S+) \((\w+)\)[ \t]*$")
+_REPORT_IDENTITY_RE = re.compile(r"(?m)^- `([^`]+)`: `DB_UNIQUE_NAME=([^`]*)`, `CON_NAME=([^`]*)`, `USER=([^`]*)`")
+
+
+def _report_field(text: str, label: str) -> str | None:
+    match = re.search(rf"(?m)^- \*\*{re.escape(label)}:\*\* (.*)$", text)
+    return match.group(1).strip() if match else None
+
+
+def _read_run_report(path: Path, *, slug: str, env: str) -> dict[str, Any]:
+    """ASHARIF 2026-11-26: parse a run report for this bundle and environment; refuse anything else."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReleaseError(f"cannot read run report {path}: {exc}") from exc
+    header = _REPORT_HEADER_RE.search(text)
+    if header is None:
+        raise ReleaseError(f"{path.name} is not a release run report (no '# Release Report:' heading)")
+    if header.group(1) != slug:
+        raise ReleaseError(f"run report {path.name} is for bundle {header.group(1)!r}, not {slug!r}")
+    if header.group(2) != env:
+        raise ReleaseError(f"run report {path.name} is for --env {header.group(2)}, not {env}")
+    outcome = _report_field(text, "Outcome") or "missing"
+    if outcome != "SUCCEEDED":
+        raise ReleaseError(f"run report {path.name} has outcome {outcome}; only a SUCCEEDED run can be adopted")
+    commit = (_report_field(text, "Commit") or "").strip("`")
+    apps_text = _report_field(text, "Apps deployed") or "none"
+    apps: list[int] = []
+    if apps_text != "none":
+        try:
+            apps = [int(part) for part in apps_text.split(",") if part.strip()]
+        except ValueError as exc:
+            raise ReleaseError(f"run report {path.name} has an unreadable 'Apps deployed' line: {apps_text}") from exc
+    identities: dict[str, dict[str, str]] = {}
+    _, _, identity_section = text.partition("## Target Identities")
+    for schema, db_unique, con_name, user in _REPORT_IDENTITY_RE.findall(identity_section):
+        identities[schema.upper()] = {"dbUniqueName": db_unique, "conName": con_name, "user": user}
+    return {"outcome": outcome, "commit": commit, "apps": apps, "identities": identities}
+
+
+def _git_commit_or_none(repo_root: Path, rev: str | None) -> str | None:
+    if not rev or re.fullmatch(r"[0-9a-fA-F]{4,40}", rev) is None:
+        return None
+    try:
+        proc = _git_run(repo_root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = proc.stdout.decode("utf-8", "replace").strip()
+    return out if proc.returncode == 0 and out else None
+
+
+def _file_at_commit_problem(repo_root: Path, commit: str, repo_rel: str, text: str) -> str | None:
+    """None when the file at `commit` has the same text as today's file, else why it is not proven."""
+    try:
+        committed = _git_cat_file_blob(repo_root, commit, repo_rel).decode("utf-8", "replace")
+    except (ReleaseError, OSError, subprocess.SubprocessError):
+        return f"file not in Git commit {commit[:12]}"
+    if committed.replace("\r\n", "\n") != text.replace("\r\n", "\n"):
+        return f"file differs from Git commit {commit[:12]}"
+    return None
+
+
+def _app_source_at_commit_problem(repo_root: Path, app_id: int, commit: str) -> str | None:
+    """None when the app's source on disk is what `commit` holds: no edits and no untracked files.
+
+    Git-ignored local files (for example an export or a local deployment file) do not count.
+    """
+    apps_dir = repo_root / "apps"
+    candidates = [*apps_dir.glob(f"*/{app_id}"), apps_dir / str(app_id)] if apps_dir.is_dir() else []
+    dirs = sorted({p for p in candidates if p.is_dir() and not p.is_symlink()})
+    if not dirs:
+        return "no app source on disk"
+    paths = [p.relative_to(repo_root).as_posix() for p in dirs]
+    try:
+        diff = _git_run(repo_root, "diff", "--quiet", commit, "--", *paths)
+        status = _git_run(
+            repo_root, "status", "--porcelain", "--untracked-files=all", "--", *paths
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"git unavailable ({exc})"
+    if diff.returncode == 1 or status.stdout.strip():
+        return f"app source differs from Git commit {commit[:12]}"
+    if diff.returncode != 0:
+        return f"git diff failed for app {app_id} (exit {diff.returncode})"
+    return None
+
+
+def _report_identity_problem(report: Mapping[str, Any], schema: str, live: Mapping[str, str]) -> str | None:
+    recorded = report["identities"].get(schema.upper())
+    if recorded is None:
+        return f"report has no identity for {schema}"
+    observed = (live.get("db_unique_name", ""), live.get("con_name", ""), live.get("session_user", ""))
+    expected = (recorded["dbUniqueName"], recorded["conName"], recorded["user"])
+    if tuple(v.upper() for v in observed) != tuple(v.upper() for v in expected):
+        return f"report identity differs from live {schema}"
+    return None
+
+
+# ASHARIF 2026-11-26: a step that drops an object must find it absent live (the staging dry run's
+# TRG_AUD_* trigger, dropped inside PL/SQL). These scans run only in the adopt path; the backup and apply
+# candidates are unchanged. Names are (schema, name) pairs; an unqualified name takes the step's schema.
+_ADOPT_DROP_RE = re.compile(
+    rf"(?is)\bDROP\s+(?:PACKAGE\s+BODY|TYPE\s+BODY|MATERIALIZED\s+VIEW|TABLE|TRIGGER|VIEW|INDEX|SEQUENCE"
+    rf"|SYNONYM|PROCEDURE|FUNCTION|PACKAGE|TYPE)\s+(?:IF\s+EXISTS\s+)?{_DDL_QUALIFIED_IDENT}"
+)
+_ADOPT_CREATE_RE = re.compile(
+    rf"(?is)\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:FORCE|NOFORCE|EDITIONABLE|NONEDITIONABLE|UNIQUE|BITMAP"
+    rf"|GLOBAL\s+TEMPORARY|PRIVATE)\s+)*(?:PACKAGE\s+BODY|TYPE\s+BODY|MATERIALIZED\s+VIEW|VIEW|TRIGGER|INDEX"
+    rf"|SEQUENCE|SYNONYM|PROCEDURE|FUNCTION|PACKAGE|TYPE|TABLE)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_DDL_QUALIFIED_IDENT}"
+)
+
+
+def _adopt_drop_create_names(sql_text: str, default_schema: str) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """(dropped, created) object names the step text drops and creates, whatever their type."""
+    cleaned = _SQL_COMMENT_RE.sub(" ", sql_text)
+    dropped: set[tuple[str, str]] = set()
+    created: set[tuple[str, str]] = set()
+    for pattern, found in ((_ADOPT_DROP_RE, dropped), (_ADOPT_CREATE_RE, created)):
+        for match in pattern.finditer(cleaned):
+            split = _split_ddl_schema_obj(match.group(1), match.group(2), default_schema)
+            if split is not None:
+                found.add(split)
+    return dropped, created
+
+
+# ASHARIF 2026-11-26: returns (missing, still_present). With exact=True (explicit release.json objects) each
+# TYPE:NAME must exist as that type. Otherwise a parsed name is present when any candidate type exists, and a
+# name the step drops without also creating it must be absent (still_present lists the ones that are not).
+def _ddl_objects_missing(
+    named: Mapping[str, Sequence[tuple[str, str]]],
+    fetched_by_schema: Mapping[str, Mapping[tuple[str, str], Mapping[str, Any]]],
+    *,
+    exact: bool,
+    dropped: Collection[tuple[str, str]] = (),
+    created: Collection[tuple[str, str]] = (),
+) -> tuple[list[str], list[str]]:
+    if exact:
+        missing = [
+            f"{schema}.{name} ({obj_type})"
+            for schema, pairs in named.items()
+            for obj_type, name in pairs
+            if fetched_by_schema[schema].get((obj_type, name), {}).get("exists") is not True
+        ]
+        return missing, []
+    types_by_name: dict[tuple[str, str], list[str]] = {}
+    for schema, pairs in named.items():
+        for obj_type, name in pairs:
+            types_by_name.setdefault((schema, name), []).append(obj_type)
+    missing: list[str] = []
+    still_present: list[str] = []
+    for (schema, name), obj_types in types_by_name.items():
+        live = any(fetched_by_schema[schema].get((t, name), {}).get("exists") is True for t in obj_types)
+        if (schema, name) in dropped and (schema, name) not in created:
+            if live:
+                still_present.append(f"{schema}.{name}")
+        elif not live:
+            missing.append(f"{schema}.{name}")
+    return missing, still_present
+
+
+def _repo_ref(repo_root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def cmd_adopt(
+    repo_root: Path,
+    bundle_arg: str,
+    *,
+    env: str,
+    report_arg: str | None,
+    commit_arg: str | None,
+    replace: bool,
+    dry_run: bool,
+    fmt: str,
+    environ: Mapping[str, str] | None,
+    runner: Callable,
+) -> int:
+    """ASHARIF 2026-11-26: record what a DEV or staging database already holds for a bundle that ran before
+    release state existed. One read-only fetch per schema. A step is recorded only when it is proven; anything
+    else is printed as not proven and the next `release run` applies it. release.json is never changed."""
+    if env not in ("dev", "staging"):
+        raise ReleaseUsageError("release adopt supports --env dev or staging only (production records come from the locking run)")
+    slug = _parse_bundle_slug(bundle_arg)
+    bundle_dir = _safe_bundle_dir(repo_root, slug)
+    if not bundle_dir.is_dir():
+        raise ReleaseError(f"release bundle not found: releases/{slug}")
+    manifest, steps, schemas, apps, forbidden = _load_and_validate_manifest(bundle_dir, slug)
+    if manifest.get("status") == "deployed":
+        raise ReleaseError(f"release bundle '{slug}' is already deployed and locked; nothing to adopt")
+    _check_bundle_contents(steps, forbidden)
+    state_rel = f"releases/{slug}/state/{env}.json"
+    if _load_env_state(bundle_dir, slug, env) is not None and not replace:
+        raise ReleaseError(f"{state_rel} already exists; adopt fills an empty record (use --replace to overwrite it)")
+
+    report: dict[str, Any] | None = None
+    report_ref: str | None = None
+    if report_arg:
+        report_path = Path(report_arg)
+        if not report_path.is_absolute():
+            report_path = repo_root / report_path
+        report = _read_run_report(report_path, slug=slug, env=env)
+        report_ref = _repo_ref(repo_root, report_path)
+    head = _git_head_sha(repo_root)
+    requested = commit_arg or (report or {}).get("commit") or ""
+    commit: str | None = None
+    if commit_arg is not None and _git_commit_or_none(repo_root, commit_arg) is None:
+        raise ReleaseError(f"--commit {commit_arg} is not a commit in this repository")
+    if report is not None or commit_arg is not None:
+        commit = _git_commit_or_none(repo_root, requested)
+
+    values = _load_env(repo_root, environ)
+    targets = {schema: _resolve_schema_target(values, env, schema, operation="migration") for schema in schemas}
+    failures: list[str] = []
+    items_by_schema = _collect_step_items(steps, targets, schemas, None, failures)
+    if failures:
+        raise ReleaseError("Adopt refused:\n  - " + "\n  - ".join(failures))
+
+    scratch_root = repo_root / "scratch"
+    scratch_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    identities: dict[str, dict[str, str]] = {}
+    fetched_by_schema: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
+    with _acquire_release_lock(scratch_root / f".release-{slug}.lock", slug):
+        with tempfile.TemporaryDirectory(prefix="release-adopt-", dir=scratch_root) as tmp_dir:
+            for schema in schemas:
+                identity, fetched = _fetch_schema_objects(
+                    runner,
+                    targets[schema],
+                    Path(tmp_dir) / f"adopt-{schema}",
+                    items_by_schema[schema],
+                    environ=values,
+                )
+                identities[schema] = identity
+                fetched_by_schema[schema] = fetched
+
+    at = _utc_now()
+    current, app_shas = _bundle_fingerprints(repo_root, steps, apps)
+    adopted_steps: dict[str, dict[str, Any]] = {}
+    adopted_apps: dict[str, dict[str, Any]] = {}
+    adopted_rows: list[dict[str, str]] = []
+    app_rows: list[dict[str, Any]] = []
+    not_proven: list[dict[str, str]] = []
+    lines: list[str] = []
+    identity_problem = {
+        schema: (_report_identity_problem(report, schema, identities[schema]) if report is not None else None)
+        for schema in schemas
+    }
+
+    def _not_proven(label: str, reason: str) -> None:
+        not_proven.append({"file": label, "reason": reason})
+        lines.append(f"  not proven: {label} ({reason})")
+
+    for step in steps:
+        if step.section == "verify":
+            continue
+        rel = step.rel_file
+        target = targets[step.schema]
+        fetched = fetched_by_schema[step.schema]
+        if step.section == "code":
+            obj = fetched.get(((step.object_type or "").upper(), (step.object_name or "").upper()), {})
+            live_raw = _source_text_for_hash(step.object_type or "", obj) if obj.get("exists") is True else ""
+            file_text = _step_text(step, None)
+            if obj.get("exists") is not True:
+                _not_proven(rel, f"object {step.object_name} ({step.object_type}) does not exist on {env}")
+            elif not live_raw.strip():
+                _not_proven(rel, "live source is empty")
+            elif compute_source_sha256(_object_text_from_file(step.object_type or "", target.schema, file_text)) != (
+                compute_source_sha256(_object_text_from_file(step.object_type or "", target.schema, live_raw))
+            ):
+                _not_proven(rel, "live source differs from the bundle file")
+            else:
+                adopted_steps[rel] = {
+                    "sha256": current[rel],
+                    "liveSha256": compute_source_sha256(live_raw),
+                    "at": at,
+                    "commit": commit or head,
+                    "adopted": {"by": "live-source", "at": at},
+                }
+                adopted_rows.append({"file": rel, "by": "live-source"})
+                lines.append(f"  adopted (live-source): {rel}")
+            continue
+        # ASHARIF 2026-11-26: 01-ddl and 03-ords steps need the run report and every object they name.
+        reason: str | None
+        object_check = "none"
+        if report is None:
+            reason = "no run report: DDL and ORDS steps need --report"
+        elif identity_problem.get(step.schema):
+            reason = identity_problem[step.schema]
+        elif commit is None:
+            reason = f"report commit {requested or 'missing'} is not in this repository"
+        else:
+            reason = _file_at_commit_problem(repo_root, commit, f"releases/{slug}/{rel}", _step_text(step, None))
+            if reason is None:
+                step_failures: list[str] = []
+                named = _collect_step_items([step], targets, schemas, None, step_failures)
+                if step_failures:
+                    reason = "names an object outside the bundle schemas"
+                elif not any(named.values()):
+                    # ASHARIF 2026-11-26: a step that names no object (INSERT/MERGE seed data) is proven by the report alone.
+                    object_check = "none"
+                else:
+                    # ASHARIF 2026-11-26: explicit release.json objects keep their type; parsed candidates
+                    # (one GRANT names several types) count as present when any candidate type exists.
+                    object_check = "exact" if step.objects else "any-type"
+                    # ASHARIF 2026-11-26: names the step drops (and does not re-create) must be absent live.
+                    dropped, created = _adopt_drop_create_names(_step_text(step, None), step.schema)
+                    missing, still_present = _ddl_objects_missing(
+                        named, fetched_by_schema, exact=bool(step.objects), dropped=dropped, created=created
+                    )
+                    problems: list[str] = []
+                    if missing:
+                        problems.append(f"object missing on {env}: " + ", ".join(missing))
+                    if still_present:
+                        problems.append(
+                            f"object still present on {env} although the step drops it: " + ", ".join(still_present)
+                        )
+                    if problems:
+                        reason = "; ".join(problems)
+        if reason is not None:
+            _not_proven(rel, reason)
+            continue
+        adopted_steps[rel] = {
+            "sha256": current[rel],
+            "at": at,
+            "commit": commit,
+            "adopted": {"by": "report", "objectCheck": object_check, "at": at, "report": report_ref},
+        }
+        adopted_rows.append({"file": rel, "by": "report", "objectCheck": object_check})
+        label = "adopted (report, no object to check)" if object_check == "none" else "adopted (report)"
+        lines.append(f"  {label}: {rel}")
+
+    # ASHARIF 2026-11-26: DEV refuses app deploys, so only staging records apps.
+    if env == "staging":
+        for app_id in apps:
+            label = f"app {app_id}"
+            if report is None:
+                reason = "no run report: apps need --report"
+            elif app_id not in report["apps"]:
+                reason = "not in the report's Apps deployed"
+            elif commit is None:
+                reason = f"report commit {requested or 'missing'} is not in this repository"
+            else:
+                reason = _app_source_at_commit_problem(repo_root, app_id, commit)
+            if reason is not None:
+                _not_proven(label, reason)
+                continue
+            adopted_apps[str(app_id)] = {
+                "sourceSha256": app_shas[app_id],
+                "at": at,
+                "adopted": {"by": "report", "at": at, "report": report_ref},
+            }
+            app_rows.append({"app": app_id, "by": "report"})
+            lines.append(f"  adopted app {app_id} (report)")
+
+    run_info = {
+        "at": at,
+        "commit": head,
+        "mode": "adopt",
+        "report": report_ref,
+        "reportCommit": commit,
+        "adopted": len(adopted_steps) + len(adopted_apps),
+        "notProven": len(not_proven),
+        "identities": {
+            schema: {
+                "dbUniqueName": ident.get("db_unique_name", ""),
+                "conName": ident.get("con_name", ""),
+                "user": ident.get("session_user", ""),
+            }
+            for schema, ident in identities.items()
+        },
+    }
+    state = {
+        "schemaVersion": STATE_SCHEMA_VERSION,
+        "slug": slug,
+        "env": env,
+        "lastRun": run_info,
+        "steps": adopted_steps,
+        "apps": adopted_apps,
+    }
+    if not dry_run:
+        write_state(bundle_dir, env, state)
+    if fmt == "json":
+        print(json.dumps({
+            "schemaVersion": SCHEMA_VERSION,
+            "slug": slug,
+            "environment": env,
+            "adopted": adopted_rows,
+            "apps": app_rows,
+            "notProven": not_proven,
+            "stateFile": state_rel,
+            "dryRun": dry_run,
+            "lastRun": run_info,
+        }, indent=2))
+        return 0
+    print(f"Release adopt: {slug} -> {env}{' (dry run: nothing written)' if dry_run else ''}")
+    for schema in schemas:
+        ident = identities[schema]
+        print(
+            f"  Target {schema}: DB_UNIQUE_NAME={ident['db_unique_name']} "
+            f"CON_NAME={ident['con_name']} USER={ident['session_user']}"
+        )
+    for line in lines:
+        print(line)
+    print(
+        f"Adopted {len(adopted_steps)} step(s) and {len(adopted_apps)} app(s); "
+        f"not proven: {len(not_proven)}."
+    )
+    if dry_run:
+        print(f"Dry run: {state_rel} not written.")
+    else:
+        print(f"State file: {state_rel} (written)")
+        print(f"Next: commit {state_rel}")
     return 0
 
 
@@ -4134,7 +4637,7 @@ def cmd_run(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scripts/team.sh release",
-        description="Lean 6-step release bundle workflow (list, new, collect, check, run, status).",
+        description="Lean 6-step release bundle workflow (list, new, collect, check, run, status, adopt).",
     )
     parser.add_argument("--repo-root", type=Path, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="subcommand", required=True, metavar="SUBCOMMAND")
@@ -4169,6 +4672,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument(
         "--resume", action="store_true", help="Plan as `run --resume` would: skip 01-ddl steps a failed run finished"
     )
+
+    # ASHARIF 2026-11-26: adopt records proven steps for a bundle that ran before state existed.
+    p_adopt = sub.add_parser(
+        "adopt", help="Record what a DEV or staging database already holds (read-only; applies nothing)"
+    )
+    p_adopt.add_argument("bundle", help="Release slug or releases/<slug>")
+    p_adopt.add_argument("--env", choices=("dev", "staging"), required=True, help="DEV or staging (prod is refused)")
+    p_adopt.add_argument("--report", dest="report_arg", help="Successful run report; proves DDL, ORDS and app steps")
+    p_adopt.add_argument("--commit", dest="commit_arg", help="Git commit the report's files were at (default: the report's Commit)")
+    p_adopt.add_argument("--replace", action="store_true", help="Overwrite an existing state/<env>.json")
+    p_adopt.add_argument("--dry-run", action="store_true", help="Print what would be recorded; write nothing")
+    p_adopt.add_argument("--format", choices=("text", "json"), default="text")
 
     p_run = sub.add_parser("run", help="Execute a release bundle (zero prompts; requires --confirm-target)")
     p_run.add_argument("bundle", help="Release slug or releases/<slug>")
@@ -4215,6 +4730,19 @@ def main(
         if args.subcommand == "status":
             return cmd_status(
                 repo_root, args.bundle, fmt=args.format, live=args.live, env=args.env, environ=environ, runner=runner
+            )
+        if args.subcommand == "adopt":
+            return cmd_adopt(
+                repo_root,
+                args.bundle,
+                env=args.env,
+                report_arg=args.report_arg,
+                commit_arg=args.commit_arg,
+                replace=args.replace,
+                dry_run=args.dry_run,
+                fmt=args.format,
+                environ=environ,
+                runner=runner,
             )
         if args.subcommand == "collect":
             return cmd_collect(

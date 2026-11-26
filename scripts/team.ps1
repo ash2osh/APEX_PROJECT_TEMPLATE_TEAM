@@ -92,6 +92,8 @@ Commands:
                                               DEV/staging apply only steps changed since state/<env>.json (--resume skips DDL a failed run finished); prod requires a matching staging record
   release status <bundle> [--format text|json] [--live --env <env>]
                                               What each environment holds of a bundle (offline; --live reads drift read-only)
+  release adopt <bundle> --env <dev|staging> [--report <path>] [--commit <sha>] [--replace] [--dry-run] [--format text|json]
+                                              Record what a bundle that ran before release state already holds (read-only; applies nothing)
   dev-test [--plan|--run|--report RUN_ID|--cleanup RUN_ID] [--env dev] [--schema NAME]
            [--suite FILE] [--scenario ID ...] [--format text|json|markdown]
                                               Plan, run, inspect or explicitly clean retained DEV fixtures
@@ -465,10 +467,11 @@ try {
     "release" {
       if ($Arguments.Count -lt 1) { Fail "usage: scripts/team.ps1 release <list|new|collect|check|run> [arguments]" }
       $releaseArguments = @($Arguments)
-      if ($releaseArguments[0] -cin @("collect", "check", "run") -and $releaseArguments.Count -gt 1 -and -not $releaseArguments[1].StartsWith("-")) {
+      if ($releaseArguments[0] -cin @("collect", "check", "run", "adopt") -and $releaseArguments.Count -gt 1 -and -not $releaseArguments[1].StartsWith("-")) {
         $releaseArguments[1] = ConvertTo-MigrationFolderArgument ([string] $releaseArguments[1])
       }
-      if ($releaseArguments[0] -ceq "run") {
+      # ASHARIF 2026-11-26: adopt takes the same --report path as run.
+      if ($releaseArguments[0] -cin @("run", "adopt")) {
         for ($releaseIndex = 1; $releaseIndex -lt $releaseArguments.Count; $releaseIndex++) {
           $releaseValue = [string] $releaseArguments[$releaseIndex]
           if ($releaseValue -ceq "--report" -and $releaseIndex + 1 -lt $releaseArguments.Count) {
