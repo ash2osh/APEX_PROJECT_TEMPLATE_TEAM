@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # ASHARIF 2026-11-26: the full matrix (Windows, newest Python, PowerShell 5.1) runs nightly on main;
+  # a push to main runs only the Linux, macOS and Graphify jobs, since its pull request already ran everything.
+  schedule:
+    - cron: '23 2 * * *'
 
 # A newer commit on a pull request cancels its older run; runs on main always finish.
 concurrency:
@@ -15,6 +19,41 @@ permissions:
   contents: read
 
 jobs:
+  # ASHARIF 2026-11-26: decides how much of the matrix a run needs.
+  #   full=true  : pull requests that change more than Markdown, the nightly run, a manual run
+  #   full=false : a push to main, or a pull request that changes only *.md files
+  # Skipped jobs count as passed for required checks; windows-offline below reports the shards' result.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          full=true
+          if [ "$EVENT" = push ]; then
+            full=false
+            echo "push to main: its pull request ran the full matrix; Windows and the newest Python run nightly"
+          elif [ "$EVENT" = pull_request ]; then
+            files="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+            printf 'changed files:\n%s\n' "$files"
+            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qv '\.md$'; then
+              full=false
+              echo "only Markdown changed: running the Linux suite (it includes the documentation checks), skipping the rest"
+            fi
+          fi
+          echo "full=$full"
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+
   offline:
     runs-on: ubuntu-latest
     steps:
@@ -74,6 +113,8 @@ jobs:
   # interpreter cannot break the suite unnoticed. It is kept out of a matrix so that `offline` keeps its name.
   offline-latest-python:
     name: offline (latest Python 3.x)
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -122,7 +163,16 @@ jobs:
           CI_FORBID_SKIP: '.*'
         run: python3 scripts/ci_run_tests.py -p 'test_*graphify*.py'
 
-  windows-offline:
+  windows-tests:
+    name: windows-offline (${{ matrix.shard }}/3)
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    # ASHARIF 2026-11-26: one Windows runner is saturated by the suite (about 45 minutes of test time on 4
+    # workers took 23 minutes), so three runners share it; scripts/ci_run_tests.py --shard deals the modules.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,15 +183,19 @@ jobs:
         with:
           python-version: '3.10'
       - name: Python syntax
+        if: matrix.shard == 1
         run: python -m compileall -q scripts/ tools/ tests/
       - name: Ruff
+        # Every shard installs Ruff: test_pre_push_check needs it, wherever that module lands.
         run: |
           python -m pip install --disable-pip-version-check --no-input 'ruff>=0.5'
           ruff check scripts tools tests
       - name: Shell syntax
+        if: matrix.shard == 1
         shell: bash
         run: for script in scripts/*.sh; do bash -n "$script"; done
       - name: PowerShell parse
+        if: matrix.shard == 1
         shell: pwsh
         run: |
           $files = @(Get-ChildItem -Path scripts -Filter '*.ps1')
@@ -173,14 +227,17 @@ jobs:
       - name: Behavioral tests
         env:
           CI_TEST_JOBS: '2'
+          CI_TEST_SHARD: ${{ matrix.shard }}/3
           CI_FORBID_SKIP: 'PowerShell .*(not installed|required)|needs PowerShell|requires PowerShell|no PowerShell found'
         run: python scripts/ci_run_tests.py
       - name: Validate the example configuration
+        if: matrix.shard == 1
         shell: bash
         run: |
           export PROJECT_ENV_FILE=.env.example
           bash -c 'source scripts/load_env.sh "$PROJECT_ENV_FILE"'
       - name: JSON and line-ending checks
+        if: matrix.shard == 1
         run: |
           @'
           import json
@@ -197,6 +254,25 @@ jobs:
               raise SystemExit("CRLF files found: " + ", ".join(offenders))
           '@ | python -
 
+
+  # The required check: passes when every shard passed, or when the shards were skipped on purpose.
+  windows-offline:
+    needs: [changes, windows-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Shards passed or were skipped on purpose
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          FULL: ${{ needs.changes.outputs.full }}
+          SHARDS: ${{ needs.windows-tests.result }}
+        run: |
+          echo "changes=$CHANGES full=$FULL windows shards=$SHARDS"
+          if [ "$CHANGES" = success ] && { [ "$SHARDS" = success ] || { [ "$FULL" != true ] && [ "$SHARDS" = skipped ]; }; }; then
+            exit 0
+          fi
+          echo "::error::the Windows shards did not all pass"
+          exit 1
   macos-installer:
     runs-on: macos-latest
     steps:
@@ -215,6 +291,8 @@ jobs:
   # The environment step fails if the engine is not 5.1. A child powershell.exe makes the script's exit code the result.
   windows-powershell-51:
     name: Windows PowerShell 5.1 readiness (fast steps)
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

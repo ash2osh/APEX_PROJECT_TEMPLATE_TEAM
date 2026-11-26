@@ -7,13 +7,25 @@ agreed way to stop that.
 
 ## When CI runs
 
-- On every pull request, once per commit (a newer commit cancels the older run).
-- On every push to `main`, and by hand (`workflow_dispatch`).
+- On every pull request, once per commit (a newer commit cancels the older run): the full matrix.
+- A pull request that changes only Markdown (`*.md`) runs `offline` (its suite includes the documentation checks),
+  `macos-installer` and the cheap checks; the Windows, newest-Python and PowerShell 5.1 jobs are skipped.
+- On every push to `main`: `offline`, `macos-installer` (and Graphify where the template has that job). Its pull
+  request already ran the full matrix on the same merge result.
+- Every night on `main`, and by hand (`workflow_dispatch`): the full matrix.
 - A branch pushed without a pull request runs nothing: open the pull request to get a result.
+
+A first job, `changes`, decides this and prints why. A job skipped on purpose counts as passed for a required check;
+`windows-offline` itself is a small job that passes when all Windows shards passed or were skipped on purpose.
+
+The Windows suite runs on three runners at once (`windows-offline (1/3)` to `(3/3)`):
+`scripts/ci_run_tests.py --shard K/N` (or `CI_TEST_SHARD=K/N`) deals the test modules largest first to the share
+with the least total size, so the three shares are the whole suite with no module twice. Every shard installs and runs Ruff
+(some tests need it); only shard 1 runs the other lint and line-ending steps. To run one share locally: `CI_TEST_JOBS=4 python3 scripts/ci_run_tests.py --shard 2/3`.
 
 The jobs are `offline` (Linux, Python 3.10), `offline (latest Python 3.x)` (Linux, the newest Python 3.x, with the same
 compile and behavioural-test steps but not lint or the other checks), `graphify (pinned set, Python 3.12)`,
-`windows-offline`, `windows-powershell-51` and `macos-installer`. The full suite takes about 10 minutes on Linux and 20 to 30 on Windows.
+`windows-offline`, `windows-powershell-51` and `macos-installer`. The full suite takes about 5 minutes on Linux and, split over three Windows runners, about 5 to 10 on Windows.
 The `windows-powershell-51` job runs the fast steps of `scripts/windows_check.ps1` (all but the tests and the pre-push check) under Windows PowerShell 5.1; see [Windows verification](windows-verification.md).
 
 The `graphify` job runs `scripts/setup_graphify_apx.py`, which builds the project's `.venv-graphify` from the exact set in
