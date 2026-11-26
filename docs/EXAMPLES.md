@@ -32,6 +32,13 @@ git add apps/ && git commit -m "Capture Builder changes to app 100"
 **You should see:** `Exporting Workspace DEMO - application 100:...`, then a
 diff of the `.apx` files that changed.
 
+**Deleted in Builder:** export replaces the whole app folder, so a page, region or
+shared component deleted in Builder shows as a deleted file in `git status`.
+Commit the deletion. Your `deployments/` descriptors are kept (except the
+git-ignored `default.json`, which SQLcl rewrites on every export). If the
+whole app was deleted, export fails with `ORA-20987 ... Application <id> not
+found` and the folder stays: remove `apps/<SCHEMA>/<id>/` by hand and commit.
+
 **If it goes wrong:**
 - `refusing to export over dirty mirror: apps/DEMO/100`: you have uncommitted
   edits to that app. Commit or stash them first; export never overwrites them.
@@ -122,6 +129,15 @@ git add database/ && git commit -m "Refresh database mirror"
 (`PACKAGE=5`, `TRIGGER=12`, ...). The copy lands in `database/DEMO/`, with a folder
 for each object type the schema has (`tables/`, `packages/`, `triggers/`, and
 so on). A type with no objects has no folder. It holds structure only, never data. Never edit it by hand.
+
+**Dropped objects:** each run rebuilds the schema folder, so a dropped table,
+view, package or other object shows as a deleted file in `git status`; a table's
+trigger files go with it, and a type folder left empty disappears. Commit the
+deletion. Some old files stay on purpose: a table or code part that this run
+does not refresh (the schema is listed in only one of those `.env` profiles, or
+`--schema` leaves it out) keeps its committed files until a run that refreshes
+it. A schema removed from `.env` keeps its `database/<SCHEMA>/` folder: remove
+it by hand and commit.
 
 **If it goes wrong:** `refusing to back up over dirty mirror: database/DEMO`
 means you have uncommitted changes there. Commit or discard them first.
