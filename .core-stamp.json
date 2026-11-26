@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "coreCommit": "6744bca01c327d3466ae7ce3785862e5b811392e",
+  "coreCommit": "5b3c1ebe6f91d636c5ce0dd0436dbcb0418b9ac9",
   "files": [
     {
       "path": "scripts/backup_db.ps1",
@@ -704,7 +704,7 @@
     },
     {
       "path": "tests/test_replace_mirror.py",
-      "sha256": "f73303afdbe8d5b32da18cad9ee0df7ef13f3c87f019fd2e39a6242e0d3cb386",
+      "sha256": "290c2b0e8e358db44cde97ab101334356b17352c87c9d3ccd0bed4796549832e",
       "executable": false
     },
     {
